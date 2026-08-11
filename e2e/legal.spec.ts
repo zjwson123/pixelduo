@@ -30,3 +30,10 @@ test("security headers are set on HTML responses", async ({ request }) => {
   expect(headers["x-content-type-options"]).toBe("nosniff");
   expect(headers["x-frame-options"]).toBe("SAMEORIGIN");
 });
+
+test("landing language toggle switches to Chinese", async ({ page }) => {
+  await page.goto("/");
+  await page.locator("button", { hasText: "中文" }).click();
+  await expect(page.locator("h1.serif")).toContainText("双模型");
+  await expect(page.locator("nav.nav-links a", { hasText: "价格" })).toBeVisible();
+});

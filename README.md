@@ -25,6 +25,7 @@
 - **公开 API**：`POST /api/v1/images/generations`（Bearer `pd_live_…` Key 鉴权、按积分计费、每 Key 20 次/分钟限流、同一套安全审核与队列）；Key 管理在 `/account/api`，文档见 [docs/api.md](docs/api.md)
 - **限流规范**：429 响应带 `Retry-After` + `RateLimit-Limit`/`RateLimit-Remaining`
 - **上线就绪**：本地复刻 CI 管道 `./scripts/ci-local.sh`（generate/migrate → tsc → 单测 → 构建 → e2e，`CI-LOCAL PASSED`）；发布运行手册 [docs/release.md](docs/release.md)（env 清单/冒烟命令/监控/回滚）
+- **双语落地页**：首页 EN/中文 一键切换（`components/landing.tsx`，导航/卖点/功能/价格/页脚全量翻译，语言偏好存 localStorage）
 - **内容安全**：前置关键词过滤 + 后置 vision 模型图像审核（`IMAGE_MODERATION=1`，默认 gpt-5.4，命中即拦截 + 自动退款 + 删图）
 - **AI 标识**：免费档 gpt-image-2 图片交付前烘焙 "PixelDuo · AI 生成" 水印（sharp，worker 容器含 Noto CJK 字体）
 - NextAuth v4（邮箱+密码 + **OAuth**，JWT 会话）、bcrypt；**邮箱验证 + 密码找回**（单次令牌存 SHA-256 哈希，24h/1h 过期；注册送 30 积分改为验证后发放，未验证账号禁止生图/签到——防薅羊毛）；**登录防爆破**（Redis 按账号 10 次失败/15 分钟锁定）；**会话吊销**（`User.sessionVersion`，重置密码或 `POST /api/auth/revoke-sessions` 后旧 JWT 全部失效）；**TOTP 双因素认证**（otplib + QR，10 个一次性备用码，两步登录，部分会话被 API/页面级拦截，5 分钟单次预认证票据换真会话）；邮件走 `lib/mail.ts`：未配 `SMTP_URL` 时开发模式打印到服务日志，生产接 SES/SendGrid/Resend 等 SMTP

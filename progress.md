@@ -283,3 +283,9 @@
 - **限流响应头**：`RateLimitResult` 增加 `remaining`（内存/Redis 双实现），`enforceRateLimit` 与 API v1 的 429 统一带 `RateLimit-Limit`/`RateLimit-Remaining` + `Retry-After`
 - **性能**：落地页示例图加 `width/height` + `loading="lazy"`（避免 CLS、降低首屏负载）
 - **验证**：单测 75/75（新增 credits 1 例：14 天窗口 + 仅付费来源 + daysLeft）；e2e 10/10；tsc/build 通过；**容器实测**：有效 Key 连续调 v1 第 21 次返回 429，响应头 `RateLimit-Limit: 20 / RateLimit-Remaining: 0 / Retry-After: 60`；compose 全栈 healthy
+
+## 2026-08-11（双语落地页）
+
+- **中文落地页**：`components/landing.tsx`（客户端组件）承载全部落地页文案并实现 EN/中文切换（导航/英雄区/双引擎/功能/价格/CTA/页脚全量翻译，语言偏好存 `localStorage.pd-lang`）；`app/page.tsx` 保留为薄服务端包装并继续导出 metadata（SEO 不受影响）
+- **e2e**：新增语言切换用例（点"中文"→ 标题含"双模型"、导航出现"价格"）
+- 单测 75/75、e2e 11/11、tsc/build 通过；compose 镜像重建、落地页 200、全栈 healthy
