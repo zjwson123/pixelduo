@@ -37,3 +37,12 @@ test("landing language toggle switches to Chinese", async ({ page }) => {
   await expect(page.locator("h1.serif")).toContainText("双模型");
   await expect(page.locator("nav.nav-links a", { hasText: "价格" })).toBeVisible();
 });
+
+test("landing FAQ and branded 404 render", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.locator("#faq summary", { hasText: "How is billing calculated?" })).toBeVisible();
+
+  await page.goto("/this-page-does-not-exist");
+  await expect(page.locator("h1", { hasText: "404" })).toBeVisible();
+  await expect(page.locator("a", { hasText: "Back to home" })).toBeVisible();
+});

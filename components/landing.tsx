@@ -83,6 +83,20 @@ const DICT = {
     ctaTitle: "Ready to see what you can make?",
     ctaSub: "Beta is free. Create an account and start generating in minutes.",
     openWorkbench: "Open the workbench →",
+    faqKicker: "Questions, answered",
+    faqTitle: "Frequently asked questions",
+    faq1q: "How is billing calculated?",
+    faq1a: "1 credit = $0.01. You always see the exact credit (and dollar) cost before generating — adjust model, quality, or size to fit your budget.",
+    faq2q: "How long do credits last?",
+    faq2a: "Purchased credit packs are valid for 12 months. Monthly subscription quotas roll 30% of unused credits into the next month (one month only).",
+    faq3q: "What is the refund policy?",
+    faq3a: "Unused credit balances may be refunded within a 14-day cooling-off period; images already generated are not refundable. See our Terms for details.",
+    faq4q: "How does content safety work?",
+    faq4a: "PixelDuo is strictly SFW. Prompts are filtered before generation and every image passes an AI safety review — violations are blocked, refunded, and deleted automatically.",
+    faq5q: "Is there an API?",
+    faq5a: "Yes — POST /api/v1/images/generations with an API key from your account page. Billed per image from your credits, with per-key rate limits.",
+    faq6q: "Who owns my images?",
+    faq6a: "You do. Images you generate are stored privately by default and only you can access them (unless you share them yourself).",
     tagline: "Two models. One prompt. Your call.",
     terms: "Terms",
     privacy: "Privacy",
@@ -158,6 +172,20 @@ const DICT = {
     ctaTitle: "准备好看看你能创作什么了吗？",
     ctaSub: "Beta 免费。创建账号，几分钟内开始生成。",
     openWorkbench: "打开工作台 →",
+    faqKicker: "常见问题",
+    faqTitle: "你可能会问",
+    faq1q: "计费怎么算？",
+    faq1a: "1 积分 = $0.01。生成前永远能看到确切的积分与金额成本——按预算调整模型、质量或尺寸即可。",
+    faq2q: "积分有效期多久？",
+    faq2a: "充值积分包 12 个月有效。订阅月配额未用完部分按 30% 结转至下月（仅下月有效）。",
+    faq3q: "退款政策是什么？",
+    faq3a: "14 天冷静期内，未使用的积分余额可申请退款；已生成的图片不可退款。详见条款。",
+    faq4q: "内容安全怎么保证？",
+    faq4a: "PixelDuo 严格 SFW。提示词在生成前过滤，每张图还会经过 AI 安全审核——违规内容自动拦截、退款并删除。",
+    faq5q: "有 API 吗？",
+    faq5a: "有——在账户页创建 API Key 后调用 POST /api/v1/images/generations。按积分计费，每个 Key 独立限流。",
+    faq6q: "图片归谁所有？",
+    faq6a: "归你。生成的图片默认私有存储，只有你能访问（除非你主动分享）。",
     tagline: "双模型。一条提示词。你说了算。",
     terms: "条款",
     privacy: "隐私",
@@ -383,6 +411,25 @@ export default function Landing() {
             <h2 className="serif">{t.ctaTitle}</h2>
             <p>{t.ctaSub}</p>
             <Link className="btn btn-dark" href="/register">{t.openWorkbench}</Link>
+          </div>
+        </section>
+
+        <section id="faq" style={{ background: "var(--surface)", borderTop: "1px solid var(--line)" }}>
+          <div className="wrap" style={{ maxWidth: 820 }}>
+            <div className="sec-head">
+              <div className="sec-kicker">{t.faqKicker}</div>
+              <h2 className="serif">{t.faqTitle}</h2>
+            </div>
+            <div style={{ display: "grid", gap: 12 }}>
+              {[1, 2, 3, 4, 5, 6].map((n) => (
+                <details key={n} style={{ background: "#fff", border: "1px solid var(--line)", borderRadius: 12, padding: "14px 16px" }}>
+                  <summary style={{ fontWeight: 700, cursor: "pointer" }}>
+                    {t[`faq${n}q` as keyof Dict]}
+                  </summary>
+                  <p style={{ margin: "10px 0 0", color: "#5c6273" }}>{t[`faq${n}a` as keyof Dict]}</p>
+                </details>
+              ))}
+            </div>
           </div>
         </section>
       </main>
