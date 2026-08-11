@@ -1,7 +1,30 @@
 import { authenticator } from "otplib";
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
+
+// Sign out, wait for the session to be cleared server-side, then open the
+// login page. signOut() redirects to the callbackUrl ("/") right after the
+// response; on slow runners that redirect can race with (or fail before) our
+// own navigation, so retry until the login form is actually reachable and
+// stays put — this self-heals whichever way the race plays out.
+async function signOutAndOpenLogin(page: Page, email: string, password: string) {
+  await page.locator("button", { hasText: "Sign out" }).click();
+  await page.waitForResponse(
+    (r) => r.url().includes("/api/auth/signout") && r.request().method() === "POST",
+  );
+  await expect(async () => {
+    await page.goto("/login");
+    await expect(page.locator("#email")).toBeVisible({ timeout: 3000 });
+    await expect(page).toHaveURL(/\/login$/, { timeout: 3000 });
+  }).toPass({ timeout: 45_000 });
+  await page.fill("#email", email);
+  await page.fill("#password", password);
+  await page.click('button[type="submit"]');
+  await expect(page.locator("h1", { hasText: "Two-factor authentication" })).toBeVisible();
+}
 
 test("2FA: enable, TOTP login, backup code login, guarded partial session", async ({ page }) => {
+  // Multi-step auth flow; slow CI runners need headroom beyond the default 60s.
+  test.setTimeout(120_000);
   const email = `2fa-${Date.now()}@test.dev`;
   const password = "password123";
 
@@ -30,20 +53,7 @@ test("2FA: enable, TOTP login, backup code login, guarded partial session", asyn
 
   // 3. Sign out, sign back in → 2FA step; protected API is guarded meanwhile.
   await page.goto("/studio");
-  await page.locator("button", { hasText: "Sign out" }).click();
-  // signOut() clears cookies, then asynchronously redirects to the callbackUrl
-  // ("/"). Navigating before that redirect lands can bounce the page back to
-  // "/", so wait for the signout POST response and the redirect to settle
-  // before moving on. Waiting on the response first keeps this deterministic.
-  await page.waitForResponse(
-    (r) => r.url().includes("/api/auth/signout") && r.request().method() === "POST",
-  );
-  await page.waitForURL("**/");
-  await page.goto("/login");
-  await page.fill("#email", email);
-  await page.fill("#password", password);
-  await page.click('button[type="submit"]');
-  await expect(page.locator("h1", { hasText: "Two-factor authentication" })).toBeVisible();
+  await signOutAndOpenLogin(page, email, password);
 
   const meStatus = await page.evaluate(() => fetch("/api/me").then((r) => r.status));
   expect(meStatus).toBe(403); // partial session cannot touch protected APIs
@@ -54,16 +64,7 @@ test("2FA: enable, TOTP login, backup code login, guarded partial session", asyn
   await page.waitForURL("**/studio");
 
   // 5. Sign out and log in again with a backup code.
-  await page.locator("button", { hasText: "Sign out" }).click();
-  await page.waitForResponse(
-    (r) => r.url().includes("/api/auth/signout") && r.request().method() === "POST",
-  );
-  await page.waitForURL("**/");
-  await page.goto("/login");
-  await page.fill("#email", email);
-  await page.fill("#password", password);
-  await page.click('button[type="submit"]');
-  await expect(page.locator("h1", { hasText: "Two-factor authentication" })).toBeVisible();
+  await signOutAndOpenLogin(page, email, password);
   await page.locator("button", { hasText: "Use a backup code instead" }).click();
   await page.fill("#code", backupCodes[0]);
   await page.locator("button", { hasText: "Verify" }).click();

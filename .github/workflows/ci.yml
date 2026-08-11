@@ -29,6 +29,7 @@ jobs:
     env:
       DATABASE_URL: postgresql://pixelduo:pixelduo@localhost:5432/pixelduo_test
       NEXTAUTH_SECRET: ci-secret
+      NEXTAUTH_URL: http://localhost:3100
       REDIS_URL: redis://localhost:6379
     steps:
       - uses: actions/checkout@v4
