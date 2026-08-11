@@ -27,7 +27,17 @@ export async function POST(req: Request) {
     }
     const r = await rateLimit(`apikey:${auth.keyId}`, 20, 60_000);
     if (!r.ok) {
-      return NextResponse.json({ ok: false, error: "rate-limited" }, { status: 429, headers: { "Retry-After": String(r.retryAfterSec) } });
+      return NextResponse.json(
+        { ok: false, error: "rate-limited" },
+        {
+          status: 429,
+          headers: {
+            "Retry-After": String(r.retryAfterSec),
+            "RateLimit-Limit": "20",
+            "RateLimit-Remaining": String(r.remaining ?? 0),
+          },
+        },
+      );
     }
     const body = schema.parse(await req.json());
     const safety = checkPrompt(body.prompt);

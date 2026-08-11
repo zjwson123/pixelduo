@@ -86,7 +86,14 @@ export async function enforceRateLimit(
   if (!r.ok) {
     return NextResponse.json(
       { ok: false, error: "rate-limited" },
-      { status: 429, headers: { "Retry-After": String(r.retryAfterSec) } },
+      {
+        status: 429,
+        headers: {
+          "Retry-After": String(r.retryAfterSec),
+          "RateLimit-Limit": String(limit),
+          "RateLimit-Remaining": String(r.remaining ?? 0),
+        },
+      },
     );
   }
   return null;

@@ -53,11 +53,11 @@ export default function LandingPage() {
                 <div className="compare-imgs">
                   <figure className="compare-item">
                     <span className="model-tag tag-gpt"><i></i>GPT Image 2</span>
-                    <img src="/templates/gpt_medium_1024.png" alt="GPT Image 2 output" />
+                    <img src="/templates/gpt_medium_1024.png" alt="GPT Image 2 output" width={1024} height={1024} loading="lazy" />
                   </figure>
                   <figure className="compare-item">
                     <span className="model-tag tag-seed"><i></i>Seedream 5</span>
-                    <img src="/templates/seedream_1920.png" alt="Seedream 5 output" />
+                    <img src="/templates/seedream_1920.png" alt="Seedream 5 output" width={1920} height={1920} loading="lazy" />
                   </figure>
                 </div>
                 <div className="vs">vs</div>

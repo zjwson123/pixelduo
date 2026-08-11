@@ -276,3 +276,10 @@
 - **HTML 邮件模板**：`lib/mail-html.ts` 提供品牌化内联样式模板（头部 PixelDuo + 深色条、CTA 按钮、金额/积分表格、底部 Terms/Privacy），5 类邮件（验证/重置/收据/退款/到期提醒）全部 text+html 双版本；`Mailer.send` 增加可选 html 参数，SMTP 走 nodemailer `html` 字段，dev 模式日志带 HTML 预览；用户内容（商品名等）一律转义
 - **文案修正**：注册页与落地页移除与现状不符的 "invite only"（注册本已开放）→ "no credit card required"
 - **验证**：单测 74/74（新增 mail-html 5 例：链接/金额/日期文案/转义）；e2e 10/10；tsc/build 通过；**容器实测**：注册触发验证邮件，日志出现 `[mail:dev:html]` 完整 HTML 模板；compose 全栈 healthy
+
+## 2026-08-11（留存横幅 + 限流规范 + 性能）
+
+- **积分到期横幅**：`lib/credits.ts`（`listExpiringCredits`，14 天窗口，仅 PURCHASE/SUBSCRIPTION/ROLLOVER）+ `GET /api/credits/expiring` + 工作台横幅（"X 积分将于 N 天后过期"+ Top up 按钮跳定价页）——与到期邮件形成站内/邮件双触达
+- **限流响应头**：`RateLimitResult` 增加 `remaining`（内存/Redis 双实现），`enforceRateLimit` 与 API v1 的 429 统一带 `RateLimit-Limit`/`RateLimit-Remaining` + `Retry-After`
+- **性能**：落地页示例图加 `width/height` + `loading="lazy"`（避免 CLS、降低首屏负载）
+- **验证**：单测 75/75（新增 credits 1 例：14 天窗口 + 仅付费来源 + daysLeft）；e2e 10/10；tsc/build 通过；**容器实测**：有效 Key 连续调 v1 第 21 次返回 429，响应头 `RateLimit-Limit: 20 / RateLimit-Remaining: 0 / Retry-After: 60`；compose 全栈 healthy

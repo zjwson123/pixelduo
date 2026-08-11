@@ -16,12 +16,14 @@
 - 数据库任务队列（`jobs` 表 + worker），上游 `ImageProvider` 抽象（ModelVerse gpt-image-2 / 火山方舟 doubao-seedream-5-0-260128）
 - **积分过期体系**：`CreditGrant`（充值包 12 个月有效、订阅配额到期失效、免费积分永不过期且优先消耗）；消费 FIFO + 行锁，失败退款精确归还原 grant；**订阅到期自动降级 free**（rollover 任务），**未用完配额 30% 在续费时结转至新周期**（仅次月有效）
 - **到期提醒**：付费积分到期前 7/3/1 天自动发提醒邮件（`lib/reminder.ts` + rollover 容器每日执行，按 grant 去重，发送失败告警不阻塞任务）
+- **到期横幅**：工作台按用户展示"X 积分将于 N 天后过期"（`GET /api/credits/expiring`，14 天窗口，仅付费来源），配合到期邮件双触达
 - **订单收据**：支付 webhook 履约成功后自动发收据邮件（商品/金额/到账积分，重复 webhook 不重复发送，投递失败仅告警不回滚支付）
 - **退款通知**：退款 webhook 处理成功后自动发退款邮件（商品/金额），与积分扣回同一闭环
 - **品牌化 HTML 邮件**：验证/重置/收据/退款/到期提醒全部带内联样式 HTML 模板（`lib/mail-html.ts`，用户内容转义），文本版同步保留
 - **SEO**：全局 metadata（OpenGraph/Twitter）、robots.txt（屏蔽工作台/API/账号区）、sitemap.xml
 - **管理后台**：`/admin`（管理员专属）——用户搜索/升迁/删除、积分调整（补偿发 ADMIN 免费积分 / FIFO 回收，账本留痕）、订单列表、图片审核删除；提权：`npx tsx scripts/promote-admin.ts <email>`
 - **公开 API**：`POST /api/v1/images/generations`（Bearer `pd_live_…` Key 鉴权、按积分计费、每 Key 20 次/分钟限流、同一套安全审核与队列）；Key 管理在 `/account/api`，文档见 [docs/api.md](docs/api.md)
+- **限流规范**：429 响应带 `Retry-After` + `RateLimit-Limit`/`RateLimit-Remaining`
 - **上线就绪**：本地复刻 CI 管道 `./scripts/ci-local.sh`（generate/migrate → tsc → 单测 → 构建 → e2e，`CI-LOCAL PASSED`）；发布运行手册 [docs/release.md](docs/release.md)（env 清单/冒烟命令/监控/回滚）
 - **内容安全**：前置关键词过滤 + 后置 vision 模型图像审核（`IMAGE_MODERATION=1`，默认 gpt-5.4，命中即拦截 + 自动退款 + 删图）
 - **AI 标识**：免费档 gpt-image-2 图片交付前烘焙 "PixelDuo · AI 生成" 水印（sharp，worker 容器含 Noto CJK 字体）
@@ -168,7 +170,7 @@ CI（`.github/workflows/ci.yml`）：Postgres 服务容器下跑单测、构建�
 ## 测试
 
 ```bash
-npm test                 # 单元测试（Postgres 测试库：成本/账本/队列重试/结转/支付/脱敏/账号/OAuth/2FA/管理/API Key/邮件模板/提醒/收据/退款，74 例）
+npm test                 # 单元测试（Postgres 测试库：成本/账本/队列重试/结转/支付/脱敏/账号/OAuth/2FA/管理/API Key/邮件模板/到期提醒/收据/退款，75 例）
 npm run test:e2e         # 端到端（见下）
 ```
 

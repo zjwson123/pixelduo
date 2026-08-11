@@ -3,6 +3,7 @@ import Redis from "ioredis";
 export interface RateLimitResult {
   ok: boolean;
   retryAfterSec?: number;
+  remaining?: number;
 }
 
 export interface RateLimiter {
@@ -19,11 +20,11 @@ export class MemoryRateLimiter implements RateLimiter {
     if (hits.length >= limit) {
       this.buckets.set(key, hits);
       const oldest = hits[0];
-      return { ok: false, retryAfterSec: Math.max(1, Math.ceil((oldest + windowMs - now) / 1000)) };
+      return { ok: false, retryAfterSec: Math.max(1, Math.ceil((oldest + windowMs - now) / 1000)), remaining: 0 };
     }
     hits.push(now);
     this.buckets.set(key, hits);
-    return { ok: true };
+    return { ok: true, remaining: Math.max(0, limit - hits.length) };
   }
 }
 
@@ -71,9 +72,9 @@ export class RedisRateLimiter implements RateLimiter {
       const count = (await this.client.eval(HIT_SCRIPT, 1, rkey, windowSec)) as number;
       if (count > limit) {
         const ttl = await this.client.ttl(rkey);
-        return { ok: false, retryAfterSec: Math.max(1, ttl) };
+        return { ok: false, retryAfterSec: Math.max(1, ttl), remaining: 0 };
       }
-      return { ok: true };
+      return { ok: true, remaining: Math.max(0, limit - count) };
     } catch (e) {
       const now = Date.now();
       if (now - this.lastFallbackLog > 60_000) {

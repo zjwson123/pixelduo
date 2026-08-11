@@ -46,6 +46,14 @@ interface LedgerRow {
   createdAt: string;
 }
 
+interface ExpiringCredit {
+  id: string;
+  source: string;
+  remaining: number;
+  expiresAt: string;
+  daysLeft: number;
+}
+
 interface JobStatus {
   id: string;
   status: string;
@@ -213,6 +221,7 @@ export function Workbench() {
   const [gallery, setGallery] = useState<GalleryImage[]>([]);
   const [ledger, setLedger] = useState<LedgerRow[]>([]);
   const [orders, setOrders] = useState<OrderRow[]>([]);
+  const [expiring, setExpiring] = useState<ExpiringCredit[]>([]);
   const [activeJob, setActiveJob] = useState<JobStatus | null>(null);
   const [assistantOut, setAssistantOut] = useState("");
   const [toast, setToast] = useState("");
@@ -279,6 +288,9 @@ export function Workbench() {
     refreshGallery();
     refreshLedger();
     refreshOrders();
+    api<{ expiring: ExpiringCredit[] }>("/api/credits/expiring")
+      .then((d) => setExpiring(d.expiring))
+      .catch(() => undefined);
     api<{ templates: Template[] }>("/api/templates")
       .then((d) => setTemplates(d.templates))
       .catch(() => undefined);
@@ -440,6 +452,17 @@ export function Workbench() {
         <div className="verify-banner">
           <span>⚠️ Verify your email to unlock generation and your 30 free credits.</span>
           <button className="btn btn-ghost btn-sm" onClick={resendVerification}>Resend email</button>
+        </div>
+      )}
+
+      {expiring.length > 0 && (
+        <div className="expiry-banner">
+          <span>
+            ⏳ {expiring.reduce((acc, g) => acc + g.remaining, 0)} credits expire in{" "}
+            {Math.min(...expiring.map((g) => g.daysLeft))} day
+            {Math.min(...expiring.map((g) => g.daysLeft)) > 1 ? "s" : ""} — use them or top up.
+          </span>
+          <button className="btn btn-ghost btn-sm" onClick={() => setTab("pricing")}>Top up</button>
         </div>
       )}
 
