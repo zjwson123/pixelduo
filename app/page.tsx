@@ -213,6 +213,10 @@ export default function LandingPage() {
         <div className="wrap foot-inner">
           <span className="logo"><span className="logo-mark"><i></i><i></i></span> PixelDuo</span>
           <span className="muted">pixelduo.ai · Two models. One prompt. Your call.</span>
+          <span className="muted">
+            <Link className="link" href="/terms" style={{ marginRight: 14 }}>Terms</Link>
+            <Link className="link" href="/privacy">Privacy</Link>
+          </span>
           <span className="muted" style={{ marginLeft: "auto" }}>© 2026 PixelDuo. Beta product — details may change.</span>
         </div>
       </footer>

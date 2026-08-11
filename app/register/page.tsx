@@ -93,6 +93,9 @@ export default function RegisterPage() {
         <div className="auth-foot">
           Already have an account? <Link className="link" href="/login">Sign in</Link>
         </div>
+        <div className="auth-foot" style={{ marginTop: 10, fontSize: 12 }}>
+          <Link className="link" href="/terms">Terms</Link> · <Link className="link" href="/privacy">Privacy</Link>
+        </div>
       </form>
     </div>
   );

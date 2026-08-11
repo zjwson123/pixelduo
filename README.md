@@ -16,6 +16,7 @@
 - 数据库任务队列（`jobs` 表 + worker），上游 `ImageProvider` 抽象（ModelVerse gpt-image-2 / 火山方舟 doubao-seedream-5-0-260128）
 - **积分过期体系**：`CreditGrant`（充值包 12 个月有效、订阅配额到期失效、免费积分永不过期且优先消耗）；消费 FIFO + 行锁，失败退款精确归还原 grant；**订阅到期自动降级 free**（rollover 任务），**未用完配额 30% 在续费时结转至新周期**（仅次月有效）
 - **到期提醒**：付费积分到期前 7/3/1 天自动发提醒邮件（`lib/reminder.ts` + rollover 容器每日执行，按 grant 去重，发送失败告警不阻塞任务）
+- **订单收据**：支付 webhook 履约成功后自动发收据邮件（商品/金额/到账积分，重复 webhook 不重复发送，投递失败仅告警不回滚支付）
 - **内容安全**：前置关键词过滤 + 后置 vision 模型图像审核（`IMAGE_MODERATION=1`，默认 gpt-5.4，命中即拦截 + 自动退款 + 删图）
 - **AI 标识**：免费档 gpt-image-2 图片交付前烘焙 "PixelDuo · AI 生成" 水印（sharp，worker 容器含 Noto CJK 字体）
 - NextAuth v4（邮箱+密码，JWT 会话）、bcrypt；**邮箱验证 + 密码找回**（单次令牌存 SHA-256 哈希，24h/1h 过期；注册送 30 积分改为验证后发放，未验证账号禁止生图/签到——防薅羊毛）；**登录防爆破**（Redis 按账号 10 次失败/15 分钟锁定）；**会话吊销**（`User.sessionVersion`，重置密码或 `POST /api/auth/revoke-sessions` 后旧 JWT 全部失效）；邮件走 `lib/mail.ts`：未配 `SMTP_URL` 时开发模式打印到服务日志，生产接 SES/SendGrid/Resend 等 SMTP
@@ -144,12 +145,13 @@ CI（`.github/workflows/ci.yml`）：Postgres 服务容器下跑单测、构建�
 ### 合规与数据权
 
 - 文档：[ToS](docs/compliance/terms.md) · [Privacy/GDPR](docs/compliance/privacy.md) · [上线前清单](docs/compliance/launch-checklist.md)
+- 站内合规页：[/terms](/terms) · [/privacy](/privacy)（landing footer 与登录/注册页均已挂链）
 - 数据导出/删除：`POST /api/account/export`、`POST /api/account/delete`（`{"confirm":true}`）
 
 ## 测试
 
 ```bash
-npm test                 # 单元测试（Postgres 测试库：成本/账本/队列重试/结转/支付/脱敏/账号/提醒，55 例）
+npm test                 # 单元测试（Postgres 测试库：成本/账本/队列重试/结转/支付/脱敏/账号/提醒/收据，56 例）
 npm run test:e2e         # 端到端（见下）
 ```
 

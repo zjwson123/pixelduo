@@ -110,3 +110,26 @@ export async function sendCreditExpiryEmail(to: string, daysLeft: number, credit
     ].join("\n"),
   );
 }
+
+export async function sendOrderReceiptEmail(
+  to: string,
+  itemName: string,
+  amountUsd: number,
+  credits: number,
+): Promise<void> {
+  await sendSafely(
+    to,
+    `Your PixelDuo receipt — ${itemName}`,
+    [
+      `Thank you for your PixelDuo purchase!`,
+      "",
+      `Item: ${itemName}`,
+      `Amount: $${amountUsd.toFixed(2)}`,
+      `Credits added: ${credits}`,
+      "",
+      "You can view your order history any time in the workbench.",
+      "",
+      `https://pixelduo.ai/studio`,
+    ].join("\n"),
+  );
+}

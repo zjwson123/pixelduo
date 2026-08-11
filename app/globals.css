@@ -99,6 +99,35 @@ img { display: block; }
 }
 
 .verify-banner .btn { white-space: nowrap; }
+
+.legal {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 48px 22px 80px;
+  font-size: 15px;
+  line-height: 1.7;
+}
+
+.legal-card {
+  background: rgba(255, 255, 255, 0.75);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 18px;
+  padding: 36px 42px;
+  box-shadow: 0 14px 50px rgba(34, 40, 66, 0.08);
+}
+
+.legal h1 { font-family: Georgia, "Songti SC", serif; font-size: 30px; margin: 6px 0 4px; }
+.legal h2 { font-size: 17px; margin: 26px 0 8px; }
+.legal .legal-kicker { margin: 0 0 8px; font-weight: 800; }
+.legal .legal-kicker a, .legal .legal-back a, .legal a { color: #4658c9; text-decoration: none; }
+.legal .legal-meta { color: #7c829a; font-size: 13px; margin: 0 0 8px; }
+.legal ul { margin: 8px 0 8px 20px; padding: 0; }
+.legal li { margin: 6px 0; }
+.legal .legal-back { margin-top: 30px; }
+
+@media (max-width: 640px) {
+  .legal-card { padding: 26px 22px; }
+}
 .page-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
 .page-head h1 { font-size: 24px; font-weight: 700; letter-spacing: -.015em; }
 .page-head p { color: var(--ink-2); font-size: 13.5px; margin-top: 3px; }

@@ -216,3 +216,10 @@
   - **运行时实测（重建镜像后）**：10 次错误密码 → 正确密码仍被拦（`error=CredentialsSignin`，Redis 计数=10）；解锁后登录成功；`/api/me` 200 → `revoke-sessions` → 同 cookie `/api/me` 401；造 2 天后到期 grant → `[remind] sent 1`（邮件 "expire in 3 days"）→ 重跑 `sent 0`（去重生效）
   - e2e 4/4（会话改动无回归）；tsc/build 通过；compose 全栈 healthy
 - 遗留：2FA / OAuth（NextAuth v4 多步登录需要自研预认证态，建议升级 NextAuth v5 或引入 otplib 时一并做）
+
+## 2026-08-11（订单收据 + 合规页面）
+
+- **订单收据邮件**：`lib/mail.ts` 新增 `sendOrderReceiptEmail`；webhook 履约事务提交后发送（商品名/金额/到账积分），`fulfillOrder.alreadyPaid` 保证重复 webhook 不重发，投递失败仅 captureError 告警不回滚支付；事务改为返回收据对象（顺带绕开 TS 闭包窄化坑）
+- **合规页面上线**：新增 `/terms`、`/privacy` 站内页（内容对齐 docs/compliance/terms.md、privacy.md），landing footer + 登录/注册页全部挂链——补齐上线清单"用户协议、隐私政策上线"项
+- **验证**：单测 56/56（新增 receipt 1 例：首次支付发 1 封收据、重复 webhook 不重发）；e2e 5/5（新增 legal.spec：/terms /privacy 渲染 + footer 链接）；tsc/build 通过
+- **容器实测**：stripe 模式 webhook 到账 → web 日志出现 `[mail:dev] ... Your PixelDuo receipt — 1050 credits pack`（Item/Amount/Credits 齐全）；已恢复 mock + 清理测试数据

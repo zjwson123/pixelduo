@@ -53,6 +53,9 @@ export default function LoginPage() {
         <div className="auth-foot">
           No account? <Link className="link" href="/register">Create one — 30 free credits</Link>
         </div>
+        <div className="auth-foot" style={{ marginTop: 10, fontSize: 12 }}>
+          <Link className="link" href="/terms">Terms</Link> · <Link className="link" href="/privacy">Privacy</Link>
+        </div>
       </form>
     </div>
   );
