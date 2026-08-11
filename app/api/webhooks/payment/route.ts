@@ -48,6 +48,12 @@ export async function POST(req: Request) {
           );
           if (!result.alreadyPaid) {
             const user = await tx.user.findUnique({ where: { id: order.userId }, select: { email: true } });
+            if (event.providerOrderId && order.providerOrderId !== event.providerOrderId) {
+              await tx.order.update({
+                where: { id: order.id },
+                data: { providerOrderId: event.providerOrderId },
+              });
+            }
             return {
               kind: "receipt" as const,
               email: user?.email ?? "",

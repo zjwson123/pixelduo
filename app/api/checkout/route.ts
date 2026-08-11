@@ -45,8 +45,9 @@ export async function POST(req: Request) {
       orderId: order.id,
       amountUsd: item.price,
       itemName: "name" in item ? `${item.name} plan` : `${item.credits} credits pack`,
-      successUrl: process.env.PAYMENT_SUCCESS_URL ?? `${base}/studio?paid=1`,
-      cancelUrl: process.env.PAYMENT_CANCEL_URL ?? `${base}/studio`,
+      // Empty env values (e.g. compose defaults) must fall through to defaults.
+      successUrl: process.env.PAYMENT_SUCCESS_URL || `${base}/studio?paid=1`,
+      cancelUrl: process.env.PAYMENT_CANCEL_URL || `${base}/studio`,
       metadata: { orderId: order.id, kind: body.kind, userId },
     });
     await prisma.order.update({

@@ -46,7 +46,10 @@ export class StripeProvider implements PaymentProvider {
     if (!signature) return null;
     try {
       const event = this.stripe.webhooks.constructEvent(rawBody, signature, this.webhookSecret);
-      const obj = event.data.object as Stripe.Checkout.Session & { metadata?: Record<string, string> };
+      const obj = event.data.object as Stripe.Checkout.Session & {
+        metadata?: Record<string, string>;
+        payment_intent?: string;
+      };
       let orderId = obj?.client_reference_id ?? obj?.metadata?.orderId;
       let type: "paid" | "refunded" | null = null;
       if (event.type === "checkout.session.completed" && obj?.payment_status === "paid") type = "paid";
@@ -60,6 +63,9 @@ export class StripeProvider implements PaymentProvider {
         eventId: event.id,
         type,
         orderId,
+        // Refund webhooks reference the payment intent, not our session id —
+        // store the PI id so refunds can resolve the order via providerOrderId.
+        providerOrderId: typeof obj?.payment_intent === "string" ? obj.payment_intent : undefined,
         raw: event,
       };
     } catch {
