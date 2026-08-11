@@ -65,7 +65,16 @@ describe("worker retry / DLQ / recovery", () => {
     expect(after.status).toBe("queued"); // retried with backoff, not dead
     expect(after.nextAttemptAt!.getTime()).toBeGreaterThan(Date.now());
 
-    // claimNextJob picks the oldest DUE job and marks it running
+    // claimNextJob picks the oldest DUE job and marks it running. Create a
+    // fresh due job so the assertion never depends on leftovers from other
+    // parallel test files (which was flaky in CI).
+    await createGenerationJob({
+      userId,
+      model: "seedream",
+      quality: "medium",
+      count: 1,
+      prompt: "due job",
+    });
     const claimed = await claimNextJob("test-worker");
     expect(claimed).not.toBeNull();
     expect(claimed?.status).toBe("running");
