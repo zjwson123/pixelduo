@@ -10,6 +10,7 @@ import { POST as resetPOST } from "../app/api/auth/reset-password/route";
 let userId: string;
 let email: string;
 let ipSeq = 100;
+const origVerifyAuto = process.env.EMAIL_VERIFY_AUTO;
 
 function jsonRequest(url: string, body: unknown): Request {
   return new Request(url, {
@@ -20,11 +21,15 @@ function jsonRequest(url: string, body: unknown): Request {
 }
 
 beforeAll(async () => {
+  // Deterministic: this suite exercises the pending-verification flow.
+  delete process.env.EMAIL_VERIFY_AUTO;
   // Clean previous runs of this suite.
   await prisma.user.deleteMany({ where: { email: { contains: "@authflow.test" } } });
 });
 
 afterAll(async () => {
+  if (origVerifyAuto) process.env.EMAIL_VERIFY_AUTO = origVerifyAuto;
+  else delete process.env.EMAIL_VERIFY_AUTO;
   await prisma.user.deleteMany({ where: { email: { contains: "@authflow.test" } } });
   await prisma.$disconnect();
 });

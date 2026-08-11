@@ -21,3 +21,12 @@ test("robots and sitemap are published", async ({ request }) => {
   expect(sitemap.status()).toBe(200);
   expect(await sitemap.text()).toContain("<urlset");
 });
+
+test("security headers are set on HTML responses", async ({ request }) => {
+  const res = await request.get("http://localhost:3100/");
+  const headers = res.headers();
+  expect(headers["content-security-policy"]).toContain("default-src 'self'");
+  expect(headers["strict-transport-security"]).toBeTruthy();
+  expect(headers["x-content-type-options"]).toBe("nosniff");
+  expect(headers["x-frame-options"]).toBe("SAMEORIGIN");
+});

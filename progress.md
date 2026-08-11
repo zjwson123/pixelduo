@@ -261,3 +261,12 @@
 - **账户 Key 管理**：`POST/GET /api/account/keys`、`POST /api/account/keys/:id/revoke`；`/account/api` 页面（创建→仅一次展示+复制、列表前缀/最近使用/状态、吊销），工作台右上角 API Keys 入口
 - **文档**：`docs/api.md`（curl 示例、参数、轮询、错误码、Key 管理）
 - **验证**：单测 68/68（新增 apikey 2 例：哈希存储/前缀、鉴权/吊销/坏 key 拒绝）；e2e 9/9（新增 api-keys.spec：页面建 Key → Bearer 调 generations → 轮询 done + 1 图 → UI 吊销 → 401）；tsc/build 通过；**容器实测**：无 key/坏 key 调 v1 均 401；compose 全栈 healthy
+
+## 2026-08-11（上线就绪收尾）
+
+- **本地 CI 复刻**：`scripts/ci-local.sh` 按 GitHub Actions 分作业环境跑完整管道（prisma generate/migrate → tsc → 单测（unset EMAIL_VERIFY_AUTO，对齐 CI test-unit 作业）→ 生产构建 → seed + next start + worker → e2e（EMAIL_VERIFY_AUTO=1））；**实跑输出 `CI-LOCAL PASSED`**（69 单测 + 10 e2e）
+- **发布运行手册** `docs/release.md`：env/密钥清单、部署、上线后冒烟命令（health/robots/安全头/注册验证/支付沙箱/API Key/管理台）、监控告警、回滚、上线首周观察项
+- **安全头 e2e**：`/` 响应断言 CSP/HSTS/nosniff/X-Frame-Options
+- **日志脱敏抽查**：observability 单测新增 redactSensitive 断言（sk-/AKIA/Bearer/预签名串全部打码）
+- **修复**：auth-flow 单测对 `EMAIL_VERIFY_AUTO` 环境依赖不确定——测试内强制删除该变量（恢复原值），ci-local 按 CI 分阶段设置，单测与 e2e 两不误
+- 单测 69/69、e2e 10/10、`CI-LOCAL PASSED`；compose 全栈 healthy
