@@ -1,0 +1,202 @@
+# Single-VPS production: everything self-hosted behind Caddy HTTPS.
+# One command: docker compose -f docker-compose.single.yml up -d --build
+# Requires (export or .env): CADDY_DOMAIN, NEXTAUTH_SECRET, NEXTAUTH_URL,
+# MODELVERSE_IMAGE_API_KEY, ARK_IMAGE_API_KEY, DEEPSEEK_API_KEY,
+# VISION_MODERATION_API_KEY (+ BASE_URL), PAYMENT_PROVIDER + keys,
+# SMTP_URL, EMAIL_FROM, SENTRY_DSN, REDIS_PASSWORD, MINIO_ROOT_USER/PASSWORD.
+
+x-appenv: &appenv
+  DATABASE_URL: postgresql://pixelduo:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@db:5432/pixelduo
+  REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379
+  NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?set NEXTAUTH_SECRET}
+  NEXTAUTH_URL: ${NEXTAUTH_URL:?set NEXTAUTH_URL, e.g. https://pixelduo.ai}
+  HOSTNAME: 0.0.0.0
+  PAYMENT_PROVIDER: ${PAYMENT_PROVIDER:?set PAYMENT_PROVIDER (stripe|paddle)}
+  STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+  STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+  PADDLE_API_KEY: ${PADDLE_API_KEY:-}
+  PADDLE_ENVIRONMENT: ${PADDLE_ENVIRONMENT:-production}
+  PADDLE_WEBHOOK_SECRET: ${PADDLE_WEBHOOK_SECRET:-}
+  STORAGE_DRIVER: s3
+  S3_ENDPOINT: http://storage:9000
+  S3_REGION: us-east-1
+  S3_BUCKET: pixelduo
+  S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER}
+  S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD}
+  S3_FORCE_PATH_STYLE: "true"
+  SMTP_URL: ${SMTP_URL:?set SMTP_URL}
+  EMAIL_FROM: ${EMAIL_FROM:-PixelDuo <no-reply@pixelduo.ai>}
+  EMAIL_VERIFY_AUTO: "0"
+  SENTRY_DSN: ${SENTRY_DSN:-}
+  SENTRY_ENVIRONMENT: production
+  IMAGE_MODERATION: "1"
+  VISION_MODERATION_MODEL: ${VISION_MODERATION_MODEL:-gpt-5.4}
+  VISION_MODERATION_BASE_URL: ${VISION_MODERATION_BASE_URL:-}
+  VISION_MODERATION_API_KEY: ${VISION_MODERATION_API_KEY:?set VISION_MODERATION_API_KEY}
+  MODELVERSE_IMAGE_API_KEY: ${MODELVERSE_IMAGE_API_KEY:?set MODELVERSE_IMAGE_API_KEY}
+  ARK_IMAGE_API_KEY: ${ARK_IMAGE_API_KEY:?set ARK_IMAGE_API_KEY}
+  DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    ports: ["80:80", "443:443", "443:443/udp"]
+    environment:
+      CADDY_DOMAIN: ${CADDY_DOMAIN:?set CADDY_DOMAIN, e.g. pixelduo.ai}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [web]
+    restart: unless-stopped
+
+  migrate:
+    build: { context: ., target: worker }
+    command: npx prisma migrate deploy
+    environment: *appenv
+    depends_on:
+      db: { condition: service_healthy }
+    restart: "no"
+
+  web:
+    build: { context: ., target: web }
+    environment: *appenv
+    expose: ["3000"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  worker:
+    build: { context: ., target: worker }
+    command: npx tsx scripts/worker.ts
+    environment:
+      <<: *appenv
+      MOCK_IMAGE_PROVIDER: "0"
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    restart: unless-stopped
+
+  rollover:
+    build: { context: ., target: worker }
+    command: sh -c "while true; do npx tsx scripts/rollover.ts; npx tsx scripts/expire.ts; npx tsx scripts/remind.ts; sleep 86400; done"
+    environment: *appenv
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    restart: unless-stopped
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: pixelduo
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: pixelduo
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pixelduo -d pixelduo"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD}"]
+    volumes: [redisdata:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  storage:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD}
+    volumes: [miniodata:/data]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  init-storage:
+    image: minio/mc:latest
+    entrypoint: ["/bin/sh", "-c"]
+    depends_on:
+      storage: { condition: service_healthy }
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    command: >
+      'mc alias set local http://storage:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD} >/dev/null &&
+       mc mb -p local/pixelduo || true &&
+       mc anonymous set none local/pixelduo &&
+       echo "[init-storage] bucket ready"'
+    restart: "no"
+
+  backup:
+    image: postgres:16-alpine
+    environment:
+      PGHOST: db
+      PGUSER: pixelduo
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: pixelduo
+      BACKUP_KEEP: "14"
+    volumes: [./backups:/backups]
+    depends_on:
+      db: { condition: service_healthy }
+    command: >
+      sh -c 'while true; do
+        STAMP=$$(date +%Y%m%d-%H%M%S);
+        pg_dump -Fc -f /backups/pixelduo-$${STAMP}.dump.gz;
+        ls -1t /backups/pixelduo-*.dump.gz | tail -n +$$((BACKUP_KEEP + 1)) | while read -r f; do rm -f /backups/$$f; done;
+        echo "[backup] $${STAMP} written";
+        sleep 86400;
+      done'
+    restart: unless-stopped
+
+  backup-objects:
+    image: minio/mc:latest
+    entrypoint: ["/bin/sh", "-c"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      BACKUP_KEEP: "7"
+      BACKUP_TARGET_ENDPOINT: ${BACKUP_TARGET_ENDPOINT:-}
+      BACKUP_TARGET_ACCESS_KEY_ID: ${BACKUP_TARGET_ACCESS_KEY_ID:-}
+      BACKUP_TARGET_SECRET_ACCESS_KEY: ${BACKUP_TARGET_SECRET_ACCESS_KEY:-}
+      BACKUP_TARGET_BUCKET: ${BACKUP_TARGET_BUCKET:-}
+    volumes: [./backups:/backups]
+    depends_on:
+      storage: { condition: service_healthy }
+    command: >
+      'while true; do
+        mc alias set src http://storage:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD} >/dev/null;
+        STAMP=$$(date +%Y%m%d-%H%M%S);
+        mc mirror --overwrite --remove src/pixelduo /backups/objects/$${STAMP};
+        ls -1t /backups/objects/ | tail -n +$$((BACKUP_KEEP + 1)) | while read -r f; do rm -rf /backups/objects/$$f; done;
+        if [ -n "$${BACKUP_TARGET_ENDPOINT}" ]; then
+          mc alias set tgt $${BACKUP_TARGET_ENDPOINT} $${BACKUP_TARGET_ACCESS_KEY_ID} $${BACKUP_TARGET_SECRET_ACCESS_KEY} >/dev/null;
+          mc mirror --overwrite --remove src/pixelduo tgt/$${BACKUP_TARGET_BUCKET};
+        fi;
+        echo "[backup-objects] $${STAMP} mirrored";
+        sleep 86400;
+      done'
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:
+  caddy_data:
+  caddy_config:
