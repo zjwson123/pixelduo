@@ -1,0 +1,84 @@
+# Production deployment: HTTPS (Caddy) + managed services (Postgres/Redis/S3).
+# Build images locally first: docker compose build web worker rollover
+# then: docker compose -f docker-compose.prod.yml up -d
+name: pixelduo-prod
+
+x-appenv: &appenv
+  DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
+  REDIS_URL: ${REDIS_URL:?set REDIS_URL}
+  NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?set NEXTAUTH_SECRET}
+  NEXTAUTH_URL: ${NEXTAUTH_URL:?set NEXTAUTH_URL, e.g. https://pixelduo.ai}
+  SMTP_URL: ${SMTP_URL:-}
+  EMAIL_FROM: ${EMAIL_FROM:-}
+  EMAIL_VERIFY_AUTO: "0"
+  PAYMENT_PROVIDER: ${PAYMENT_PROVIDER:-mock}
+  STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+  STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+  PADDLE_API_KEY: ${PADDLE_API_KEY:-}
+  PADDLE_ENVIRONMENT: ${PADDLE_ENVIRONMENT:-sandbox}
+  PADDLE_WEBHOOK_SECRET: ${PADDLE_WEBHOOK_SECRET:-}
+  PAYMENT_SUCCESS_URL: ${PAYMENT_SUCCESS_URL:-}
+  PAYMENT_CANCEL_URL: ${PAYMENT_CANCEL_URL:-}
+  STORAGE_DRIVER: s3
+  S3_ENDPOINT: ${S3_ENDPOINT:?set S3_ENDPOINT (public URL, e.g. R2/S3)}
+  S3_REGION: ${S3_REGION:-us-east-1}
+  S3_BUCKET: ${S3_BUCKET:?set S3_BUCKET}
+  S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?set S3_ACCESS_KEY_ID}
+  S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?set S3_SECRET_ACCESS_KEY}
+  S3_FORCE_PATH_STYLE: "false"
+  SENTRY_DSN: ${SENTRY_DSN:-}
+  SENTRY_ENVIRONMENT: production
+  IMAGE_MODERATION: ${IMAGE_MODERATION:-1}
+  VISION_MODERATION_MODEL: ${VISION_MODERATION_MODEL:-gpt-5.4}
+  VISION_MODERATION_BASE_URL: ${VISION_MODERATION_BASE_URL:-}
+  VISION_MODERATION_API_KEY: ${VISION_MODERATION_API_KEY:-}
+  MODELVERSE_IMAGE_API_KEY: ${MODELVERSE_IMAGE_API_KEY:-}
+  ARK_IMAGE_API_KEY: ${ARK_IMAGE_API_KEY:-}
+  DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+  HOSTNAME: 0.0.0.0
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      CADDY_DOMAIN: ${CADDY_DOMAIN:-localhost}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - web
+    restart: unless-stopped
+
+  web:
+    image: ${IMAGE_WEB:-image-gen-web:latest}
+    environment: *appenv
+    expose:
+      - "3000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  worker:
+    image: ${IMAGE_WORKER:-image-gen-worker:latest}
+    environment:
+      <<: *appenv
+      MOCK_IMAGE_PROVIDER: "0"
+    restart: unless-stopped
+
+  rollover:
+    image: ${IMAGE_WORKER:-image-gen-worker:latest}
+    command: sh -c "while true; do npx tsx scripts/rollover.ts; npx tsx scripts/expire.ts; sleep 86400; done"
+    environment: *appenv
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:

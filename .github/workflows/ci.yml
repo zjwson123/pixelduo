@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test-unit:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: pixelduo
+          POSTGRES_PASSWORD: pixelduo
+          POSTGRES_DB: pixelduo_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U pixelduo -d pixelduo_test"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://pixelduo:pixelduo@localhost:5432/pixelduo_test
+      NEXTAUTH_SECRET: ci-secret
+      REDIS_URL: redis://localhost:6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npx prisma migrate deploy
+      - run: npm test
+
+  build:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgresql://pixelduo:pixelduo@localhost:5432/pixelduo
+      NEXTAUTH_SECRET: ci-secret
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npx tsc --noEmit
+      - run: npm run build
+
+  e2e:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: pixelduo
+          POSTGRES_PASSWORD: pixelduo
+          POSTGRES_DB: pixelduo_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U pixelduo -d pixelduo_test"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://pixelduo:pixelduo@localhost:5432/pixelduo_test
+      NEXTAUTH_SECRET: ci-secret
+      REDIS_URL: redis://localhost:6379
+      MOCK_IMAGE_PROVIDER: "1"
+      EMAIL_VERIFY_AUTO: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npx prisma migrate deploy
+      - run: npx tsx prisma/seed.ts
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - name: Start app + worker
+        run: |
+          npx next start -p 3100 &
+          npx tsx scripts/worker.ts &
+          sleep 8
+      - name: Wait for health
+        run: |
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:3100/api/health && break || sleep 2
+          done
+      - run: npx playwright test

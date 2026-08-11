@@ -1,0 +1,16 @@
+node_modules
+.next
+.git
+.DS_Store
+data
+backups
+*.db
+*.db-journal
+prisma/*.db
+prisma/*.db-journal
+.env
+test-results
+playwright-report
+coverage
+research/darktest
+designs/pixelduo/preview

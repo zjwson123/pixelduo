@@ -1,0 +1,180 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String   @id @default(cuid())
+  email         String   @unique
+  passwordHash  String
+  name          String?
+  credits       Int      @default(0)
+  plan          String   @default("free") // free | starter | pro | studio
+  planRenewsAt  DateTime?
+  emailVerified DateTime?
+  createdAt     DateTime @default(now())
+
+  ledgers  LedgerEntry[]
+  jobs     Job[]
+  images   Image[]
+  orders   Order[]
+  checkins Checkin[]
+  grants   CreditGrant[]
+  tokens   VerificationToken[]
+}
+
+// Single-use email verification / password-reset tokens. Only the SHA-256
+// hash is stored; raw tokens travel in the email link.
+model VerificationToken {
+  id         String    @id @default(cuid())
+  email      String
+  userId     String?
+  purpose    String // verify-email | reset-password
+  tokenHash  String    @unique
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([email, purpose, createdAt])
+  @@index([userId])
+}
+
+// Double-entry ledger: balance is derived from the latest balanceAfter per user.
+model LedgerEntry {
+  id           String   @id @default(cuid())
+  userId       String
+  type         String // SIGNUP_BONUS | CHECKIN | PURCHASE | SUBSCRIPTION | PRE_AUTH | SETTLE | REFUND | EXPIRE | ADMIN
+  creditsDelta Int
+  balanceAfter Int
+  refType      String? // job | order | none
+  refId        String?
+  note         String?
+  createdAt    DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+// Credit grants with expiry (commercial policy):
+// - PURCHASE (credit packs): 12 months validity
+// - SUBSCRIPTION (monthly quota): valid until planRenewsAt (cycle end)
+// - ROLLOVER (30% carryover): valid only until the following cycle end
+// - SIGNUP_BONUS / CHECKIN (free credits): never expire, consumed first
+// User.credits must equal SUM(remaining) at all times.
+model CreditGrant {
+  id        String    @id @default(cuid())
+  userId    String
+  source    String // SIGNUP_BONUS | CHECKIN | PURCHASE | SUBSCRIPTION | ROLLOVER
+  amount    Int // original grant
+  remaining Int
+  expiresAt DateTime?
+  refType   String? // order | none (source of the grant for audit/revocation)
+  refId     String? // order.id when created from a paid order
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@index([refId])
+}
+
+model Job {
+  id             String    @id @default(cuid())
+  userId         String
+  status         String    @default("queued") // queued | running | done | failed
+  model          String // gpt | seedream | both
+  quality        String    @default("medium")
+  count          Int       @default(1)
+  prompt         String
+  costCredits    Int
+  images         String // JSON array of image urls (local paths)
+  error          String?
+  worker         String?
+  attempts       Int      @default(0)
+  maxAttempts    Int      @default(3)
+  nextAttemptAt  DateTime?
+  heartbeatAt    DateTime?
+  consumption    Json? // [{grantId, amount}] consumed by the PRE_AUTH, for exact refunds
+  idempotencyKey String?   @unique
+  createdAt      DateTime  @default(now())
+  startedAt      DateTime?
+  finishedAt     DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+}
+
+model Image {
+  id        String   @id @default(cuid())
+  userId    String
+  jobId     String?
+  url       String
+  model     String // gpt | seedream
+  quality   String
+  prompt    String
+  credits   Int
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+model Template {
+  id      String @id
+  cat     String
+  title   String
+  prompt  String
+  model   String // gpt | seedream
+  quality String
+  credits Int
+  img     String
+}
+
+model Order {
+  id               String    @id @default(cuid())
+  userId           String
+  kind             String // pack | plan
+  provider         String // mock | paddle | alipay | wechat
+  providerOrderId  String?
+  amountUsd        Float
+  credits          Int
+  planId           String?
+  status           String    @default("pending") // pending | paid | refunded
+  idempotencyKey   String    @unique
+  createdAt        DateTime  @default(now())
+  paidAt           DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// Idempotent payment webhook events
+model PaymentEvent {
+  id          String   @id @default(cuid())
+  provider    String
+  eventId     String   @unique
+  orderId     String?
+  rawJson     String
+  processedAt DateTime @default(now())
+}
+
+model Checkin {
+  id        String   @id @default(cuid())
+  userId    String
+  date      String // YYYY-MM-DD
+  credits   Int      @default(2)
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, date])
+}

@@ -1,0 +1,177 @@
+services:
+  migrate:
+    build:
+      context: .
+      target: worker
+    command: npx prisma migrate deploy
+    environment: &appenv
+      DATABASE_URL: postgresql://pixelduo:pixelduo@db:5432/pixelduo
+      # Next.js standalone binds to $HOSTNAME by default; Docker injects the
+      # container ID, which makes in-container probes (healthcheck) fail.
+      # Pin it to 0.0.0.0 so the server listens on all interfaces.
+      HOSTNAME: 0.0.0.0
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-pixelduo-docker-secret-change-me}
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
+      SMTP_URL: ${SMTP_URL:-}
+      EMAIL_FROM: ${EMAIL_FROM:-}
+      EMAIL_VERIFY_AUTO: ${EMAIL_VERIFY_AUTO:-0}
+      PAYMENT_PROVIDER: ${PAYMENT_PROVIDER:-mock}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      PADDLE_API_KEY: ${PADDLE_API_KEY:-}
+      PADDLE_ENVIRONMENT: ${PADDLE_ENVIRONMENT:-sandbox}
+      PADDLE_WEBHOOK_SECRET: ${PADDLE_WEBHOOK_SECRET:-}
+      PAYMENT_SUCCESS_URL: ${PAYMENT_SUCCESS_URL:-}
+      PAYMENT_CANCEL_URL: ${PAYMENT_CANCEL_URL:-}
+      STORAGE_DRIVER: ${STORAGE_DRIVER:-s3}
+      REDIS_URL: redis://redis:6379
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-}
+      SENTRY_RELEASE: ${SENTRY_RELEASE:-}
+      IMAGE_MODERATION: ${IMAGE_MODERATION:-0}
+      VISION_MODERATION_MODEL: ${VISION_MODERATION_MODEL:-gpt-5.4}
+      S3_ENDPOINT: http://storage:9000
+      S3_REGION: us-east-1
+      S3_BUCKET: pixelduo
+      S3_ACCESS_KEY_ID: pixelduo
+      S3_SECRET_ACCESS_KEY: pixelduo-secret
+      S3_FORCE_PATH_STYLE: "true"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    build:
+      context: .
+      target: web
+    ports:
+      - "3000:3000"
+    environment: *appenv
+    volumes:
+      # Local dev: let the container read real provider keys from the host
+      # cc-proxy config. Production: inject MODELVERSE_IMAGE_API_KEY /
+      # ARK_IMAGE_API_KEY / DEEPSEEK_API_KEY via env/secrets instead.
+      - ${CC_PROXY_CONFIG:-${HOME}/.cc-proxy/config.json}:/root/.cc-proxy/config.json:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # busybox wget resolves "localhost" to ::1 first (IPv6) and the server
+      # listens on IPv4 0.0.0.0 only; use 127.0.0.1 explicitly.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  worker:
+    build:
+      context: .
+      target: worker
+    command: npx tsx scripts/worker.ts
+    environment:
+      <<: *appenv
+      MOCK_IMAGE_PROVIDER: ${MOCK_IMAGE_PROVIDER:-0}
+    volumes:
+      - ${CC_PROXY_CONFIG:-${HOME}/.cc-proxy/config.json}:/root/.cc-proxy/config.json:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  rollover:
+    build:
+      context: .
+      target: worker
+    command: sh -c "while true; do npx tsx scripts/rollover.ts; npx tsx scripts/expire.ts; sleep 86400; done"
+    environment: *appenv
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  db:
+    image: postgres:16-alpine
+    container_name: pixelduo-db
+    environment:
+      POSTGRES_USER: pixelduo
+      POSTGRES_PASSWORD: pixelduo
+      POSTGRES_DB: pixelduo
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pixelduo -d pixelduo"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: pixelduo-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  storage:
+    image: minio/minio:latest
+    container_name: pixelduo-storage
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: pixelduo
+      MINIO_ROOT_PASSWORD: pixelduo-secret
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  init-storage:
+    image: minio/mc:latest
+    depends_on:
+      storage:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://storage:9000 pixelduo pixelduo-secret &&
+      mc mb -p local/pixelduo || true &&
+      mc anonymous set none local/pixelduo &&
+      echo 'minio bucket ready'"
+
+  backup:
+    image: postgres:16-alpine
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGHOST: db
+      PGUSER: pixelduo
+      PGPASSWORD: pixelduo
+      PGDATABASE: pixelduo
+      BACKUP_KEEP: "14"
+    volumes:
+      - ./backups:/backups
+    command: >
+      sh -c 'while true; do
+        STAMP=$$(date +%Y%m%d-%H%M%S);
+        pg_dump -Fc -f /backups/pixelduo-$${STAMP}.dump.gz;
+        ls -1t /backups/pixelduo-*.dump.gz | tail -n +$$((BACKUP_KEEP + 1)) | xargs -r rm -f;
+        echo "[backup] $$STAMP written, keeping $${BACKUP_KEEP}";
+        sleep 86400;
+      done'
+
+volumes:
+  pgdata:
+  miniodata:
+  redisdata:

@@ -1,0 +1,6 @@
+# PixelDuo production reverse proxy — automatic HTTPS via Let's Encrypt.
+# CADDY_DOMAIN=localhost disables TLS (local prod-mode testing).
+{$CADDY_DOMAIN} {
+	encode gzip
+	reverse_proxy web:3000
+}

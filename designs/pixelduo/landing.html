@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PixelDuo — Two models. One prompt. Your call.</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><rect x='2' y='2' width='14' height='14' rx='3' fill='%234338F7'/><rect x='8' y='8' width='14' height='14' rx='3' fill='%23F4511E' opacity='0.9'/></svg>">
+<style>
+  :root {
+    --bg: #F6F3ED;
+    --surface: #FFFFFF;
+    --ink: #191817;
+    --ink-2: #6E6A64;
+    --ink-3: #9B968D;
+    --line: #E7E0D5;
+    --indigo: #4338F7;
+    --indigo-soft: #E9E7FF;
+    --orange: #F4511E;
+    --orange-soft: #FFE9DF;
+    --green: #178A57;
+    --radius: 16px;
+    --shadow: 0 1px 2px rgba(25,24,23,.04), 0 12px 32px -12px rgba(25,24,23,.12);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: -apple-system, "SF Pro Text", "PingFang SC", "Noto Sans SC", "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  .serif { font-family: Georgia, "Times New Roman", "Songti SC", "Noto Serif SC", serif; }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 28px; }
+  a { color: inherit; text-decoration: none; }
+  button { font: inherit; cursor: pointer; }
+  img { display: block; width: 100%; height: 100%; object-fit: cover; }
+
+  /* Nav */
+  .nav {
+    position: sticky; top: 0; z-index: 50;
+    background: rgba(246,243,237,.88);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--line);
+  }
+  .nav-inner { display: flex; align-items: center; gap: 28px; height: 64px; }
+  .logo { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: -.01em; }
+  .logo-mark { display: flex; width: 26px; height: 26px; }
+  .logo-mark i { width: 15px; height: 15px; border-radius: 5px; }
+  .logo-mark i:first-child { background: var(--indigo); transform: translateX(6px); }
+  .logo-mark i:last-child { background: var(--orange); mix-blend-mode: multiply; }
+  .nav-links { display: flex; gap: 22px; margin-left: 8px; }
+  .nav-links a { color: var(--ink-2); font-size: 14px; font-weight: 500; }
+  .nav-links a:hover { color: var(--ink); }
+  .nav-cta { margin-left: auto; }
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    border-radius: 10px; padding: 10px 18px; font-size: 14px; font-weight: 600;
+    border: 1px solid transparent; transition: transform .12s ease, box-shadow .12s ease, background .12s ease;
+  }
+  .btn:hover { transform: translateY(-1px); }
+  .btn-primary { background: var(--ink); color: #F6F3ED; }
+  .btn-primary:hover { box-shadow: 0 8px 20px -8px rgba(25,24,23,.4); }
+  .btn-ghost { background: transparent; border-color: var(--line); color: var(--ink); }
+  .btn-ghost:hover { background: var(--surface); }
+  .btn-orange { background: var(--orange); color: #fff; }
+  .btn-indigo { background: var(--indigo); color: #fff; }
+  .btn-sm { padding: 7px 14px; font-size: 13px; border-radius: 8px; }
+
+  /* Hero */
+  .hero { padding: 88px 0 72px; }
+  .hero-grid { display: grid; grid-template-columns: 1.05fr .95fr; gap: 64px; align-items: center; }
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-size: 12.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--ink-2); background: var(--surface); border: 1px solid var(--line);
+    padding: 7px 13px; border-radius: 999px; margin-bottom: 24px;
+  }
+  .eyebrow i { width: 8px; height: 8px; border-radius: 50%; background: var(--green); }
+  h1 { font-size: 62px; line-height: 1.04; letter-spacing: -.025em; font-weight: 500; }
+  h1 em { font-style: italic; color: var(--indigo); }
+  .hero-sub { margin-top: 22px; font-size: 18px; color: var(--ink-2); max-width: 480px; }
+  .hero-cta { display: flex; gap: 12px; margin-top: 32px; }
+  .hero-trust { display: flex; gap: 22px; margin-top: 30px; color: var(--ink-3); font-size: 13px; flex-wrap: wrap; }
+  .hero-trust span { display: inline-flex; align-items: center; gap: 6px; }
+  .hero-trust b { color: var(--ink-2); font-weight: 600; }
+
+  /* Compare panel */
+  .compare { position: relative; }
+  .compare-card {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 20px;
+    padding: 14px; box-shadow: var(--shadow);
+  }
+  .compare-imgs { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .compare-item { position: relative; border-radius: 14px; overflow: hidden; aspect-ratio: 1; background: #EFEAE2; }
+  .model-tag {
+    position: absolute; top: 10px; left: 10px; z-index: 2;
+    font-size: 11.5px; font-weight: 700; padding: 5px 10px; border-radius: 999px;
+    background: rgba(255,255,255,.92); color: var(--ink); display: inline-flex; align-items: center; gap: 6px;
+  }
+  .model-tag i { width: 7px; height: 7px; border-radius: 50%; }
+  .tag-gpt i { background: var(--indigo); }
+  .tag-seed i { background: var(--orange); }
+  .vs {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); z-index: 3;
+    width: 44px; height: 44px; border-radius: 50%; background: var(--ink); color: var(--bg);
+    display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700;
+    border: 4px solid var(--bg); letter-spacing: .02em;
+  }
+  .compare-specs { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+  .spec { border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; font-size: 12.5px; color: var(--ink-2); }
+  .spec b { display: block; color: var(--ink); font-size: 15px; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .compare-note { margin-top: 14px; font-size: 13px; color: var(--ink-3); display: flex; align-items: center; gap: 8px; }
+  .compare-note b { color: var(--ink-2); }
+
+  /* Marquee */
+  .marquee { border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: var(--surface); }
+  .marquee-inner { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; padding: 18px 0; }
+  .marquee-item { border-radius: 12px; overflow: hidden; aspect-ratio: 4/3; position: relative; }
+  .marquee-item span {
+    position: absolute; left: 8px; bottom: 8px; font-size: 11px; font-weight: 600; color: #fff;
+    background: rgba(20,19,18,.55); padding: 3px 8px; border-radius: 6px; backdrop-filter: blur(4px);
+  }
+
+  /* Section base */
+  section { padding: 88px 0; }
+  .sec-head { max-width: 680px; margin-bottom: 44px; }
+  .sec-kicker { font-size: 13px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--indigo); margin-bottom: 14px; }
+  .sec-head h2 { font-size: 40px; line-height: 1.12; letter-spacing: -.02em; font-weight: 500; }
+  .sec-head p { margin-top: 14px; color: var(--ink-2); font-size: 16.5px; }
+
+  /* Models */
+  .models-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .model-card {
+    background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 28px; display: flex; flex-direction: column; gap: 18px;
+  }
+  .model-card .model-head { display: flex; align-items: center; gap: 12px; }
+  .model-dot { width: 12px; height: 12px; border-radius: 4px; }
+  .model-card h3 { font-size: 22px; font-weight: 700; letter-spacing: -.01em; }
+  .model-card .model-desc { color: var(--ink-2); font-size: 14.5px; }
+  .model-stats { display: flex; flex-wrap: wrap; gap: 10px; }
+  .stat-chip {
+    border: 1px solid var(--line); background: var(--bg); border-radius: 10px;
+    padding: 8px 12px; font-size: 12.5px; color: var(--ink-2);
+  }
+  .stat-chip b { display: block; color: var(--ink); font-size: 14px; font-variant-numeric: tabular-nums; }
+  .model-list { list-style: none; display: flex; flex-direction: column; gap: 9px; font-size: 14px; color: var(--ink-2); }
+  .model-list li { display: flex; gap: 9px; align-items: flex-start; }
+  .model-list li::before { content: "✓"; color: var(--green); font-weight: 700; }
+  .duo-banner {
+    margin-top: 20px; border: 1px solid var(--line); background: var(--surface);
+    border-radius: var(--radius); padding: 22px 26px; display: flex; align-items: center; gap: 22px; flex-wrap: wrap;
+  }
+  .duo-banner .duo-img { width: 112px; height: 84px; border-radius: 10px; overflow: hidden; flex: none; }
+  .duo-banner h4 { font-size: 18px; font-weight: 700; }
+  .duo-banner p { font-size: 14px; color: var(--ink-2); margin-top: 4px; }
+  .duo-banner .btn { margin-left: auto; }
+
+  /* Features */
+  .feat-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; }
+  .feat-card {
+    background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 28px; display: flex; flex-direction: column; gap: 12px;
+  }
+  .feat-icon { width: 40px; height: 40px; border-radius: 12px; display: flex; align-items: center; justify-content: center; }
+  .feat-icon.gpt { background: var(--indigo-soft); color: var(--indigo); }
+  .feat-icon.seed { background: var(--orange-soft); color: var(--orange); }
+  .feat-icon.ink { background: var(--ink); color: var(--bg); }
+  .feat-icon.green { background: #E4F3EA; color: var(--green); }
+  .feat-card h3 { font-size: 18px; font-weight: 700; }
+  .feat-card p { font-size: 14.5px; color: var(--ink-2); }
+  .cost-demo {
+    margin-top: 6px; border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px;
+    font-size: 13px; background: var(--bg); display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  }
+  .cost-demo .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .cost-demo .sep { color: var(--ink-3); }
+
+  /* Pricing */
+  .pricing { background: var(--surface); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+  .plan-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+  .plan {
+    border: 1px solid var(--line); border-radius: var(--radius); padding: 24px;
+    display: flex; flex-direction: column; gap: 14px; background: var(--bg); position: relative;
+  }
+  .plan.featured { border-color: var(--ink); background: var(--surface); box-shadow: var(--shadow); }
+  .plan .badge {
+    position: absolute; top: -11px; left: 20px; font-size: 11px; font-weight: 700; letter-spacing: .05em;
+    background: var(--indigo); color: #fff; padding: 4px 10px; border-radius: 999px; text-transform: uppercase;
+  }
+  .plan h3 { font-size: 16px; font-weight: 700; }
+  .plan .price { font-size: 30px; font-weight: 700; letter-spacing: -.02em; }
+  .plan .price small { font-size: 13px; color: var(--ink-3); font-weight: 500; }
+  .plan ul { list-style: none; display: flex; flex-direction: column; gap: 8px; font-size: 13.5px; color: var(--ink-2); }
+  .plan ul li { display: flex; gap: 8px; }
+  .plan ul li::before { content: "✓"; color: var(--green); font-weight: 700; flex: none; }
+  .plan .btn { margin-top: auto; }
+  .credits-note {
+    margin-top: 22px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    border: 1px dashed var(--ink-3); border-radius: 14px; padding: 14px 18px; font-size: 13.5px; color: var(--ink-2);
+  }
+  .credits-note b { color: var(--ink); }
+
+  /* CTA band */
+  .cta-band { text-align: center; padding: 96px 0 88px; }
+  .cta-band h2 { font-size: 44px; letter-spacing: -.02em; font-weight: 500; }
+  .cta-band p { margin: 16px auto 28px; max-width: 460px; color: var(--ink-2); font-size: 16px; }
+  .cta-band .btn { font-size: 15px; padding: 13px 24px; }
+
+  footer { border-top: 1px solid var(--line); padding: 34px 0; color: var(--ink-3); font-size: 13px; }
+  .foot-inner { display: flex; align-items: center; gap: 20px; }
+  .foot-inner .logo { font-size: 15px; color: var(--ink); }
+  .foot-inner .muted { margin-left: auto; }
+
+  @media (max-width: 900px) {
+    .hero-grid, .models-grid { grid-template-columns: 1fr; }
+    .feat-grid, .plan-grid { grid-template-columns: 1fr 1fr; }
+    .marquee-inner { grid-template-columns: repeat(2, 1fr); }
+    h1 { font-size: 44px; }
+    .nav-links { display: none; }
+  }
+  @media (max-width: 560px) {
+    .feat-grid, .plan-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<header class="nav">
+  <div class="wrap nav-inner">
+    <a class="logo" href="#top">
+      <span class="logo-mark"><i></i><i></i></span>
+      PixelDuo
+    </a>
+    <nav class="nav-links">
+      <a href="#models">Models</a>
+      <a href="#features">Features</a>
+      <a href="#pricing">Pricing</a>
+      <a href="#gallery">Gallery</a>
+    </nav>
+    <div class="nav-cta"><a class="btn btn-primary btn-sm" href="#cta">Join the beta</a></div>
+  </div>
+</header>
+
+<main id="top">
+  <section class="hero">
+    <div class="wrap hero-grid">
+      <div>
+        <span class="eyebrow"><i></i>Dual-engine AI image studio · Beta</span>
+        <h1 class="serif">Two models.<br>One prompt. <em>Your call.</em></h1>
+        <p class="hero-sub">PixelDuo runs GPT Image 2 and Seedream 5 side by side — compare in one click, and see exactly what each image costs before you press generate.</p>
+        <div class="hero-cta">
+          <a class="btn btn-primary" href="#cta">Start creating — free</a>
+          <a class="btn btn-ghost" href="#models">See the models</a>
+        </div>
+        <div class="hero-trust">
+          <span>✅ <b>Free beta</b>, invite only</span>
+          <span>💡 <b>Transparent</b> per-image cost</span>
+          <span>🧠 <b>AI prompt assistant</b> included</span>
+        </div>
+      </div>
+      <div class="compare">
+        <div class="compare-card">
+          <div class="compare-imgs">
+            <figure class="compare-item">
+              <span class="model-tag tag-gpt"><i></i>GPT Image 2</span>
+              <img src="assets/gpt_medium_1024.png" alt="GPT Image 2 output">
+            </figure>
+            <figure class="compare-item">
+              <span class="model-tag tag-seed"><i></i>Seedream 5</span>
+              <img src="assets/seedream_1920.png" alt="Seedream 5 output">
+            </figure>
+          </div>
+          <div class="vs">vs</div>
+          <div class="compare-specs">
+            <div class="spec">Latency<b>35s · medium</b></div>
+            <div class="spec">Latency<b>15s · 1920²</b></div>
+            <div class="spec">Cost / image<b>$0.053</b></div>
+            <div class="spec">Cost / image<b>¥0.30</b></div>
+          </div>
+          <p class="compare-note"><b>Same prompt.</b> Two engines. Choose by quality, speed, or price — you see it all up front.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="marquee" id="gallery">
+    <div class="wrap marquee-inner">
+      <figure class="marquee-item"><img src="assets/portrait_1440.png" alt="Editorial portrait"><span>Editorial portrait</span></figure>
+      <figure class="marquee-item"><img src="assets/cyber_2560.png" alt="Cyberpunk product mockup"><span>Product mockup</span></figure>
+      <figure class="marquee-item"><img src="assets/typo_2560.png" alt="Typographic poster"><span>Typography</span></figure>
+      <figure class="marquee-item"><img src="assets/icon3d_1920.png" alt="3D icon"><span>3D icon</span></figure>
+    </div>
+  </section>
+
+  <section id="models">
+    <div class="wrap">
+      <div class="sec-head">
+        <div class="sec-kicker">The power of two</div>
+        <h2 class="serif">One studio, two world-class engines.</h2>
+        <p>Head-to-head quality without the lock-in. GPT Image 2 for fine details and typography, Seedream 5 for speed and big canvases.</p>
+      </div>
+      <div class="models-grid">
+        <div class="model-card">
+          <div class="model-head">
+            <span class="model-dot" style="background:var(--indigo)"></span>
+            <h3>GPT Image 2</h3>
+          </div>
+          <p class="model-desc">The finishing studio — text rendering, fine detail, and consistent quality for final assets.</p>
+          <div class="model-stats">
+            <span class="stat-chip">Medium 1024²<b>$0.053 / img</b></span>
+            <span class="stat-chip">High 1024²<b>$0.211 / img</b></span>
+            <span class="stat-chip">Latency<b>35 – 148s</b></span>
+          </div>
+          <ul class="model-list">
+            <li>Typography and non-Latin text that actually renders</li>
+            <li>Flexible sizes and multi-round editing</li>
+            <li>No platform watermark</li>
+          </ul>
+        </div>
+        <div class="model-card">
+          <div class="model-head">
+            <span class="model-dot" style="background:var(--orange)"></span>
+            <h3>Seedream 5</h3>
+          </div>
+          <p class="model-desc">The fast lane — big canvases in seconds, ideal for drafts, batches, and exploration.</p>
+          <div class="model-stats">
+            <span class="stat-chip">1920²<b>¥0.30 / img</b></span>
+            <span class="stat-chip">Up to 3K<b>3072 × 3072</b></span>
+            <span class="stat-chip">Latency<b>≈ 15s</b></span>
+          </div>
+          <ul class="model-list">
+            <li>Native 2K / 3K output for print and big screens</li>
+            <li>Reference-image support</li>
+            <li>AI-generated label included (compliance, kept transparent)</li>
+          </ul>
+        </div>
+      </div>
+      <div class="duo-banner">
+        <div class="duo-img"><img src="assets/gpt_high_1024.png" alt="Comparison"></div>
+        <div>
+          <h4>Not sure which engine? Generate both.</h4>
+          <p>One prompt, two outputs, side by side — you pick the winner. Both images are charged separately and clearly.</p>
+        </div>
+        <a class="btn btn-ghost" href="#cta">Try the compare</a>
+      </div>
+    </div>
+  </section>
+
+  <section id="features">
+    <div class="wrap">
+      <div class="sec-head">
+        <div class="sec-kicker">Built around trust</div>
+        <h2 class="serif">No black boxes. No surprise bills.</h2>
+        <p>Every charge is visible before it happens, every model is priced by its real cost, and the AI helps you write better prompts for free.</p>
+      </div>
+      <div class="feat-grid">
+        <div class="feat-card">
+          <span class="feat-icon gpt">$</span>
+          <h3>Transparent cost preview</h3>
+          <p>See exactly how many credits — and dollars — an image will use before you generate. Adjust model, quality, or size to match your budget.</p>
+          <div class="cost-demo">
+            <span class="row"><b>GPT Image 2</b> · medium · 1024²</span>
+            <span class="sep">→</span>
+            <span class="row"><b>8 credits</b> ≈ $0.08</span>
+          </div>
+        </div>
+        <div class="feat-card">
+          <span class="feat-icon seed">✦</span>
+          <h3>AI prompt assistant</h3>
+          <p>Type a half-formed thought and get a production-ready prompt — expanded, translated, and styled. Powered by DeepSeek, free on every plan.</p>
+          <div class="cost-demo">
+            <span class="row">"咖啡杯，暖色调"</span>
+            <span class="sep">→</span>
+            <span class="row">"Professional product photo of a ceramic mug, warm beige studio light…"</span>
+          </div>
+        </div>
+        <div class="feat-card">
+          <span class="feat-icon ink">▦</span>
+          <h3>Template library</h3>
+          <p>E-commerce, portraits, posters, 3D icons — ready-made prompts with the exact model and parameters attached. One click to reuse.</p>
+        </div>
+        <div class="feat-card">
+          <span class="feat-icon green">◎</span>
+          <h3>Credits + subscription, your way</h3>
+          <p>Credit packs valid for 12 months, and monthly quotas that roll 30% of what you don't use into next month. Plans from free to studio.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="pricing" id="pricing">
+    <div class="wrap">
+      <div class="sec-head">
+        <div class="sec-kicker">Fair pricing, no black box · 明码标价</div>
+        <h2 class="serif">Plans that respect your wallet.</h2>
+        <p>1 credit = $0.01. Rollover 30% of unused monthly credits. Beta is free while we polish — pricing below is the intended shape.</p>
+      </div>
+      <div class="plan-grid">
+        <div class="plan">
+          <h3>Free</h3>
+          <div class="price">$0<small> / month</small></div>
+          <ul>
+            <li>30 credits on signup</li>
+            <li>2 credits daily check-in</li>
+            <li>Watermarked previews</li>
+            <li>Prompt assistant (limited)</li>
+          </ul>
+          <a class="btn btn-ghost" href="#cta">Start free</a>
+        </div>
+        <div class="plan">
+          <h3>Starter</h3>
+          <div class="price">$9<small> / month</small></div>
+          <ul>
+            <li>800 credits / month</li>
+            <li>≈ 100–130 images</li>
+            <li>No platform watermark</li>
+            <li>Priority queue</li>
+          </ul>
+          <a class="btn btn-ghost" href="#cta">Coming at launch</a>
+        </div>
+        <div class="plan featured">
+          <span class="badge">Most popular</span>
+          <h3>Pro</h3>
+          <div class="price">$19<small> / month</small></div>
+          <ul>
+            <li>2,000 credits / month</li>
+            <li>≈ 250–330 images</li>
+            <li>30% quota rollover</li>
+            <li>Batch generation</li>
+          </ul>
+          <a class="btn btn-primary" href="#cta">Coming at launch</a>
+        </div>
+        <div class="plan">
+          <h3>Studio</h3>
+          <div class="price">$39<small> / month</small></div>
+          <ul>
+            <li>5,000 credits / month</li>
+            <li>Team & privacy mode</li>
+            <li>API trial quota</li>
+            <li>Priority support</li>
+          </ul>
+          <a class="btn btn-ghost" href="#cta">Coming at launch</a>
+        </div>
+      </div>
+      <div class="credits-note">
+        <span>⊕</span>
+        <span>Top-up packs: <b>$4.99 / 400</b> · <b>$9.99 / 1,050</b> · <b>$19.99 / 2,300</b> · <b>$49.99 / 6,000</b> — credits valid <b>12 months</b>.</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="cta-band" id="cta">
+    <div class="wrap">
+      <h2 class="serif">Ready to see what you can make?</h2>
+      <p>Beta is invite-only and free. Join now — we'll send your access link as soon as your spot opens.</p>
+      <a class="btn btn-primary" href="app.html">Open the workbench →</a>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap foot-inner">
+    <span class="logo"><span class="logo-mark"><i></i><i></i></span> PixelDuo</span>
+    <span>pixelduo.ai · Two models. One prompt. Your call.</span>
+    <span class="muted">© 2026 PixelDuo. Beta product — details may change.</span>
+  </div>
+</footer>
+
+</body>
+</html>

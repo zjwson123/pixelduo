@@ -1,0 +1,182 @@
+import { Prisma } from "@prisma/client";
+import { prisma } from "./prisma";
+import { estimateGenerationCost, type ModelId, type Quality } from "./cost";
+import { addCreditsTx, spendCreditsTx, refundCreditsTx, type SpendConsumption } from "./ledger";
+
+export interface CreateJobInput {
+  userId: string;
+  model: ModelId;
+  quality: Quality;
+  count: number;
+  prompt: string;
+  idempotencyKey?: string;
+  maxAttempts?: number;
+}
+
+export interface JobImage {
+  url: string;
+  model: "gpt" | "seedream";
+  quality: string;
+  credits: number;
+  prompt: string;
+}
+
+export async function createGenerationJob(input: CreateJobInput) {
+  const cost = estimateGenerationCost(input.model, input.quality, input.count);
+  return prisma.$transaction(async (tx) => {
+    if (input.idempotencyKey) {
+      const existing = await tx.job.findUnique({ where: { idempotencyKey: input.idempotencyKey } });
+      if (existing) return { job: existing, created: false };
+    }
+    const job = await tx.job.create({
+      data: {
+        userId: input.userId,
+        model: input.model,
+        quality: input.quality,
+        count: input.count,
+        prompt: input.prompt,
+        costCredits: cost.totalCredits,
+        images: "[]",
+        idempotencyKey: input.idempotencyKey ?? null,
+        maxAttempts: input.maxAttempts ?? 3,
+      },
+    });
+    const consumption = await spendCreditsTx(
+      tx,
+      input.userId,
+      cost.totalCredits,
+      "job",
+      job.id,
+      `pre-auth for ${input.model} x${input.count}`,
+    );
+    await tx.job.update({
+      where: { id: job.id },
+      data: { consumption: consumption as unknown as Prisma.InputJsonValue },
+    });
+    return { job, created: true };
+  });
+}
+
+export async function claimNextJob(worker: string) {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const candidate = await prisma.job.findFirst({
+      where: {
+        status: "queued",
+        OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: new Date() } }],
+      },
+      orderBy: { createdAt: "asc" },
+    });
+    if (!candidate) return null;
+    const res = await prisma.job.updateMany({
+      where: { id: candidate.id, status: "queued" },
+      data: { status: "running", worker, startedAt: new Date(), heartbeatAt: new Date() },
+    });
+    if (res.count === 1) return prisma.job.findUnique({ where: { id: candidate.id } });
+  }
+  return null;
+}
+
+export async function heartbeat(jobId: string) {
+  await prisma.job.updateMany({
+    where: { id: jobId, status: "running" },
+    data: { heartbeatAt: new Date() },
+  });
+}
+
+function backoffMs(attempts: number): number {
+  return Math.min(60_000 * 2 ** Math.max(0, attempts - 1), 600_000);
+}
+
+export async function failJob(jobId: string, error: string, opts?: { terminal?: boolean }) {
+  return prisma.$transaction(async (tx) => {
+    const job = await tx.job.findUnique({ where: { id: jobId } });
+    if (!job || job.status === "failed" || job.status === "done") return;
+    const wasActive = job.status === "running" || job.status === "queued";
+    const nextAttempts = job.attempts + 1;
+
+    if (!opts?.terminal && nextAttempts < job.maxAttempts) {
+      // Retry with exponential backoff; the pre-auth hold stays in place.
+      await tx.job.update({
+        where: { id: jobId },
+        data: {
+          status: "queued",
+          attempts: nextAttempts,
+          error,
+          nextAttemptAt: new Date(Date.now() + backoffMs(nextAttempts)),
+          heartbeatAt: null,
+        },
+      });
+      return;
+    }
+
+    // Terminal failure = DLQ; refund the held credits (terminal mode skips
+    // retries, e.g. moderation rejections that cannot succeed on retry).
+    await tx.job.update({
+      where: { id: jobId },
+      data: {
+        status: "failed",
+        attempts: nextAttempts,
+        error,
+        finishedAt: new Date(),
+        heartbeatAt: null,
+      },
+    });
+    if (wasActive) {
+      const consumption = (job.consumption ?? null) as unknown as SpendConsumption[] | null;
+      await refundCreditsTx(
+        tx,
+        job.userId,
+        job.costCredits,
+        consumption,
+        "job",
+        jobId,
+        "refund on terminal failure",
+      );
+    }
+  });
+}
+
+// Recover jobs stuck in "running" after a worker crash (no heartbeat).
+export async function recoverStuckJobs(maxAgeMs = 180_000): Promise<number> {
+  const cutoff = new Date(Date.now() - maxAgeMs);
+  const stuck = await prisma.job.findMany({
+    where: {
+      status: "running",
+      OR: [{ heartbeatAt: null, startedAt: { lte: cutoff } }, { heartbeatAt: { lte: cutoff } }],
+    },
+    take: 20,
+  });
+  for (const job of stuck) {
+    await failJob(job.id, "stuck-timeout: worker heartbeat expired");
+  }
+  return stuck.length;
+}
+
+export async function completeJob(jobId: string, images: JobImage[]) {
+  return prisma.$transaction(async (tx) => {
+    const job = await tx.job.findUnique({ where: { id: jobId } });
+    if (!job || job.status !== "running") throw new Error("job-not-runnable");
+    await tx.job.update({
+      where: { id: jobId },
+      data: { status: "done", images: JSON.stringify(images.map((i) => i.url)), finishedAt: new Date() },
+    });
+    for (const img of images) {
+      await tx.image.create({
+        data: {
+          userId: job.userId,
+          jobId,
+          url: img.url,
+          model: img.model,
+          quality: img.quality,
+          prompt: img.prompt,
+          credits: img.credits,
+        },
+      });
+    }
+    await addCreditsTx(tx, job.userId, "SETTLE", 0, "job", jobId, "settle");
+  });
+}
+
+export async function getJobForUser(userId: string, jobId: string) {
+  return prisma.job.findFirst({ where: { id: jobId, userId } });
+}

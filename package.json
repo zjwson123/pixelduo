@@ -1,0 +1,56 @@
+{
+  "name": "pixelduo",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "db:migrate": "RUST_LOG=debug npx prisma migrate deploy",
+    "db:push": "prisma db push",
+    "db:seed": "tsx prisma/seed.ts",
+    "worker": "tsx scripts/worker.ts",
+    "expire": "tsx scripts/expire.ts",
+    "test": "npm run test:prep && vitest run",
+    "test:prep": "RUST_LOG=debug DATABASE_URL=\"postgresql://pixelduo:pixelduo@localhost:5432/pixelduo_test\" npx prisma migrate deploy",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1107.0",
+    "@aws-sdk/s3-request-presigner": "^3.1107.0",
+    "@paddle/paddle-node-sdk": "^3.10.0",
+    "@sentry/nextjs": "^8.55.2",
+    "@sentry/node": "^8.55.2",
+    "bcryptjs": "^2.4.3",
+    "ioredis": "^5.11.1",
+    "next": "^14.2.5",
+    "next-auth": "^4.24.11",
+    "nodemailer": "^7.0.13",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "sharp": "^0.33.5",
+    "stripe": "^17.7.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.0",
+    "@prisma/client": "^6.16.2",
+    "@types/bcryptjs": "^2.4.6",
+    "@types/node": "^22.0.0",
+    "@types/nodemailer": "^8.0.1",
+    "@types/react": "^18.3.5",
+    "@types/react-dom": "^18.3.0",
+    "prisma": "^6.16.2",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  },
+  "allowScripts": {
+    "@prisma/engines@6.16.2": true,
+    "@prisma/client@6.16.2": true,
+    "prisma@6.16.2": true,
+    "@prisma/engines-version@6.16.0-7.1c57fdcd7e44b29b9313256c76699e91c3ac3c43": true,
+    "esbuild@0.28.2": true,
+    "esbuild@0.21.5": true
+  }
+}
