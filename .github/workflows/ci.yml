@@ -98,7 +98,7 @@ jobs:
       - run: npx playwright install --with-deps chromium
       - name: Start app + worker
         run: |
-          npx next start -p 3100 &
+          npx next start -p 3100 -H 0.0.0.0 &
           npx tsx scripts/worker.ts &
           sleep 8
       - name: Wait for health
