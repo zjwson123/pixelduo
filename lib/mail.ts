@@ -2,16 +2,24 @@ import nodemailer, { type Transporter } from "nodemailer";
 import fs from "fs";
 import path from "path";
 import { captureError } from "./observability";
+import {
+  verificationHtml,
+  resetHtml,
+  receiptHtml,
+  refundHtml,
+  expiryHtml,
+} from "./mail-html";
 
 export interface Mailer {
-  send(to: string, subject: string, text: string): Promise<void>;
+  send(to: string, subject: string, text: string, html?: string): Promise<void>;
 }
 
 // No SMTP configured → print the email to the server log (dev/test mode).
 // Production must set SMTP_URL (SES / SendGrid / Resend / any SMTP).
 class DevMailer implements Mailer {
-  async send(to: string, subject: string, text: string) {
+  async send(to: string, subject: string, text: string, html?: string) {
     console.log(`[mail:dev] To: ${to} | ${subject}\n${text}`);
+    if (html) console.log(`[mail:dev:html] ${html.slice(0, 160)}…`);
     // Test hook: MAIL_DEV_DIR=/tmp/pd-mail makes emails readable from e2e
     // specs (verification / reset link extraction).
     const dir = process.env.MAIL_DEV_DIR;
@@ -32,8 +40,8 @@ class SmtpMailer implements Mailer {
     this.from = from;
   }
 
-  async send(to: string, subject: string, text: string) {
-    await this.transport.sendMail({ from: this.from, to, subject, text });
+  async send(to: string, subject: string, text: string, html?: string) {
+    await this.transport.sendMail({ from: this.from, to, subject, text, ...(html ? { html } : {}) });
   }
 }
 
@@ -55,9 +63,9 @@ function baseUrl(): string {
   return process.env.NEXTAUTH_URL ?? "http://localhost:3000";
 }
 
-async function sendSafely(to: string, subject: string, text: string): Promise<void> {
+async function sendSafely(to: string, subject: string, text: string, html?: string): Promise<void> {
   try {
-    await getMailer().send(to, subject, text);
+    await getMailer().send(to, subject, text, html);
   } catch (e) {
     // Alert on delivery failures (Sentry when configured); rethrow so the API
     // surfaces a failure instead of silently dropping the verification link.
@@ -78,6 +86,7 @@ export async function sendVerificationEmail(to: string, rawToken: string): Promi
       "",
       "The link expires in 24 hours. If you didn't create this account, ignore this email.",
     ].join("\n"),
+    verificationHtml(link),
   );
 }
 
@@ -93,6 +102,7 @@ export async function sendResetPasswordEmail(to: string, rawToken: string): Prom
       "",
       "If you didn't request this, you can safely ignore this email.",
     ].join("\n"),
+    resetHtml(link),
   );
 }
 
@@ -108,6 +118,7 @@ export async function sendCreditExpiryEmail(to: string, daysLeft: number, credit
       "",
       `https://pixelduo.ai/studio`,
     ].join("\n"),
+    expiryHtml(daysLeft, credits),
   );
 }
 
@@ -131,6 +142,7 @@ export async function sendOrderReceiptEmail(
       "",
       `https://pixelduo.ai/studio`,
     ].join("\n"),
+    receiptHtml(itemName, amountUsd, credits),
   );
 }
 
@@ -148,5 +160,6 @@ export async function sendRefundEmail(to: string, itemName: string, amountUsd: n
       "",
       `https://pixelduo.ai/studio`,
     ].join("\n"),
+    refundHtml(itemName, amountUsd),
   );
 }

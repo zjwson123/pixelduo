@@ -74,7 +74,7 @@ export default function RegisterPage() {
           <span style={{ fontWeight: 800 }}>PixelDuo</span>
         </div>
         <h1 style={{ marginTop: 18 }}>Create account</h1>
-        <p className="sub">Free beta · 30 credits on signup · invite only.</p>
+        <p className="sub">Free beta · 30 credits on signup.</p>
         {error && <div className="form-error">{error}</div>}
         <div className="field">
           <label htmlFor="name">Name</label>

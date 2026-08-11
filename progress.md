@@ -270,3 +270,9 @@
 - **日志脱敏抽查**：observability 单测新增 redactSensitive 断言（sk-/AKIA/Bearer/预签名串全部打码）
 - **修复**：auth-flow 单测对 `EMAIL_VERIFY_AUTO` 环境依赖不确定——测试内强制删除该变量（恢复原值），ci-local 按 CI 分阶段设置，单测与 e2e 两不误
 - 单测 69/69、e2e 10/10、`CI-LOCAL PASSED`；compose 全栈 healthy
+
+## 2026-08-11（品牌化 HTML 邮件 + 文案修正）
+
+- **HTML 邮件模板**：`lib/mail-html.ts` 提供品牌化内联样式模板（头部 PixelDuo + 深色条、CTA 按钮、金额/积分表格、底部 Terms/Privacy），5 类邮件（验证/重置/收据/退款/到期提醒）全部 text+html 双版本；`Mailer.send` 增加可选 html 参数，SMTP 走 nodemailer `html` 字段，dev 模式日志带 HTML 预览；用户内容（商品名等）一律转义
+- **文案修正**：注册页与落地页移除与现状不符的 "invite only"（注册本已开放）→ "no credit card required"
+- **验证**：单测 74/74（新增 mail-html 5 例：链接/金额/日期文案/转义）；e2e 10/10；tsc/build 通过；**容器实测**：注册触发验证邮件，日志出现 `[mail:dev:html]` 完整 HTML 模板；compose 全栈 healthy

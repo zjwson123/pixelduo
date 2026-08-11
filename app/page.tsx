@@ -43,7 +43,7 @@ export default function LandingPage() {
                 <a className="btn btn-ghost" href="#models">See the models</a>
               </div>
               <div className="hero-trust">
-                <span>✅ <b>Free beta</b>, invite only</span>
+                <span>✅ <b>Free beta</b>, no credit card required</span>
                 <span>💡 <b>Transparent</b> per-image cost</span>
                 <span>🧠 <b>AI prompt assistant</b> included</span>
               </div>
