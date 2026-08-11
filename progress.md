@@ -223,3 +223,13 @@
 - **合规页面上线**：新增 `/terms`、`/privacy` 站内页（内容对齐 docs/compliance/terms.md、privacy.md），landing footer + 登录/注册页全部挂链——补齐上线清单"用户协议、隐私政策上线"项
 - **验证**：单测 56/56（新增 receipt 1 例：首次支付发 1 封收据、重复 webhook 不重发）；e2e 5/5（新增 legal.spec：/terms /privacy 渲染 + footer 链接）；tsc/build 通过
 - **容器实测**：stripe 模式 webhook 到账 → web 日志出现 `[mail:dev] ... Your PixelDuo receipt — 1050 credits pack`（Item/Amount/Credits 齐全）；已恢复 mock + 清理测试数据
+
+## 2026-08-11（TOTP 双因素认证）
+
+- **数据模型**：`User.totpSecret/totpPendingSecret/totpEnabled` + `BackupCode`（SHA-256 哈希、单次使用；迁移 `20260811110000_two_factor`）
+- **核心库** `lib/twofa.ts`：otplib v12（window=1）生成/校验 TOTP + qrcode 出 QR；10 个一次性备用码（归一化 + 哈希存储）；**预认证票据**（jose HS256，5 分钟过期 + Redis jti 单次使用，Redis 不可用降级为仅过期保护）
+- **两步登录**：authorize 密码通过后若开启 2FA 先发**部分会话**（totpPending）；`requireUserId`/`requireVerifiedUser`/studio/account layout 全部拦截部分会话（403 `2fa-required`）；`/api/auth/2fa-verify`（限流 5/min）验证 TOTP/备用码后签发预认证票据，前端再带票据 signIn 换取真会话
+- **API**：`/api/2fa/setup`（生成 pending secret + QR）、`/api/2fa/confirm`（验证后启用 + 生成备用码，事务原子）、`/api/2fa/disable`（需密码 + 当前码，备用码不可用于禁用）、`/api/auth/2fa-status`
+- **UI**：登录页两步流程（6 位码/备用码切换）、`/account/security` 启用/禁用页（QR + 密钥 + 备用码一次展示）、工作台右上角 Security 入口
+- **测试基建修复**：中间件 /api/auth 粗限流改 env 可配（`MIDDLEWARE_AUTH_LIMIT`，e2e/CI 放大到 1000）；定位并解决 e2e 注册限流按 `:::1` 累计触顶的问题（跑测前清 Redis 键）
+- **验证**：单测 60/60（新增 twofa 4 例：setup/verify、备用码单次、预认证票据单次+过期）；**e2e 6/6**（新增 2fa.spec 全流程：启用→TOTP 登录→部分会话 403 防护→备用码登录）；tsc/build 通过；compose 全栈 healthy

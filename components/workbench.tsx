@@ -428,6 +428,7 @@ export function Workbench() {
           </button>
           <button className="btn btn-ghost btn-sm" onClick={() => setTab("pricing")}>{t.topUp}</button>
           <button className="btn btn-ghost btn-sm" onClick={() => switchLocale(locale === "en" ? "zh" : "en")}>{locale === "en" ? "中文" : "EN"}</button>
+          <Link className="btn btn-ghost btn-sm" href="/account/security">Security</Link>
           <button className="btn btn-ghost btn-sm" onClick={() => signOut({ callbackUrl: "/" })}>{t.signOut}</button>
         </div>
       </header>

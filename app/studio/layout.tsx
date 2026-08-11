@@ -5,5 +5,6 @@ import { authOptions } from "@/lib/auth";
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const session = await getServerSession(authOptions);
   if (!session?.user) redirect("/login");
+  if ((session.user as { totpPending?: boolean }).totpPending) redirect("/login?2fa=1");
   return <>{children}</>;
 }

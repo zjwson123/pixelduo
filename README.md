@@ -19,7 +19,7 @@
 - **订单收据**：支付 webhook 履约成功后自动发收据邮件（商品/金额/到账积分，重复 webhook 不重复发送，投递失败仅告警不回滚支付）
 - **内容安全**：前置关键词过滤 + 后置 vision 模型图像审核（`IMAGE_MODERATION=1`，默认 gpt-5.4，命中即拦截 + 自动退款 + 删图）
 - **AI 标识**：免费档 gpt-image-2 图片交付前烘焙 "PixelDuo · AI 生成" 水印（sharp，worker 容器含 Noto CJK 字体）
-- NextAuth v4（邮箱+密码，JWT 会话）、bcrypt；**邮箱验证 + 密码找回**（单次令牌存 SHA-256 哈希，24h/1h 过期；注册送 30 积分改为验证后发放，未验证账号禁止生图/签到——防薅羊毛）；**登录防爆破**（Redis 按账号 10 次失败/15 分钟锁定）；**会话吊销**（`User.sessionVersion`，重置密码或 `POST /api/auth/revoke-sessions` 后旧 JWT 全部失效）；邮件走 `lib/mail.ts`：未配 `SMTP_URL` 时开发模式打印到服务日志，生产接 SES/SendGrid/Resend 等 SMTP
+- NextAuth v4（邮箱+密码，JWT 会话）、bcrypt；**邮箱验证 + 密码找回**（单次令牌存 SHA-256 哈希，24h/1h 过期；注册送 30 积分改为验证后发放，未验证账号禁止生图/签到——防薅羊毛）；**登录防爆破**（Redis 按账号 10 次失败/15 分钟锁定）；**会话吊销**（`User.sessionVersion`，重置密码或 `POST /api/auth/revoke-sessions` 后旧 JWT 全部失效）；**TOTP 双因素认证**（otplib + QR，10 个一次性备用码，两步登录，部分会话被 API/页面级拦截，5 分钟单次预认证票据换真会话）；邮件走 `lib/mail.ts`：未配 `SMTP_URL` 时开发模式打印到服务日志，生产接 SES/SendGrid/Resend 等 SMTP
 - 支付壳子：`PaymentProvider` 接口 + MockProvider / **Stripe** / **Paddle**（支付宝/微信待主体接入）
 - **存储抽象**：`STORAGE_DRIVER=local`（私有目录 + 鉴权路由）或 `s3`（MinIO/R2/S3 + 预签名 URL）
 - **限流**：路由级权威限制走 **Redis 全局计数**（`REDIS_URL`，生成 20/min、注册 10/h、结账 10/min、助手 30/min；无 Redis 自动回退单机内存）；中间件内存粗筛（auth 20/min、API 300/min per IP）
@@ -65,6 +65,12 @@ npm run worker
 EMAIL_VERIFY_AUTO=0 MAIL_DEV_DIR=/tmp/pd-mail npx next dev -p 3100   # 另开终端跑 worker
 MAIL_DEV_DIR=/tmp/pd-mail npx playwright test e2e/verify-email.spec.ts
 ```
+
+### 双因素认证（2FA）
+
+- 工作台右上角 **Security** → `/account/security`：扫码（TOTP QR）或手动输入密钥启用，启用时生成 10 个一次性备用码（仅展示一次）
+- 登录时密码正确后进入第二步输 6 位码（或备用码）；**未完成 2FA 的部分会话**无法访问任何受保护 API/页面
+- 禁用需输入密码 + 当前 6 位码（备用码不可用于禁用，防止被盗码关闭保护）
 
 ### 上游模型 Key
 
@@ -151,7 +157,7 @@ CI（`.github/workflows/ci.yml`）：Postgres 服务容器下跑单测、构建�
 ## 测试
 
 ```bash
-npm test                 # 单元测试（Postgres 测试库：成本/账本/队列重试/结转/支付/脱敏/账号/提醒/收据，56 例）
+npm test                 # 单元测试（Postgres 测试库：成本/账本/队列重试/结转/支付/脱敏/账号/2FA/提醒/收据，60 例）
 npm run test:e2e         # 端到端（见下）
 ```
 
@@ -169,7 +175,7 @@ PW_CHANNEL=chrome npx playwright test   # 本地用系统 Chrome；CI 用自带 
 ## MVP 范围与已知边界
 
 - 支付主体/备案仍为壳子：Stripe/Paddle Provider 已实现，真实沙箱全流程 + 生产 key 待申请；支付宝/微信待国内主体
-- 邮箱验证 + 找回密码 + 登录防爆破 + 会话吊销已上线；**2FA 与 OAuth 登录为后续账号体系项**
+- 邮箱验证 + 找回密码 + 登录防爆破 + 会话吊销 + **TOTP 2FA**（含备用码）已上线；**OAuth 登录为后续项**
 - 图片对象备份：自托管已有 `backup-objects` 每日镜像 + 恢复演练；生产托管对象存储仍需开版本控制/跨区域复制
 - 内容安全：前置关键词过滤 + 后置 vision 审核（`IMAGE_MODERATION=1`，命中即拦截/退款/删图）
 - 水印：Seedream 自带"AI生成"合规标识；免费档 gpt 图交付前烘焙 "PixelDuo · AI 生成"（C2PA 元数据为后续项）

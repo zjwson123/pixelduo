@@ -24,7 +24,13 @@ export function middleware(req: NextRequest) {
     "unknown";
   const path = req.nextUrl.pathname;
   const isAuth = path.startsWith("/api/auth");
-  const retry = hit(`ip:${ip}:${isAuth ? "auth" : "api"}`, isAuth ? 20 : 300, 60_000);
+  // Auth is a coarse first line; per-account lockout (login-guard) is the
+  // authoritative brute-force protection. 40/min leaves room for multi-step
+  // 2FA logins (csrf + callback per step).
+  // Overridable for load tests / e2e (MIDDLEWARE_AUTH_LIMIT).
+  const authLimit = Number(process.env.MIDDLEWARE_AUTH_LIMIT ?? 40);
+  const apiLimit = Number(process.env.MIDDLEWARE_API_LIMIT ?? 300);
+  const retry = hit(`ip:${ip}:${isAuth ? "auth" : "api"}`, isAuth ? authLimit : apiLimit, 60_000);
   if (retry !== null) {
     return NextResponse.json(
       { ok: false, error: "rate-limited" },

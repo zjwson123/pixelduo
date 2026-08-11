@@ -3,12 +3,14 @@ import CredentialsProvider from "next-auth/providers/credentials";
 import bcrypt from "bcryptjs";
 import { prisma } from "./prisma";
 import { isLoginBlocked, recordLoginFailure, clearLoginFailures } from "./login-guard";
+import { verifyPreAuthToken } from "./twofa";
 
 interface AuthUser {
   id: string;
   email: string;
   name: string | null;
   sessionVersion: number;
+  totpPending?: boolean;
 }
 
 export const authOptions: NextAuthOptions = {
@@ -30,7 +32,35 @@ export const authOptions: NextAuthOptions = {
           return null;
         }
         await clearLoginFailures(email);
-        return { id: user.id, email: user.email, name: user.name, sessionVersion: user.sessionVersion } as AuthUser;
+        if (user.totpEnabled) {
+          const pre = (credentials as Record<string, string>).preAuthToken;
+          // Second step: password + valid one-time 2FA ticket → real session.
+          if (pre && (await verifyPreAuthToken(pre, email))) {
+            return {
+              id: user.id,
+              email: user.email,
+              name: user.name,
+              sessionVersion: user.sessionVersion,
+              totpPending: false,
+            } as AuthUser;
+          }
+          // First step: password OK but 2FA not yet completed. This returns a
+          // guarded partial session that can only call the 2FA endpoints.
+          return {
+            id: user.id,
+            email: user.email,
+            name: user.name,
+            sessionVersion: user.sessionVersion,
+            totpPending: true,
+          } as AuthUser;
+        }
+        return {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          sessionVersion: user.sessionVersion,
+          totpPending: false,
+        } as AuthUser;
       },
     }),
   ],
@@ -39,6 +69,7 @@ export const authOptions: NextAuthOptions = {
       if (user) {
         token.uid = (user as AuthUser).id;
         token.sv = (user as AuthUser).sessionVersion ?? 0;
+        token.totpPending = (user as AuthUser).totpPending ?? false;
       }
       return token;
     },
@@ -46,6 +77,7 @@ export const authOptions: NextAuthOptions = {
       if (session.user) {
         (session.user as { id?: string }).id = token.uid as string;
         (session.user as { sv?: number }).sv = token.sv as number;
+        (session.user as { totpPending?: boolean }).totpPending = token.totpPending as boolean;
       }
       return session;
     },

@@ -5,15 +5,17 @@ import { prisma } from "./prisma";
 import { rateLimit, clientIp } from "./rate-limit";
 import { captureError } from "./observability";
 
-async function sessionUser(): Promise<{ id: string; sv: number }> {
+export async function sessionUser(): Promise<{ id: string; sv: number; totpPending: boolean }> {
   const session = await getServerSession(authOptions);
-  const su = (session?.user as { id?: string; sv?: number } | undefined);
+  const su = (session?.user as { id?: string; sv?: number; totpPending?: boolean } | undefined);
   if (!su?.id) throw new ApiError(401, "unauthorized");
-  return { id: su.id, sv: su.sv ?? 0 };
+  return { id: su.id, sv: su.sv ?? 0, totpPending: su.totpPending ?? false };
 }
 
 export async function requireUserId(): Promise<string> {
-  const { id, sv } = await sessionUser();
+  const { id, sv, totpPending } = await sessionUser();
+  // Partial 2FA sessions must not touch protected resources.
+  if (totpPending) throw new ApiError(403, "2fa-required");
   // Session revocation: password reset / revoke-all bumps User.sessionVersion;
   // older JWTs carry a stale version and are rejected here.
   const user = await prisma.user.findUnique({ where: { id }, select: { sessionVersion: true } });
@@ -24,8 +26,9 @@ export async function requireUserId(): Promise<string> {
 // Account gate for credit-consuming actions: email must be verified first
 // (anti-abuse — unverified accounts can't burn provider cost).
 export async function requireVerifiedUser(): Promise<string> {
-  const { id, sv } = await sessionUser();
+  const { id, sv, totpPending } = await sessionUser();
   const userId = id;
+  if (totpPending) throw new ApiError(403, "2fa-required");
   const user = await prisma.user.findUnique({ where: { id: userId }, select: { emailVerified: true, sessionVersion: true } });
   if (!user || user.sessionVersion !== sv) throw new ApiError(401, "unauthorized");
   if (!user.emailVerified) throw new ApiError(403, "verify-email-required");
@@ -58,6 +61,9 @@ export function fail(error: unknown) {
     msg.includes("already") ||
     msg.includes("not-found") ||
     msg.includes("verify-email-required") ||
+    msg.includes("2fa-required") ||
+    msg.includes("2fa-not-enabled") ||
+    msg.includes("invalid-password") ||
     msg.includes("rate-limited") ||
     msg.includes("unauthorized");
   if (!expected) {

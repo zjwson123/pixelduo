@@ -1,0 +1,172 @@
+"use client";
+
+import { useCallback, useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import Link from "next/link";
+
+interface Me {
+  email: string;
+  totpEnabled: boolean;
+}
+
+interface Setup {
+  secret: string;
+  otpauthUrl: string;
+  qrDataUrl: string;
+}
+
+export default function SecurityPage() {
+  const router = useRouter();
+  const [me, setMe] = useState<Me | null>(null);
+  const [setup, setSetup] = useState<Setup | null>(null);
+  const [code, setCode] = useState("");
+  const [backupCodes, setBackupCodes] = useState<string[] | null>(null);
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [info, setInfo] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const refresh = useCallback(async () => {
+    try {
+      const res = await fetch("/api/me");
+      if (res.status === 403) {
+        router.push("/login?2fa=1");
+        return;
+      }
+      const data = await res.json();
+      if (data.ok) setMe(data.user);
+    } catch {
+      // ignore
+    }
+  }, [router]);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  const enable = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const res = await fetch("/api/2fa/setup", { method: "POST" });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error ?? "setup failed");
+      if (data.alreadyEnabled) {
+        setInfo("Two-factor authentication is already enabled.");
+        refresh();
+      } else {
+        setSetup({ secret: data.secret, otpauthUrl: data.otpauthUrl, qrDataUrl: data.qrDataUrl });
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Setup failed.");
+    }
+    setBusy(false);
+  };
+
+  const confirm = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setError("");
+    const res = await fetch("/api/2fa/confirm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: code }),
+    });
+    const data = await res.json();
+    setBusy(false);
+    if (!data.ok) {
+      setError(data.error === "invalid-code" ? "Invalid code — try again." : "Confirmation failed.");
+      return;
+    }
+    setBackupCodes(data.backupCodes);
+    setSetup(null);
+    setCode("");
+    refresh();
+  };
+
+  const disable = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setError("");
+    const res = await fetch("/api/2fa/disable", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password, token: code }),
+    });
+    const data = await res.json();
+    setBusy(false);
+    if (!data.ok) {
+      setError(data.error === "invalid-password" ? "Wrong password." : data.error === "invalid-code" ? "Invalid code." : "Disable failed.");
+      return;
+    }
+    setPassword("");
+    setCode("");
+    setInfo("Two-factor authentication disabled.");
+    refresh();
+  };
+
+  return (
+    <div className="auth-wrap">
+      <div className="auth-card">
+        <div className="row">
+          <span className="logo-mark"><i></i><i></i></span>
+          <span style={{ fontWeight: 800 }}>PixelDuo</span>
+        </div>
+        <h1 style={{ marginTop: 18 }}>Security</h1>
+        <p className="sub">{me?.email ?? "…"} · Two-factor authentication (TOTP)</p>
+
+        {error && <div className="form-error">{error}</div>}
+        {info && <p style={{ color: "#2f9e44", margin: "10px 0" }}>{info}</p>}
+
+        {backupCodes ? (
+          <div>
+            <h2 style={{ fontSize: 17, marginTop: 18 }}>Save your backup codes</h2>
+            <p className="sub">Each code works exactly once. Store them somewhere safe — they&apos;re your only way back in if you lose your authenticator.</p>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, margin: "14px 0" }}>
+              {backupCodes.map((c) => (
+                <code key={c} style={{ background: "rgba(0,0,0,0.05)", padding: "8px 10px", borderRadius: 8, fontFamily: "monospace" }}>{c}</code>
+              ))}
+            </div>
+            <button className="btn btn-dark btn-block" onClick={() => setBackupCodes(null)}>I saved them</button>
+          </div>
+        ) : me?.totpEnabled && !setup ? (
+          <form onSubmit={disable} style={{ marginTop: 14 }}>
+            <div className="field">
+              <label htmlFor="pw">Password</label>
+              <input id="pw" type="password" required value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" />
+            </div>
+            <div className="field">
+              <label htmlFor="code">Current 6-digit code</label>
+              <input id="code" value={code} onChange={(e) => setCode(e.target.value)} placeholder="••••••" required />
+            </div>
+            <button type="submit" className="btn btn-danger btn-block" disabled={busy} style={{ marginTop: 6 }}>
+              {busy ? "Disabling…" : "Disable 2FA"}
+            </button>
+          </form>
+        ) : setup ? (
+          <form onSubmit={confirm} style={{ marginTop: 14 }}>
+            <h2 style={{ fontSize: 17 }}>Scan with your authenticator app</h2>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={setup.qrDataUrl} alt="TOTP QR code" style={{ width: 180, height: 180, margin: "12px 0", imageRendering: "pixelated" }} />
+            <p className="sub" style={{ wordBreak: "break-all" }}>Secret: <code>{setup.secret}</code></p>
+            <div className="field">
+              <label htmlFor="code">6-digit code from the app</label>
+              <input id="code" value={code} onChange={(e) => setCode(e.target.value)} placeholder="••••••" required />
+            </div>
+            <button type="submit" className="btn btn-dark btn-block" disabled={busy} style={{ marginTop: 6 }}>
+              {busy ? "Confirming…" : "Confirm & enable"}
+            </button>
+          </form>
+        ) : (
+          <button className="btn btn-dark btn-block" onClick={enable} disabled={busy} style={{ marginTop: 14 }}>
+            {busy ? "Preparing…" : "Enable 2FA"}
+          </button>
+        )}
+
+        <div className="auth-foot">
+          <Link className="link" href="/studio">Back to workbench</Link>
+        </div>
+      </div>
+    </div>
+  );
+}

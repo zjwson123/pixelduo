@@ -14,6 +14,7 @@ export async function GET() {
         plan: true,
         planRenewsAt: true,
         emailVerified: true,
+        totpEnabled: true,
         createdAt: true,
       },
     });

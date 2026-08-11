@@ -100,6 +100,14 @@ img { display: block; }
 
 .verify-banner .btn { white-space: nowrap; }
 
+.btn-danger {
+  background: rgba(224, 49, 49, 0.12);
+  color: #c92a2a;
+  border: 1px solid rgba(224, 49, 49, 0.35);
+}
+
+.btn-danger:hover { background: rgba(224, 49, 49, 0.2); }
+
 .legal {
   max-width: 760px;
   margin: 0 auto;

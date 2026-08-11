@@ -81,6 +81,7 @@ jobs:
       REDIS_URL: redis://localhost:6379
       MOCK_IMAGE_PROVIDER: "1"
       EMAIL_VERIFY_AUTO: "1"
+      MIDDLEWARE_AUTH_LIMIT: "1000"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

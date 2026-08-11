@@ -9,10 +9,13 @@ export default function LoginPage() {
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [code, setCode] = useState("");
+  const [backupMode, setBackupMode] = useState(false);
+  const [step, setStep] = useState<"password" | "totp">("password");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
-  const submit = async (e: React.FormEvent) => {
+  const submitPassword = async (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true);
     setError("");
@@ -22,13 +25,78 @@ export default function LoginPage() {
       setError("Invalid email or password.");
       return;
     }
+    const status = await fetch("/api/auth/2fa-status").then((r) => r.json());
+    if (status.ok && status.needs2fa) {
+      setStep("totp");
+      return;
+    }
     router.push("/studio");
     router.refresh();
   };
 
+  const submitTotp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setError("");
+    const res = await fetch("/api/auth/2fa-verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(backupMode ? { backupCode: code } : { token: code }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      setBusy(false);
+      setError(data.error === "invalid-code" ? "Invalid code." : "Verification failed.");
+      return;
+    }
+    const s = await signIn("credentials", { email, password, preAuthToken: data.preAuthToken, redirect: false });
+    setBusy(false);
+    if (s?.error) {
+      setError("Verification failed.");
+      return;
+    }
+    router.push("/studio");
+    router.refresh();
+  };
+
+  if (step === "totp") {
+    return (
+      <div className="auth-wrap">
+        <form className="auth-card" onSubmit={submitTotp}>
+          <div className="row">
+            <span className="logo-mark"><i></i><i></i></span>
+            <span style={{ fontWeight: 800 }}>PixelDuo</span>
+          </div>
+          <h1 style={{ marginTop: 18 }}>Two-factor authentication</h1>
+          <p className="sub">Enter the 6-digit code from your authenticator app{backupMode ? " (backup code)" : ""}.</p>
+          {error && <div className="form-error">{error}</div>}
+          <div className="field">
+            <label htmlFor="code">{backupMode ? "Backup code" : "6-digit code"}</label>
+            <input
+              id="code"
+              value={code}
+              onChange={(e) => setCode(e.target.value)}
+              placeholder={backupMode ? "XXXXXXXXXX" : "••••••"}
+              autoFocus
+              required
+            />
+          </div>
+          <button type="submit" className="btn btn-dark btn-block" disabled={busy} style={{ marginTop: 6 }}>
+            {busy ? "Verifying…" : "Verify"}
+          </button>
+          <div className="auth-foot">
+            <button type="button" className="link" style={{ background: "none", border: 0, cursor: "pointer" }} onClick={() => { setBackupMode(!backupMode); setCode(""); setError(""); }}>
+              {backupMode ? "Use authenticator code instead" : "Use a backup code instead"}
+            </button>
+          </div>
+        </form>
+      </div>
+    );
+  }
+
   return (
     <div className="auth-wrap">
-      <form className="auth-card" onSubmit={submit}>
+      <form className="auth-card" onSubmit={submitPassword}>
         <div className="row">
           <span className="logo-mark"><i></i><i></i></span>
           <span style={{ fontWeight: 800 }}>PixelDuo</span>
