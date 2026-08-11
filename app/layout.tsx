@@ -2,9 +2,27 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
+  metadataBase: new URL(process.env.NEXTAUTH_URL ?? "http://localhost:3000"),
   title: "PixelDuo — Two models. One prompt. Your call.",
   description:
     "Dual-engine AI image studio: GPT Image 2 × Seedream 5, transparent per-image pricing, AI prompt assistant.",
+  openGraph: {
+    type: "website",
+    locale: "en_US",
+    url: "/",
+    siteName: "PixelDuo",
+    title: "PixelDuo — Two models. One prompt. Your call.",
+    description:
+      "Dual-engine AI image studio: GPT Image 2 × Seedream 5, transparent per-image pricing, AI prompt assistant.",
+    images: [{ url: "/templates/cyber_2560.png", width: 2560, height: 2560, alt: "PixelDuo dual-engine AI image studio" }],
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "PixelDuo — Two models. One prompt. Your call.",
+    description: "Dual-engine AI image studio: GPT Image 2 × Seedream 5 with transparent per-image pricing.",
+    images: ["/templates/cyber_2560.png"],
+  },
+  robots: { index: true, follow: true },
 };
 
 const themeScript = `

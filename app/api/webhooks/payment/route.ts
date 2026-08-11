@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { fulfillOrder, revokeOrderCreditsTx } from "@/lib/ledger";
 import { getPaymentProvider } from "@/lib/payments";
 import { sanitizeWebhookPayload } from "@/lib/payments/sanitize";
-import { sendOrderReceiptEmail } from "@/lib/mail";
+import { sendOrderReceiptEmail, sendRefundEmail } from "@/lib/mail";
 import { captureError } from "@/lib/observability";
 import { NextResponse } from "next/server";
 
@@ -17,9 +17,9 @@ export async function POST(req: Request) {
     const existing = await prisma.paymentEvent.findUnique({ where: { eventId: event.eventId } });
     if (existing) return ok({ processed: true, duplicate: true });
 
-    // Receipt email is sent after the transaction commits, and only once
-    // (fulfillOrder returns alreadyPaid for duplicate/partial webhooks).
-    const receipt = await prisma.$transaction(async (tx) => {
+    // Receipt / refund emails are sent after the transaction commits, and only
+    // once (fulfillOrder returns alreadyPaid for duplicate/partial webhooks).
+    const mail = await prisma.$transaction(async (tx) => {
       // Resolve the order: explicit orderId first, then the provider's own
       // payment id (refund webhooks often don't echo our custom data).
       const order = event.orderId
@@ -49,6 +49,7 @@ export async function POST(req: Request) {
           if (!result.alreadyPaid) {
             const user = await tx.user.findUnique({ where: { id: order.userId }, select: { email: true } });
             return {
+              kind: "receipt" as const,
               email: user?.email ?? "",
               itemName:
                 order.kind === "plan"
@@ -63,16 +64,30 @@ export async function POST(req: Request) {
         if (order && order.status === "paid") {
           await tx.order.update({ where: { id: order.id }, data: { status: "refunded" } });
           await revokeOrderCreditsTx(tx, order);
+          const user = await tx.user.findUnique({ where: { id: order.userId }, select: { email: true } });
+          return {
+            kind: "refund" as const,
+            email: user?.email ?? "",
+            itemName:
+              order.kind === "plan"
+                ? `${order.planId ?? "plan"} plan`
+                : `${order.credits} credits pack`,
+            amountUsd: order.amountUsd,
+          };
         }
       }
       return null;
     });
-    if (receipt?.email) {
+    if (mail?.email) {
       try {
-        await sendOrderReceiptEmail(receipt.email, receipt.itemName, receipt.amountUsd, receipt.credits);
+        if (mail.kind === "refund") {
+          await sendRefundEmail(mail.email, mail.itemName, mail.amountUsd);
+        } else {
+          await sendOrderReceiptEmail(mail.email, mail.itemName, mail.amountUsd, mail.credits);
+        }
       } catch (e) {
-        // Receipt delivery failure must not fail the payment webhook.
-        captureError(e, { scope: "order-receipt" });
+        // Delivery failure must not fail the payment webhook.
+        captureError(e, { scope: `order-${mail.kind}` });
       }
     }
     return ok({ processed: true });

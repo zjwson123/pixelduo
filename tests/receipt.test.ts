@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { prisma } from "../lib/prisma";
+import { fulfillOrder } from "../lib/ledger";
 import { _setMailerForTests, type Mailer } from "../lib/mail";
 import { _resetPaymentProviderForTests } from "../lib/payments";
 import { POST as webhookPOST } from "../app/api/webhooks/payment/route";
@@ -66,5 +67,31 @@ describe("order receipt emails", () => {
     const dup = await webhookPOST(webhookRequest(eventId, orderId));
     expect((await dup.json()).duplicate).toBe(true);
     expect(receipts).toHaveLength(1);
+  });
+
+  it("sends a refund email and revokes credits on refund", async () => {
+    const order = await prisma.order.create({
+      data: {
+        userId,
+        kind: "pack",
+        provider: "mock",
+        amountUsd: 4.99,
+        credits: 400,
+        idempotencyKey: `receipt-refund-${Date.now()}`,
+      },
+    });
+    await fulfillOrder(userId, order.id, "pack", 400);
+    const before = (await prisma.user.findUniqueOrThrow({ where: { id: userId } })).credits;
+    const res = await webhookPOST(webhookRequest(`evt_refund_${Date.now()}`, order.id, "refunded"));
+    expect((await res.json()).processed).toBe(true);
+
+    const orderAfter = await prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(orderAfter.status).toBe("refunded");
+    const after = (await prisma.user.findUniqueOrThrow({ where: { id: userId } })).credits;
+    expect(after).toBe(before - 400);
+
+    const refundMail = receipts.filter((r) => r.subject.includes("refund"));
+    expect(refundMail).toHaveLength(1);
+    expect(refundMail[0].subject).toContain("400 credits pack");
   });
 });

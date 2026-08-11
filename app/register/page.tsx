@@ -4,6 +4,7 @@ import { useState } from "react";
 import { signIn } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import { OAuthButtons } from "@/components/oauth-buttons";
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -90,6 +91,7 @@ export default function RegisterPage() {
         <button type="submit" className="btn btn-dark btn-block" disabled={busy} style={{ marginTop: 6 }}>
           {busy ? "Creating…" : "Create account"}
         </button>
+        <OAuthButtons />
         <div className="auth-foot">
           Already have an account? <Link className="link" href="/login">Sign in</Link>
         </div>

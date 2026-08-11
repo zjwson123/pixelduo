@@ -1,9 +1,13 @@
 import type { NextAuthOptions } from "next-auth";
 import CredentialsProvider from "next-auth/providers/credentials";
+import GoogleProvider from "next-auth/providers/google";
+import GitHubProvider from "next-auth/providers/github";
 import bcrypt from "bcryptjs";
+import { randomBytes } from "crypto";
 import { prisma } from "./prisma";
 import { isLoginBlocked, recordLoginFailure, clearLoginFailures } from "./login-guard";
 import { verifyPreAuthToken } from "./twofa";
+import { signupBonus } from "./ledger";
 
 interface AuthUser {
   id: string;
@@ -63,13 +67,53 @@ export const authOptions: NextAuthOptions = {
         } as AuthUser;
       },
     }),
+    // OAuth providers activate only when credentials are configured.
+    ...(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET
+      ? [
+          GoogleProvider({
+            clientId: process.env.GOOGLE_CLIENT_ID,
+            clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+          }),
+        ]
+      : []),
+    ...(process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET
+      ? [
+          GitHubProvider({
+            clientId: process.env.GITHUB_CLIENT_ID,
+            clientSecret: process.env.GITHUB_CLIENT_SECRET,
+          }),
+        ]
+      : []),
   ],
   callbacks: {
-    async jwt({ token, user }) {
+    // OAuth: find-or-create the local account (providers verify the email).
+    // Users with 2FA enabled must keep using password login — otherwise OAuth
+    // would silently bypass the second factor.
+    async signIn({ user, account }) {
+      if (account?.type !== "oauth") return true;
+      const dbUser = await ensureOAuthUser(user.email ?? "", user.name ?? "");
+      if (!dbUser) return false;
+      if (dbUser.totpEnabled) return false;
+      return true;
+    },
+    async jwt({ token, user, account }) {
       if (user) {
-        token.uid = (user as AuthUser).id;
-        token.sv = (user as AuthUser).sessionVersion ?? 0;
-        token.totpPending = (user as AuthUser).totpPending ?? false;
+        if (account?.type === "oauth") {
+          // OAuth first sign-in: map the provider profile to our account.
+          const db = await prisma.user.findUnique({
+            where: { email: (user.email ?? "").toLowerCase().trim() },
+            select: { id: true, sessionVersion: true },
+          });
+          if (db) {
+            token.uid = db.id;
+            token.sv = db.sessionVersion;
+            token.totpPending = false;
+          }
+        } else {
+          token.uid = (user as AuthUser).id;
+          token.sv = (user as AuthUser).sessionVersion ?? 0;
+          token.totpPending = (user as AuthUser).totpPending ?? false;
+        }
       }
       return token;
     },
@@ -83,3 +127,27 @@ export const authOptions: NextAuthOptions = {
     },
   },
 };
+
+// Find-or-create a local account from a verified OAuth identity.
+export async function ensureOAuthUser(
+  email: string,
+  name: string,
+): Promise<{ id: string; totpEnabled: boolean } | null> {
+  const e = email.toLowerCase().trim();
+  if (!e) return null;
+  let user = await prisma.user.findUnique({ where: { email: e } });
+  if (!user) {
+    user = await prisma.user.create({
+      data: {
+        email: e,
+        passwordHash: randomBytes(32).toString("hex"), // OAuth users have no password
+        name: name || e.split("@")[0],
+        emailVerified: new Date(),
+      },
+    });
+    await signupBonus(user.id);
+  } else if (!user.emailVerified) {
+    await prisma.user.update({ where: { id: user.id }, data: { emailVerified: new Date() } });
+  }
+  return { id: user.id, totpEnabled: user.totpEnabled };
+}

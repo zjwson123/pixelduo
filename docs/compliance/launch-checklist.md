@@ -17,7 +17,7 @@
 - [x] 登录防爆破（Redis 按账号 10 次失败/15 分钟锁定）
 - [x] 会话吊销（重置密码/主动吊销后旧 JWT 失效）
 - [x] 2FA（TOTP + 二维码 + 一次性备用码；两步登录；部分会话受保护）
-- [ ] OAuth 登录（Google/GitHub，需外部 OAuth 凭据）
+- [x] OAuth 登录（Google/GitHub，配置 env 即启用；2FA 账号强制走密码登录）
 
 ## 运营
 

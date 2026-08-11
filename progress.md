@@ -233,3 +233,11 @@
 - **UI**：登录页两步流程（6 位码/备用码切换）、`/account/security` 启用/禁用页（QR + 密钥 + 备用码一次展示）、工作台右上角 Security 入口
 - **测试基建修复**：中间件 /api/auth 粗限流改 env 可配（`MIDDLEWARE_AUTH_LIMIT`，e2e/CI 放大到 1000）；定位并解决 e2e 注册限流按 `:::1` 累计触顶的问题（跑测前清 Redis 键）
 - **验证**：单测 60/60（新增 twofa 4 例：setup/verify、备用码单次、预认证票据单次+过期）；**e2e 6/6**（新增 2fa.spec 全流程：启用→TOTP 登录→部分会话 403 防护→备用码登录）；tsc/build 通过；compose 全栈 healthy
+
+## 2026-08-11（SEO + 退款通知 + OAuth 登录）
+
+- **SEO**：全局 metadata（metadataBase/OG/Twitter/robots）+ 落地页 metadata；`app/robots.ts`（屏蔽 /api/、/studio、/account/ 等）+ `app/sitemap.ts`（首页/登录/注册/条款/隐私）
+- **退款通知邮件**：webhook 退款分支在事务提交后发送退款邮件（商品/金额），与积分扣回同一闭环，投递失败仅告警
+- **OAuth（Google/GitHub）**：`GOOGLE_CLIENT_ID/SECRET`、`GITHUB_CLIENT_ID/SECRET` 配置即启用（不配置不显示按钮）；首次登录自动建号（邮箱视为已验证 + 发 30 积分，`ensureOAuthUser`）；**开启 2FA 的账号禁止 OAuth 登录**（signIn 回调拦截，避免绕过第二因子），登录页提示改用密码；登录/注册页新增 OAuth 按钮组件
+- **修复回归**：jwt 回调曾把凭据登录误判为 OAuth（`token.uid` 首次为空 + 未区分 account.type），导致 totpPending 丢失、2FA 被跳过——改用 `account?.type === "oauth"` 路由后 e2e 复测通过
+- **验证**：单测 64/64（新增 oauth 3 例：建号+奖励、幂等不重复、空邮箱拒绝；receipt 增退款 1 例：退款邮件 + 扣回 400 积分）；e2e 7/7（新增 robots/sitemap 断言）；tsc/build 通过；**容器实测**：robots.txt/sitemap.xml 200，stripe 退款 webhook → 退款邮件（Item/金额齐全）+ 积分 1050→0；已恢复 mock

@@ -4,6 +4,7 @@ import { useState } from "react";
 import { signIn } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import { OAuthButtons } from "@/components/oauth-buttons";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -22,7 +23,11 @@ export default function LoginPage() {
     const res = await signIn("credentials", { email, password, redirect: false });
     setBusy(false);
     if (res?.error) {
-      setError("Invalid email or password.");
+      setError(
+        res.error === "AccessDenied"
+          ? "Two-factor authentication is enabled — sign in with your password."
+          : "Invalid email or password.",
+      );
       return;
     }
     const status = await fetch("/api/auth/2fa-status").then((r) => r.json());
@@ -118,6 +123,7 @@ export default function LoginPage() {
         <button type="submit" className="btn btn-dark btn-block" disabled={busy} style={{ marginTop: 6 }}>
           {busy ? "Signing in…" : "Sign in"}
         </button>
+        <OAuthButtons />
         <div className="auth-foot">
           No account? <Link className="link" href="/register">Create one — 30 free credits</Link>
         </div>

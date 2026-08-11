@@ -133,3 +133,20 @@ export async function sendOrderReceiptEmail(
     ].join("\n"),
   );
 }
+
+export async function sendRefundEmail(to: string, itemName: string, amountUsd: number): Promise<void> {
+  await sendSafely(
+    to,
+    `Your PixelDuo refund — ${itemName}`,
+    [
+      `We processed a refund for your PixelDuo purchase:`,
+      "",
+      `Item: ${itemName}`,
+      `Refunded amount: $${amountUsd.toFixed(2)}`,
+      "",
+      "The refund may take a few business days to appear on your statement.",
+      "",
+      `https://pixelduo.ai/studio`,
+    ].join("\n"),
+  );
+}
