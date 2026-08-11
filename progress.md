@@ -241,3 +241,12 @@
 - **OAuth（Google/GitHub）**：`GOOGLE_CLIENT_ID/SECRET`、`GITHUB_CLIENT_ID/SECRET` 配置即启用（不配置不显示按钮）；首次登录自动建号（邮箱视为已验证 + 发 30 积分，`ensureOAuthUser`）；**开启 2FA 的账号禁止 OAuth 登录**（signIn 回调拦截，避免绕过第二因子），登录页提示改用密码；登录/注册页新增 OAuth 按钮组件
 - **修复回归**：jwt 回调曾把凭据登录误判为 OAuth（`token.uid` 首次为空 + 未区分 account.type），导致 totpPending 丢失、2FA 被跳过——改用 `account?.type === "oauth"` 路由后 e2e 复测通过
 - **验证**：单测 64/64（新增 oauth 3 例：建号+奖励、幂等不重复、空邮箱拒绝；receipt 增退款 1 例：退款邮件 + 扣回 400 积分）；e2e 7/7（新增 robots/sitemap 断言）；tsc/build 通过；**容器实测**：robots.txt/sitemap.xml 200，stripe 退款 webhook → 退款邮件（Item/金额齐全）+ 积分 1050→0；已恢复 mock
+
+## 2026-08-11（管理后台 Admin Console）
+
+- **模型**：`User.role`（user/admin；迁移 `20260811120000_admin_role`）；账本新增 ADMIN 来源——`adminGrantTx`（补偿积分，永不过期、优先消耗）+ `adminClawbackTx`（FIFO 回收，免费/管理池优先，不变量 `credits == SUM(remaining)` 保持）
+- **权限**：`requireAdmin()` 守卫全部 /api/admin/*（未登录 401、非管理员 403、2FA 部分会话 403）
+- **API**：用户列表（搜索/分页）、积分调整（±、带备注，写账本）、角色升迁（不能自降）、删号（清图片+孤儿表）、订单列表、图片列表/删除（审核）
+- **UI**：`/admin` 三页签（Users/Orders/Images），工作台右上角仅管理员可见 Admin 入口；`scripts/promote-admin.ts <email>` 提权
+- **顺手修复**：账号删除与管理员删号统一清理 BackupCode/VerificationToken/CreditReminder 孤儿行；**测试基建再加固**——注册限流与中间件 API 限流全部 env 可配（`REGISTER_RATE_LIMIT`/`MIDDLEWARE_API_LIMIT`，CI/e2e 放大），根治"多轮跑测累计限流"类 flaky
+- **验证**：单测 66/66（新增 admin 2 例：grant/clawback 不变量 + FIFO 顺序、超额回收拒绝）；e2e 8/8（新增 admin.spec：普通用户无入口且 /admin 跳回 → DB 提权 → Admin 入口出现 → 控制台给 30→130 积分）；tsc/build 通过；**容器实测**：`/api/admin/users` 未登录 401；compose 全栈 healthy

@@ -13,7 +13,12 @@ export async function POST(req: Request) {
     const images = await prisma.image.findMany({ where: { userId }, select: { url: true } });
     const storage = getStorage();
     await Promise.allSettled(images.map((i) => storage.delete(i.url)));
-    await prisma.user.delete({ where: { id: userId } });
+    await prisma.$transaction([
+      prisma.backupCode.deleteMany({ where: { userId } }),
+      prisma.verificationToken.deleteMany({ where: { userId } }),
+      prisma.creditReminder.deleteMany({ where: { userId } }),
+      prisma.user.delete({ where: { id: userId } }),
+    ]);
     return ok({ deleted: true });
   } catch (e) {
     if (e instanceof z.ZodError) return fail(new Error("invalid-input"));

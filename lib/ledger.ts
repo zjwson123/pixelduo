@@ -19,7 +19,7 @@ export type LedgerType =
 // - SUBSCRIPTION (monthly quota): valid until the cycle end (planRenewsAt)
 // - ROLLOVER (30% carryover): valid only until the following cycle end
 // - SIGNUP_BONUS / CHECKIN (free): never expire
-export type GrantSource = "SIGNUP_BONUS" | "CHECKIN" | "PURCHASE" | "SUBSCRIPTION" | "ROLLOVER";
+export type GrantSource = "SIGNUP_BONUS" | "CHECKIN" | "PURCHASE" | "SUBSCRIPTION" | "ROLLOVER" | "ADMIN";
 
 export interface SpendConsumption {
   grantId: string;
@@ -36,7 +36,7 @@ export interface CycleUsage {
 
 // Free credits are consumed first so paid credits can never be diluted by
 // free ones (anti-abuse: free pool cannot be hoarded while burning paid).
-const FREE_SOURCES = new Set<string>(["SIGNUP_BONUS", "CHECKIN"]);
+const FREE_SOURCES = new Set<string>(["SIGNUP_BONUS", "CHECKIN", "ADMIN"]);
 
 export async function addCreditsTx(
   tx: Prisma.TransactionClient,
@@ -266,4 +266,46 @@ export async function revokeOrderCreditsTx(
   });
   await addCreditsTx(tx, order.userId, "REVOKE", -revoked, "order", order.id, "credits revoked on payment refund");
   return revoked;
+}
+
+// Admin compensation: grant non-expiring credits (consumed first like free
+// credits) with an ADMIN ledger entry.
+export async function adminGrantTx(
+  tx: Prisma.TransactionClient,
+  userId: string,
+  amount: number,
+  note: string,
+): Promise<void> {
+  if (amount <= 0) throw new Error("invalid-amount");
+  await grantCreditsTx(tx, userId, "ADMIN", amount, null, "admin", null, note);
+}
+
+// Admin clawback: remove credits FIFO (free/admin grants first, then by
+// earliest expiry). Preserves the invariant User.credits == SUM(remaining).
+export async function adminClawbackTx(
+  tx: Prisma.TransactionClient,
+  userId: string,
+  amount: number,
+  note: string,
+): Promise<void> {
+  if (amount <= 0) throw new Error("invalid-amount");
+  const rows = await tx.$queryRaw<Array<{ id: string; remaining: number }>>(
+    Prisma.sql`SELECT id, remaining FROM "CreditGrant"
+      WHERE "userId" = ${userId} AND remaining > 0
+      ORDER BY CASE WHEN source IN ('SIGNUP_BONUS', 'CHECKIN', 'ADMIN') THEN 0 ELSE 1 END,
+               "expiresAt" ASC NULLS LAST, "createdAt" ASC
+      FOR UPDATE`,
+  );
+  let needed = amount;
+  for (const r of rows) {
+    if (needed <= 0) break;
+    const take = Math.min(r.remaining, needed);
+    await tx.creditGrant.update({
+      where: { id: r.id },
+      data: { remaining: { decrement: take } },
+    });
+    needed -= take;
+  }
+  if (needed > 0) throw new Error("insufficient-credits");
+  await addCreditsTx(tx, userId, "ADMIN", -amount, "admin", null, note);
 }

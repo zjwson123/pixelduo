@@ -14,7 +14,11 @@ const schema = z.object({
 
 export async function POST(req: Request) {
   try {
-    const limited = await enforceRateLimit(req, "register", 10, 3_600_000);
+    // Default 10 registrations/hour/IP; tests/CI raise it via env so repeated
+    // suite runs don't exhaust the counter (per-account abuse is contained by
+    // email verification + signup bonus after verification).
+    const registerLimit = Number(process.env.REGISTER_RATE_LIMIT ?? 10);
+    const limited = await enforceRateLimit(req, "register", registerLimit, 3_600_000);
     if (limited) return limited;
     const body = schema.parse(await req.json());
     const email = body.email.toLowerCase().trim();

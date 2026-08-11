@@ -12,6 +12,7 @@ model User {
   email         String   @unique
   passwordHash  String
   name          String?
+  role          String   @default("user") // user | admin
   credits       Int      @default(0)
   plan          String   @default("free") // free | starter | pro | studio
   planRenewsAt  DateTime?

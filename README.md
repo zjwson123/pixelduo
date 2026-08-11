@@ -19,6 +19,7 @@
 - **订单收据**：支付 webhook 履约成功后自动发收据邮件（商品/金额/到账积分，重复 webhook 不重复发送，投递失败仅告警不回滚支付）
 - **退款通知**：退款 webhook 处理成功后自动发退款邮件（商品/金额），与积分扣回同一闭环
 - **SEO**：全局 metadata（OpenGraph/Twitter）、robots.txt（屏蔽工作台/API/账号区）、sitemap.xml
+- **管理后台**：`/admin`（管理员专属）——用户搜索/升迁/删除、积分调整（补偿发 ADMIN 免费积分 / FIFO 回收，账本留痕）、订单列表、图片审核删除；提权：`npx tsx scripts/promote-admin.ts <email>`
 - **内容安全**：前置关键词过滤 + 后置 vision 模型图像审核（`IMAGE_MODERATION=1`，默认 gpt-5.4，命中即拦截 + 自动退款 + 删图）
 - **AI 标识**：免费档 gpt-image-2 图片交付前烘焙 "PixelDuo · AI 生成" 水印（sharp，worker 容器含 Noto CJK 字体）
 - NextAuth v4（邮箱+密码 + **OAuth**，JWT 会话）、bcrypt；**邮箱验证 + 密码找回**（单次令牌存 SHA-256 哈希，24h/1h 过期；注册送 30 积分改为验证后发放，未验证账号禁止生图/签到——防薅羊毛）；**登录防爆破**（Redis 按账号 10 次失败/15 分钟锁定）；**会话吊销**（`User.sessionVersion`，重置密码或 `POST /api/auth/revoke-sessions` 后旧 JWT 全部失效）；**TOTP 双因素认证**（otplib + QR，10 个一次性备用码，两步登录，部分会话被 API/页面级拦截，5 分钟单次预认证票据换真会话）；邮件走 `lib/mail.ts`：未配 `SMTP_URL` 时开发模式打印到服务日志，生产接 SES/SendGrid/Resend 等 SMTP
@@ -164,7 +165,7 @@ CI（`.github/workflows/ci.yml`）：Postgres 服务容器下跑单测、构建�
 ## 测试
 
 ```bash
-npm test                 # 单元测试（Postgres 测试库：成本/账本/队列重试/结转/支付/脱敏/账号/OAuth/2FA/提醒/收据/退款，64 例）
+npm test                 # 单元测试（Postgres 测试库：成本/账本/队列重试/结转/支付/脱敏/账号/OAuth/2FA/管理/提醒/收据/退款，66 例）
 npm run test:e2e         # 端到端（见下）
 ```
 
@@ -183,6 +184,7 @@ PW_CHANNEL=chrome npx playwright test   # 本地用系统 Chrome；CI 用自带 
 
 - 支付主体/备案仍为壳子：Stripe/Paddle Provider 已实现，真实沙箱全流程 + 生产 key 待申请；支付宝/微信待国内主体
 - 邮箱验证 + 找回密码 + 登录防爆破 + 会话吊销 + **TOTP 2FA**（含备用码）+ **OAuth（Google/GitHub，配置即启用）** 已上线
+- 管理后台已上线（`/admin`，管理员角色 + ADMIN 账本闭环）；API 转售（Studio API Key）为后续项
 - 图片对象备份：自托管已有 `backup-objects` 每日镜像 + 恢复演练；生产托管对象存储仍需开版本控制/跨区域复制
 - 内容安全：前置关键词过滤 + 后置 vision 审核（`IMAGE_MODERATION=1`，命中即拦截/退款/删图）
 - 水印：Seedream 自带"AI生成"合规标识；免费档 gpt 图交付前烘焙 "PixelDuo · AI 生成"（C2PA 元数据为后续项）

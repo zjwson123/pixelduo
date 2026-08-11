@@ -63,6 +63,7 @@ export function fail(error: unknown) {
     msg.includes("verify-email-required") ||
     msg.includes("2fa-required") ||
     msg.includes("2fa-not-enabled") ||
+    msg.includes("admin-required") ||
     msg.includes("invalid-password") ||
     msg.includes("rate-limited") ||
     msg.includes("unauthorized");

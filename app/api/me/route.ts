@@ -10,6 +10,7 @@ export async function GET() {
         id: true,
         email: true,
         name: true,
+        role: true,
         credits: true,
         plan: true,
         planRenewsAt: true,
