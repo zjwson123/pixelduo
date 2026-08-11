@@ -5,7 +5,7 @@
 
 ## 1. 买服务器
 
-- 推荐配置：**≥ 2C4G**（生图是 worker 异步处理，4C8G 更稳）
+- 推荐配置：**4C8G**（跑 3 个生图 worker + 数据库 + 图片存储，8GB 更稳；预算紧可 2C4G 先跑 2 个 worker）
 - 系统：Ubuntu 22.04 / 24.04
 - 常见渠道：DigitalOcean / Vultr / Hetzner（海外）；国内访问需考虑备案，先用海外节点 + 海外收款（Stripe/Paddle）最省事
 - 域名：把 `pixelduo.ai` 的 DNS **A 记录**指向服务器 IP，并开放 80/443 端口（防火墙）
@@ -39,10 +39,12 @@ set -a; source .env.production; set +a
 ## 4. 启动
 
 ```bash
-docker compose -f docker-compose.single.yml up -d --build
+docker compose -f docker-compose.single.yml up -d --build --scale worker=3
 ```
 
-首次会自动：建库迁移 → 起 Caddy 并申请 Let's Encrypt 证书 → web/worker/rollover/备份全部上线。
+首次会自动：建库迁移 → 起 Caddy 并申请 Let's Encrypt 证书 → web/3×worker/rollover/备份全部上线。
+3 个 worker 并发生图（每个 worker 同一时刻只处理 1 个任务，数据库队列自动分发，互不抢单）。
+如果机器只有 2C4G，把命令里的 `worker=3` 改成 `worker=2`。
 
 ## 5. 验证
 
@@ -55,10 +57,11 @@ npx tsx scripts/promote-admin.ts <你的邮箱>        # 提权管理员（在�
 
 ## 6. 日常运维
 
-- 升级：`git pull && docker compose -f docker-compose.single.yml up -d --build`
+- 升级：`git pull && docker compose -f docker-compose.single.yml up -d --build --scale worker=3`（注意：每次 `up` 都要带 `--scale worker=3`，不带会缩回 1 个 worker）
+- 扩缩 worker：`docker compose -f docker-compose.single.yml up -d --scale worker=3`（改数字即可，服务不中断）
 - 备份：DB 每天进 `./backups/`（保留 14 份），图片镜像进 `./backups/objects/`（保留 7 份）；建议把 `./backups/` 挂到对象存储或异地拷贝
 - 监控：Sentry DSN 生效后，异常自动上报
-- 回滚：升级前 `docker tag image-gen-web:latest image-gen-web:prev`，出问题 `docker compose -f docker-compose.single.yml up -d` 换回
+- 回滚：升级前 `docker tag image-gen-web:latest image-gen-web:prev`，出问题 `docker compose -f docker-compose.single.yml up -d --scale worker=3` 换回
 
 ## 7. 之后想迁移到托管服务
 

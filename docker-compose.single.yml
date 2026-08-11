@@ -75,6 +75,9 @@ services:
   worker:
     build: { context: ., target: worker }
     command: npx tsx scripts/worker.ts
+    # 默认 1 个 worker；生产建议起 3 个（4C8G）：
+    #   docker compose -f docker-compose.single.yml up -d --scale worker=3
+    # 2C4G 机器建议 2 个（--scale worker=2）。worker 无状态，随时可再扩缩。
     environment:
       <<: *appenv
       MOCK_IMAGE_PROVIDER: "0"

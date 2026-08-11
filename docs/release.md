@@ -28,10 +28,11 @@
 
 ```bash
 docker compose -f docker-compose.prod.yml build web worker rollover
-docker compose -f docker-compose.prod.yml up -d
+docker compose -f docker-compose.prod.yml up -d --scale worker=3
 ```
 
 Caddy 自动申请 Let's Encrypt 证书（80/443 需公网可达）。
+`--scale worker=3` 起 3 个并发生图 worker（单机自托管 `docker-compose.single.yml` 同样适用）；2C4G 小机建议改为 `worker=2`。worker 无状态，扩缩不影响在途任务。
 
 ## 3. 上线后冒烟（每项都应有明确输出）
 
@@ -65,6 +66,6 @@ curl -sI https://pixelduo.ai/ | grep -iE "content-security-policy|strict-transpo
 
 ## 6. 上线后第一周观察
 
-- 队列深度（`/api/health` 的 `queue.queued`）与生图成功率（Sentry）
+- 队列深度（`/api/health` 的 `queue.queued`）、worker 数量与实际吞吐：3 worker 下 queue 仍持续积压说明上游限流或配额不足
 - 误审核率：`IMAGE_MODERATION=1` 命中拦截数量 vs 投诉
 - 成本损耗：退款/失败重试导致的 provider 成本 vs 收入
