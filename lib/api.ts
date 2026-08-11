@@ -5,19 +5,30 @@ import { prisma } from "./prisma";
 import { rateLimit, clientIp } from "./rate-limit";
 import { captureError } from "./observability";
 
-export async function requireUserId(): Promise<string> {
+async function sessionUser(): Promise<{ id: string; sv: number }> {
   const session = await getServerSession(authOptions);
-  const uid = (session?.user as { id?: string } | undefined)?.id;
-  if (!uid) throw new ApiError(401, "unauthorized");
-  return uid;
+  const su = (session?.user as { id?: string; sv?: number } | undefined);
+  if (!su?.id) throw new ApiError(401, "unauthorized");
+  return { id: su.id, sv: su.sv ?? 0 };
+}
+
+export async function requireUserId(): Promise<string> {
+  const { id, sv } = await sessionUser();
+  // Session revocation: password reset / revoke-all bumps User.sessionVersion;
+  // older JWTs carry a stale version and are rejected here.
+  const user = await prisma.user.findUnique({ where: { id }, select: { sessionVersion: true } });
+  if (!user || user.sessionVersion !== sv) throw new ApiError(401, "unauthorized");
+  return id;
 }
 
 // Account gate for credit-consuming actions: email must be verified first
 // (anti-abuse — unverified accounts can't burn provider cost).
 export async function requireVerifiedUser(): Promise<string> {
-  const userId = await requireUserId();
-  const user = await prisma.user.findUnique({ where: { id: userId }, select: { emailVerified: true } });
-  if (!user?.emailVerified) throw new ApiError(403, "verify-email-required");
+  const { id, sv } = await sessionUser();
+  const userId = id;
+  const user = await prisma.user.findUnique({ where: { id: userId }, select: { emailVerified: true, sessionVersion: true } });
+  if (!user || user.sessionVersion !== sv) throw new ApiError(401, "unauthorized");
+  if (!user.emailVerified) throw new ApiError(403, "verify-email-required");
   return userId;
 }
 

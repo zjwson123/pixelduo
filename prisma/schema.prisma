@@ -16,6 +16,7 @@ model User {
   plan          String   @default("free") // free | starter | pro | studio
   planRenewsAt  DateTime?
   emailVerified DateTime?
+  sessionVersion Int     @default(0) // bumped on password reset / revoke-all
   createdAt     DateTime @default(now())
 
   ledgers  LedgerEntry[]
@@ -42,6 +43,18 @@ model VerificationToken {
   user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([email, purpose, createdAt])
+  @@index([userId])
+}
+
+// Deduplicates credit-expiry reminder emails (one per grant per bucket).
+model CreditReminder {
+  id         String   @id @default(cuid())
+  grantId    String
+  userId     String
+  daysBefore Int // 7 | 3 | 1
+  sentAt     DateTime @default(now())
+
+  @@unique([grantId, daysBefore])
   @@index([userId])
 }
 

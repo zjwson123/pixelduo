@@ -106,6 +106,8 @@ describe("password reset", () => {
     const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
     expect(await bcrypt.compare("newpassword456", user.passwordHash)).toBe(true);
     expect(await bcrypt.compare("password123", user.passwordHash)).toBe(false);
+    // Password reset bumps sessionVersion so older JWTs are rejected.
+    expect(user.sessionVersion).toBeGreaterThanOrEqual(1);
 
     const stale = await resetPOST(
       jsonRequest("http://localhost/api/auth/reset-password", { token: raw, password: "thirdpassword789" }),

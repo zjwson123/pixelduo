@@ -75,7 +75,7 @@ services:
 
   rollover:
     image: ${IMAGE_WORKER:-image-gen-worker:latest}
-    command: sh -c "while true; do npx tsx scripts/rollover.ts; npx tsx scripts/expire.ts; sleep 86400; done"
+    command: sh -c "while true; do npx tsx scripts/rollover.ts; npx tsx scripts/expire.ts; npx tsx scripts/remind.ts; sleep 86400; done"
     environment: *appenv
     restart: unless-stopped
 

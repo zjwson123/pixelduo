@@ -95,3 +95,18 @@ export async function sendResetPasswordEmail(to: string, rawToken: string): Prom
     ].join("\n"),
   );
 }
+
+export async function sendCreditExpiryEmail(to: string, daysLeft: number, credits: number): Promise<void> {
+  const dayLabel = daysLeft <= 1 ? "tomorrow" : `in ${daysLeft} days`;
+  await sendSafely(
+    to,
+    `Your PixelDuo credits expire ${dayLabel}`,
+    [
+      `You have ${credits} credits expiring ${dayLabel}.`,
+      "",
+      "Use them before they're gone — or top up now to keep creating.",
+      "",
+      `https://pixelduo.ai/studio`,
+    ].join("\n"),
+  );
+}

@@ -19,7 +19,11 @@ export async function POST(req: Request) {
     const user = await prisma.user.findUnique({ where: { email: result.email } });
     if (!user) return fail(new Error("invalid-token"));
     const passwordHash = await bcrypt.hash(body.password, 10);
-    await prisma.user.update({ where: { id: user.id }, data: { passwordHash } });
+    // Bump sessionVersion so all previously issued JWTs are rejected.
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { passwordHash, sessionVersion: { increment: 1 } },
+    });
     return ok({ reset: true });
   } catch (e) {
     if (e instanceof z.ZodError) return fail(new Error("invalid-input"));

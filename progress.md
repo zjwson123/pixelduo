@@ -205,3 +205,14 @@
 - **邮件失败告警**：`lib/mail.ts` 发送失败捕获上报 Sentry 并透出错误（验证/重置链接不静默丢失）
 - **配置修复**：宿主 `.env` 的 `STORAGE_DRIVER` 漂移为 local（与 compose/README 默认 s3 不一致，导致健康检查报 storage down）——对齐为 s3，全栈恢复 `ok:true`
 - **验证**：单测 52/52（新增 checkRedis、storage health）；e2e 4/4（health 断言新增 redis/storage/queue）；tsc/build 通过；compose 全栈 healthy
+
+## 2026-08-11（安全加固 + 到期提醒）
+
+- **登录防爆破**：`lib/login-guard.ts`（Redis 按账号 `loginfail:<email>` 计数，10 次失败/15 分钟锁定，成功登录清零，Redis 不可用降级为 no-op 不阻断认证）；接入 NextAuth authorize
+- **会话吊销**：`User.sessionVersion`（迁移 `20260811100000_session_version_reminders`），登录时写入 JWT claim `sv`，`requireUserId/requireVerifiedUser` 每次校验版本（重置密码或 `POST /api/auth/revoke-sessions` 后旧会话立即 401）
+- **积分到期提醒**：`lib/reminder.ts` + `scripts/remind.ts`——付费积分（PURCHASE/SUBSCRIPTION）到期前 7/3/1 天发提醒邮件，`CreditReminder(grantId, daysBefore)` 唯一约束去重；rollover 容器循环加入 remind 步骤（dev/prod compose）；发送失败 captureError 不阻塞任务
+- **验证**：
+  - 单测 55/55（新增 login-guard 1 例、reminder 2 例、auth-flow 补 sessionVersion 断言）
+  - **运行时实测（重建镜像后）**：10 次错误密码 → 正确密码仍被拦（`error=CredentialsSignin`，Redis 计数=10）；解锁后登录成功；`/api/me` 200 → `revoke-sessions` → 同 cookie `/api/me` 401；造 2 天后到期 grant → `[remind] sent 1`（邮件 "expire in 3 days"）→ 重跑 `sent 0`（去重生效）
+  - e2e 4/4（会话改动无回归）；tsc/build 通过；compose 全栈 healthy
+- 遗留：2FA / OAuth（NextAuth v4 多步登录需要自研预认证态，建议升级 NextAuth v5 或引入 otplib 时一并做）
