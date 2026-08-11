@@ -250,3 +250,14 @@
 - **UI**：`/admin` 三页签（Users/Orders/Images），工作台右上角仅管理员可见 Admin 入口；`scripts/promote-admin.ts <email>` 提权
 - **顺手修复**：账号删除与管理员删号统一清理 BackupCode/VerificationToken/CreditReminder 孤儿行；**测试基建再加固**——注册限流与中间件 API 限流全部 env 可配（`REGISTER_RATE_LIMIT`/`MIDDLEWARE_API_LIMIT`，CI/e2e 放大），根治"多轮跑测累计限流"类 flaky
 - **验证**：单测 66/66（新增 admin 2 例：grant/clawback 不变量 + FIFO 顺序、超额回收拒绝）；e2e 8/8（新增 admin.spec：普通用户无入口且 /admin 跳回 → DB 提权 → Admin 入口出现 → 控制台给 30→130 积分）；tsc/build 通过；**容器实测**：`/api/admin/users` 未登录 401；compose 全栈 healthy
+
+## 2026-08-11（公开 API + API Key 管理）
+
+- **模型**：`ApiKey`（`pd_live_…` 原始值仅创建时展示一次，库中只存 SHA-256 哈希 + 展示前缀 + lastUsedAt/revokedAt；迁移 `20260811130000_api_keys`）
+- **认证**：`lib/apikey.ts`——`authenticateApiKey` 解析 `Authorization: Bearer`，坏 key/已吊销统一 401（不泄露存在性）；`revokeApiKey` 立即失效
+- **API v1**：
+  - `POST /api/v1/images/generations`（prompt/model/quality/n≤4）→ Key 鉴权 → 每 Key 20 次/分钟 Redis 限流 → 前置内容安全过滤 → `createGenerationJob` 预扣积分走同一队列/审核/水印管线，返回 jobId 异步轮询
+  - `GET /api/v1/images/generations/:id`（Key 鉴权 + 归属校验）→ 状态 + 预签名图片 URL（生产 S3 直出）
+- **账户 Key 管理**：`POST/GET /api/account/keys`、`POST /api/account/keys/:id/revoke`；`/account/api` 页面（创建→仅一次展示+复制、列表前缀/最近使用/状态、吊销），工作台右上角 API Keys 入口
+- **文档**：`docs/api.md`（curl 示例、参数、轮询、错误码、Key 管理）
+- **验证**：单测 68/68（新增 apikey 2 例：哈希存储/前缀、鉴权/吊销/坏 key 拒绝）；e2e 9/9（新增 api-keys.spec：页面建 Key → Bearer 调 generations → 轮询 done + 1 图 → UI 吊销 → 401）；tsc/build 通过；**容器实测**：无 key/坏 key 调 v1 均 401；compose 全栈 healthy

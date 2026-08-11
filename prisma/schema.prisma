@@ -43,6 +43,20 @@ model BackupCode {
   @@index([userId])
 }
 
+// Public API access keys (SHA-256 hash only; raw key shown once at creation).
+model ApiKey {
+  id         String    @id @default(cuid())
+  userId     String
+  name       String
+  keyHash    String    @unique
+  prefix     String
+  revokedAt  DateTime?
+  lastUsedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([userId])
+}
+
 // Single-use email verification / password-reset tokens. Only the SHA-256
 // hash is stored; raw tokens travel in the email link.
 model VerificationToken {
