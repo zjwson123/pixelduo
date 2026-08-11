@@ -23,7 +23,7 @@
 - **限流**：路由级权威限制走 **Redis 全局计数**（`REDIS_URL`，生成 20/min、注册 10/h、结账 10/min、助手 30/min；无 Redis 自动回退单机内存）；中间件内存粗筛（auth 20/min、API 300/min per IP）
 - **Worker 健壮性**：指数退避重试（默认 3 次）、心跳、卡死恢复、终态失败 = 死信 + 退款
 - **监控告警**：Sentry（`@sentry/nextjs`），DSN 未配置时 no-op；API 500 自动上报（业务性错误过滤），worker/cron 异常带上下文上报
-- **备份**：compose `backup` 服务每日 pg_dump（`-Fc` 自定义格式）到 `./backups/`，保留 14 份；另可手动 `./scripts/backup.sh`
+- **备份**：compose `backup` 服务每日 pg_dump（`-Fc` 自定义格式）到 `./backups/`，保留 14 份；`backup-objects` 服务每日把用户图片镜像到 `./backups/objects/`（保留 N 份，可配第二桶异地备份）；恢复演练脚本 `scripts/restore-objects.sh`；手动备份 `./scripts/backup.sh` / `./scripts/backup-objects.sh`
 - **支付**：`PaymentProvider` 抽象 + **Stripe Checkout** 与 **Paddle Billing** 均已实现（沙箱/生产同一代码，webhook 验签 + eventId 幂等）；`PAYMENT_PROVIDER=stripe|paddle` + 对应 key/whsec 即启用，未配置时为 mock 壳
 - **退款闭环**：支付退款事件标记订单 refunded 并**扣回该订单未消耗的积分**（`revokeOrderCreditsTx`）；webhook 原文落库前做 **PII 脱敏**（GDPR/PIPL）
 - 订单历史：`GET /api/orders`（最近 50 笔）；本地模拟签名 webhook：`npx tsx scripts/test-webhook.ts --create-order <email> <credits>` / `--refund <orderId>`
@@ -95,6 +95,26 @@ SENTRY_DSN="https://xxxx@o000000.ingest.sentry.io/0000000" STORAGE_DRIVER=s3 doc
 gunzip -c backups/<file>.sql.gz | docker exec -i pixelduo-db psql -U pixelduo -d pixelduo
 ```
 
+图片对象备份（自托管 MinIO/S3 时使用；托管对象存储建议直接开版本控制 + 跨区域复制）：
+
+```bash
+# 手动快照（宿主运行时把 endpoint 指到 host.docker.internal）
+BACKUP_S3_ENDPOINT=http://host.docker.internal:9000 \
+BACKUP_S3_ACCESS_KEY_ID=pixelduo BACKUP_S3_SECRET_ACCESS_KEY=pixelduo-secret \
+BACKUP_S3_BUCKET=pixelduo ./scripts/backup-objects.sh
+
+# 恢复演练：把某个快照恢复到 scratch 桶并校验对象数（演练后删除 scratch 桶）
+BACKUP_S3_ENDPOINT=http://host.docker.internal:9000 \
+BACKUP_S3_ACCESS_KEY_ID=pixelduo BACKUP_S3_SECRET_ACCESS_KEY=pixelduo-secret \
+./scripts/restore-objects.sh <stamp> pixelduo-restore-test
+```
+
+compose 全栈默认带 `backup-objects` 服务（每日镜像 + 保留 7 份；配 `BACKUP_TARGET_*` 可同步到第二桶异地）。
+
+### 健康检查
+
+`GET /api/health` 返回 `db` / `redis` / `storage` / `rateLimiter` / `queue`（排队与运行中任务数、worker 最近心跳），任一关键依赖异常时 `ok:false`（各检查带 2.5s 超时保护，不会拖垮探活）。
+
 ### 生产部署（Docker Compose）
 
 ```bash
@@ -146,7 +166,7 @@ PW_CHANNEL=chrome npx playwright test   # 本地用系统 Chrome；CI 用自带 
 
 - 支付主体/备案仍为壳子：Stripe/Paddle Provider 已实现，真实沙箱全流程 + 生产 key 待申请；支付宝/微信待国内主体
 - 邮箱验证 + 找回密码已上线；**2FA 与 OAuth 登录为后续账号体系项**
-- 图片对象备份：生产依赖 R2/S3 版本控制/跨区域复制（本地 MinIO 卷未纳入 pg_dump）
+- 图片对象备份：自托管已有 `backup-objects` 每日镜像 + 恢复演练；生产托管对象存储仍需开版本控制/跨区域复制
 - 内容安全：前置关键词过滤 + 后置 vision 审核（`IMAGE_MODERATION=1`，命中即拦截/退款/删图）
 - 水印：Seedream 自带"AI生成"合规标识；免费档 gpt 图交付前烘焙 "PixelDuo · AI 生成"（C2PA 元数据为后续项）
 - 限流：Redis 全局（`rateLimiter: redis`）+ 中间件内存粗筛；监控告警 Sentry 待 DSN 生效

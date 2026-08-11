@@ -103,4 +103,7 @@ test("health endpoint reports ok", async ({ request }) => {
   const body = await res.json();
   expect(body.ok).toBe(true);
   expect(body.db).toBe("up");
+  expect(body.redis).toBe("up");
+  expect(body.storage).toBe("up");
+  expect(typeof body.queue.queued).toBe("number");
 });

@@ -77,10 +77,11 @@ web/worker 启动前会由 CI/部署流程执行 `npx prisma migrate deploy`（�
 - 托管 Postgres：开启自动备份 + PITR，按需 `pg_restore`（恢复演练已通过，见 `progress.md`）
 - 自托管 Postgres：`docker compose up -d backup` 每日 dump 到 `./backups/`；手动 `./scripts/backup.sh`
 - 恢复：`pg_restore -d $DATABASE_URL backups/pixelduo-<stamp>.dump.gz`
+- **对象存储（用户图片）**：托管 R2/S3 开启**版本控制 + 跨区域复制**（DR 首选）；自托管 MinIO 用 `backup-objects` 服务每日镜像到 `./backups/objects/`（保留 7 份，`BACKUP_TARGET_*` 可同步第二桶异地）；恢复演练 `./scripts/restore-objects.sh <stamp> <scratch-bucket>`
 
 ### 限流与审核
 
-- `/api/health` 的 `rateLimiter` 应为 `redis`（多实例全局限流）
+- `/api/health` 的 `rateLimiter` 应为 `redis`（多实例全局限流），且 `db`/`redis`/`storage` 均为 `up`；`queue.running` 长期为 0 且 `lastHeartbeat` 过期说明 worker 掉线
 - `IMAGE_MODERATION=1` 时每张图过 vision 审核，命中即拦截 + 自动退款；建议先小流量灰度观察误判率
 
 ### 回滚

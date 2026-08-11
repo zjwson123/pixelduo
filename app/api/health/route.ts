@@ -1,22 +1,52 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { getLimiterName } from "@/lib/rate-limit";
+import { getLimiterName, checkRedis } from "@/lib/rate-limit";
+import { getStorage } from "@/lib/storage";
 
 export const dynamic = "force-dynamic";
 
-// Public health check: DB reachability + service liveness.
+function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return Promise.race([p, new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms))]);
+}
+
+// Public health check: DB / Redis / storage reachability + queue liveness.
 export async function GET() {
   try {
-    await prisma.$queryRaw`SELECT 1`;
+    const [dbOk, redisOk, storageOk, queue] = await Promise.all([
+      prisma.$queryRaw`SELECT 1`.then(() => true).catch(() => false),
+      withTimeout(checkRedis(), 2500, false),
+      withTimeout(getStorage().health(), 2500, false),
+      withTimeout(
+        prisma.$transaction([
+          prisma.job.count({ where: { status: "queued" } }),
+          prisma.job.count({ where: { status: "running" } }),
+          prisma.job.findFirst({
+            where: { status: "running" },
+            orderBy: { heartbeatAt: "desc" },
+            select: { heartbeatAt: true },
+          }),
+        ]),
+        2500,
+        [0, 0, null] as [number, number, { heartbeatAt: Date | null } | null],
+      ),
+    ]);
+    const ok = dbOk && redisOk && storageOk;
     return NextResponse.json({
-      ok: true,
+      ok,
       service: "pixelduo",
-      db: "up",
+      db: dbOk ? "up" : "down",
+      redis: !process.env.REDIS_URL ? "unconfigured" : redisOk ? "up" : "down",
+      storage: storageOk ? "up" : "down",
       rateLimiter: getLimiterName(),
+      queue: {
+        queued: queue[0],
+        running: queue[1],
+        lastHeartbeat: queue[2]?.heartbeatAt ?? null,
+      },
       uptimeSec: Math.round(process.uptime()),
       time: new Date().toISOString(),
     });
-  } catch {
-    return NextResponse.json({ ok: false, db: "down" }, { status: 503 });
+  } catch (e) {
+    return NextResponse.json({ ok: false, db: "down", error: "health-check-failed" }, { status: 503 });
   }
 }

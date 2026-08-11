@@ -1,6 +1,7 @@
 import nodemailer, { type Transporter } from "nodemailer";
 import fs from "fs";
 import path from "path";
+import { captureError } from "./observability";
 
 export interface Mailer {
   send(to: string, subject: string, text: string): Promise<void>;
@@ -54,9 +55,20 @@ function baseUrl(): string {
   return process.env.NEXTAUTH_URL ?? "http://localhost:3000";
 }
 
+async function sendSafely(to: string, subject: string, text: string): Promise<void> {
+  try {
+    await getMailer().send(to, subject, text);
+  } catch (e) {
+    // Alert on delivery failures (Sentry when configured); rethrow so the API
+    // surfaces a failure instead of silently dropping the verification link.
+    captureError(e, { mailTo: to, mailSubject: subject });
+    throw e;
+  }
+}
+
 export async function sendVerificationEmail(to: string, rawToken: string): Promise<void> {
   const link = `${baseUrl()}/verify-email?token=${encodeURIComponent(rawToken)}`;
-  await getMailer().send(
+  await sendSafely(
     to,
     "Verify your PixelDuo email",
     [
@@ -71,7 +83,7 @@ export async function sendVerificationEmail(to: string, rawToken: string): Promi
 
 export async function sendResetPasswordEmail(to: string, rawToken: string): Promise<void> {
   const link = `${baseUrl()}/reset-password?token=${encodeURIComponent(rawToken)}`;
-  await getMailer().send(
+  await sendSafely(
     to,
     "Reset your PixelDuo password",
     [

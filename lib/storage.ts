@@ -6,6 +6,7 @@ import {
   PutObjectCommand,
   GetObjectCommand,
   DeleteObjectCommand,
+  HeadBucketCommand,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
@@ -14,6 +15,7 @@ export interface StorageDriver {
   get(key: string): Promise<Buffer | null>;
   delete(key: string): Promise<void>;
   publicUrl(key: string): Promise<string>;
+  health(): Promise<boolean>;
 }
 
 class LocalStorage implements StorageDriver {
@@ -52,6 +54,18 @@ class LocalStorage implements StorageDriver {
 
   async publicUrl(key: string): Promise<string> {
     return `/api/files/${key}`;
+  }
+
+  async health(): Promise<boolean> {
+    const probe = path.join(this.root, ".health");
+    try {
+      fs.mkdirSync(this.root, { recursive: true });
+      fs.writeFileSync(probe, String(Date.now()));
+      fs.unlinkSync(probe);
+      return true;
+    } catch {
+      return false;
+    }
   }
 }
 
@@ -103,6 +117,15 @@ class S3Storage implements StorageDriver {
       new GetObjectCommand({ Bucket: this.bucket, Key: key }),
       { expiresIn: 3600 },
     );
+  }
+
+  async health(): Promise<boolean> {
+    try {
+      await this.client.send(new HeadBucketCommand({ Bucket: this.bucket }));
+      return true;
+    } catch {
+      return false;
+    }
   }
 }
 

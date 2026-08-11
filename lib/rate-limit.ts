@@ -54,6 +54,15 @@ export class RedisRateLimiter implements RateLimiter {
     this.ready = this.client.connect().catch(() => undefined);
   }
 
+  async ping(): Promise<boolean> {
+    try {
+      await this.ready;
+      return (await this.client.ping()) === "PONG";
+    } catch {
+      return false;
+    }
+  }
+
   async hit(key: string, limit: number, windowMs: number): Promise<RateLimitResult> {
     try {
       await this.ready;
@@ -87,6 +96,14 @@ export function getLimiter(): RateLimiter {
 
 export function getLimiterName(): "redis" | "memory" {
   return process.env.REDIS_URL ? "redis" : "memory";
+}
+
+// Health probe: true when Redis is reachable, false when unconfigured/down.
+export async function checkRedis(): Promise<boolean> {
+  if (!process.env.REDIS_URL) return false;
+  const limiter = getLimiter();
+  if (limiter instanceof RedisRateLimiter) return limiter.ping();
+  return false;
 }
 
 // Test hook: drop the cached singleton so tests can switch backends.

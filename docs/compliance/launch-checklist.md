@@ -32,8 +32,9 @@
 
 ## 工程运营
 
-- [x] 备份自动化（compose `backup` 服务每日 pg_dump + 保留 14 份；scripts/backup.sh 手动备份）
+- [x] 备份自动化（compose `backup` 每日 pg_dump 保留 14 份 + `backup-objects` 每日图片镜像保留 7 份/可异地）
 - [x] 恢复演练（dump 恢复到临时库，5 张核心表行数与源库一致）
+- [x] 对象存储恢复演练（快照恢复到 scratch 桶，10/10 对象数一致）
 - [ ] 监控告警（Sentry / 自托管 + /api/health）
 - [x] 日志脱敏（不记录密码、Token、支付原文；webhook 原文脱敏后落库）
 - [ ] 密钥管理（.env / 密钥管理器，不 export 到进程环境）

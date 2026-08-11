@@ -3,6 +3,7 @@ import Redis from "ioredis";
 import {
   rateLimit,
   RedisRateLimiter,
+  checkRedis,
   _resetLimiterForTests,
 } from "../lib/rate-limit";
 
@@ -78,5 +79,15 @@ describe("rate limiter", () => {
     await new Promise((res) => setTimeout(res, 1200));
     expect((await r.hit(key, 1, 1)).ok).toBe(true);
     expect((await r.hit(`${key}:other`, 1, 60_000)).ok).toBe(true);
+  });
+
+  it("checkRedis reports reachability", async () => {
+    if (!redis) return;
+    process.env.REDIS_URL = REDIS_URL;
+    _resetLimiterForTests();
+    expect(await checkRedis()).toBe(true);
+    delete process.env.REDIS_URL;
+    _resetLimiterForTests();
+    expect(await checkRedis()).toBe(false);
   });
 });

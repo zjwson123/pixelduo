@@ -192,3 +192,16 @@
 - **测试**：单测 50/50（新增 auth-flow 5 例：令牌单次/过期/作废、注册→验证→发奖、找回→重置→旧密码失效、防枚举、清理）；e2e 新增 `verify-email.spec.ts`（无 `MAIL_DEV_DIR` 自动跳过），本地实测全流程通过：注册→未验证被拦（横幅+0 积分）→点邮件链接→验证成功→30 积分到账→生图解锁
 - 顺手修复：e2e 注册限流在本地多轮跑测时累计触发 429 导致的偶发失败（测试基建问题，非产品 bug）；注册页 429 提示友好化
 - 遗留：2FA / OAuth、会话吊销（JWT 策略）、邮件发送失败告警
+
+## 2026-08-11（工程基建：git 仓库 + 对象备份 + 健康检查增强）
+
+- **git 仓库初始化**：`git init -b main` + 首次提交（146 个文件）；`.gitignore` 补 `.DS_Store`/`.env.*`/`public/generated/` 等；入库前密钥扫描仅命中文档占位符（无真实密钥）
+- **对象存储备份（补 P0"图片零备份"缺口）**：
+  - `scripts/backup-objects.sh`：mc 镜像源桶到 `./backups/objects/<stamp>`，保留 N 份（默认 7），配 `BACKUP_TARGET_*` 可同步第二桶异地；修复 mc 镜像 entrypoint/xargs 两个坑（`--entrypoint /bin/sh` + while 循环轮转）
+  - `scripts/restore-objects.sh`：快照恢复到 scratch 桶并自动校验对象数，不一致即失败退出
+  - compose 新增 `backup-objects` 服务（每日运行，走内网 `storage:9000`）；`.env.example` 补 `BACKUP_*`
+  - **实测**：源桶 10 对象 → 快照 10 文件 → 恢复到 scratch 桶 `RESTORE DRILL PASSED`（10/10）→ scratch 桶已清理；compose 服务日志确认每日镜像正常
+- **健康检查增强**：`/api/health` 新增 `redis`/`storage`/`queue`（排队数、运行中数、worker 最近心跳）探活，每项 2.5s 超时兜底；`RedisRateLimiter.ping()` + `StorageDriver.health()`（local 自动建目录、s3 用 HeadBucket）
+- **邮件失败告警**：`lib/mail.ts` 发送失败捕获上报 Sentry 并透出错误（验证/重置链接不静默丢失）
+- **配置修复**：宿主 `.env` 的 `STORAGE_DRIVER` 漂移为 local（与 compose/README 默认 s3 不一致，导致健康检查报 storage down）——对齐为 s3，全栈恢复 `ok:true`
+- **验证**：单测 52/52（新增 checkRedis、storage health）；e2e 4/4（health 断言新增 redis/storage/queue）；tsc/build 通过；compose 全栈 healthy
