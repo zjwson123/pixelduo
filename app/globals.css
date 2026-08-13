@@ -296,6 +296,8 @@ img { display: block; }
 }
 .gal-meta { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink-3); }
 .gal-meta .spacer { margin-left: auto; }
+.dl-link { color: var(--indigo); font-weight: 700; font-size: 12px; text-decoration: none; }
+.dl-link:hover { text-decoration: underline; }
 .pricing-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 18px; }
 .plan-card { padding: 20px; display: flex; flex-direction: column; gap: 10px; position: relative; }
 .plan-card.featured { border-color: var(--indigo); box-shadow: 0 0 0 1px var(--indigo); }

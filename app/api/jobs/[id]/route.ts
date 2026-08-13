@@ -1,6 +1,6 @@
 import { requireUserId, ok, fail } from "@/lib/api";
 import { getJobForUser } from "@/lib/queue";
-import { serveUrl } from "@/lib/store";
+import { serveUserUrl } from "@/lib/store";
 
 export async function GET(_req: Request, { params }: { params: { id: string } }) {
   try {
@@ -8,7 +8,7 @@ export async function GET(_req: Request, { params }: { params: { id: string } })
     const job = await getJobForUser(userId, params.id);
     if (!job) return fail(new Error("job-not-found"));
     const images = (JSON.parse(job.images) as string[]);
-    const served = await Promise.all(images.map((k) => serveUrl(k)));
+    const served = images.map((k) => serveUserUrl(k));
     return ok({
       job: {
         id: job.id,

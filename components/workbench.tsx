@@ -575,6 +575,9 @@ export function Workbench() {
                         <div key={i} className="result-card">
                           <img src={src} alt={activeJob.prompt} />
                           {me?.plan === "free" && <div className="wm-badge">PixelDuo · AI 生成</div>}
+                          <div className="result-actions">
+                            <a className="result-btn" href={`${src}?download=1`} download aria-label="Download" title="Download">↓</a>
+                          </div>
                           <div className="result-meta">
                             <span className="model-pill"><i></i>{activeJob.model === "both" ? (i % 2 === 0 ? "GPT" : "Seedream") : activeJob.model === "gpt" ? "GPT" : "Seedream"}</span>
                             <span style={{ marginLeft: "auto" }}>{Math.round(activeJob.costCredits / activeJob.count)} cr</span>
@@ -599,6 +602,9 @@ export function Workbench() {
                         <div key={g.id} className="result-card">
                           <img src={g.url} alt={g.prompt} />
                           {me?.plan === "free" && <div className="wm-badge">PixelDuo · AI 生成</div>}
+                          <div className="result-actions">
+                            <a className="result-btn" href={`${g.url}?download=1`} download aria-label="Download" title="Download">↓</a>
+                          </div>
                           <div className="result-meta">
                             <ModelPill model={g.model} />
                             <span style={{ marginLeft: "auto" }}>{g.credits} cr</span>
@@ -667,6 +673,7 @@ export function Workbench() {
                         <ModelPill model={g.model} />
                         <span>{g.credits} cr</span>
                         <span className="spacer"></span>
+                        <a className="dl-link" href={`${g.url}?download=1`} download>Download</a>
                         <span>{new Date(g.createdAt).toLocaleString()}</span>
                       </div>
                     </div>

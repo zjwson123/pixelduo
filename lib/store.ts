@@ -18,3 +18,10 @@ export async function saveRemoteImage(url: string): Promise<string> {
 export function serveUrl(key: string): Promise<string> {
   return getStorage().publicUrl(key);
 }
+
+// Same-origin, cookie-authenticated URL for browser <img>/download. Unlike
+// S3 presigned URLs, this always resolves from the visitor's browser and is
+// ownership-scoped by the /api/files route.
+export function serveUserUrl(key: string): string {
+  return `/api/files/${key}`;
+}
