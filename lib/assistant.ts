@@ -26,19 +26,28 @@ export async function improvePrompt(prompt: string, mode: string): Promise<Assis
   const key = getDeepSeekKey();
   if (key) {
     try {
-      const res = await fetch("https://api.deepseek.com/chat/completions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-        body: JSON.stringify({
-          model: "deepseek-v4-flash",
-          messages: [
-            { role: "system", content: SYSTEM },
-            { role: "user", content: `${MODE_INSTRUCTIONS[mode] ?? MODE_INSTRUCTIONS.expand}\n\n${prompt}` },
-          ],
-          max_tokens: 320,
-          temperature: 0.8,
-        }),
-      });
+      // Timeout after 30s so a slow/hanging API cannot stall the request.
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 30_000);
+      let res: Response;
+      try {
+        res = await fetch("https://api.deepseek.com/chat/completions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+          body: JSON.stringify({
+            model: "deepseek-v4-flash",
+            messages: [
+              { role: "system", content: SYSTEM },
+              { role: "user", content: `${MODE_INSTRUCTIONS[mode] ?? MODE_INSTRUCTIONS.expand}\n\n${prompt}` },
+            ],
+            max_tokens: 320,
+            temperature: 0.8,
+          }),
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timer);
+      }
       if (res.ok) {
         const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
         const text = data.choices?.[0]?.message?.content?.trim();

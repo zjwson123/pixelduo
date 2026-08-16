@@ -13,7 +13,13 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
     if (!auth) return new NextResponse(JSON.stringify({ ok: false, error: "unauthorized" }), { status: 401 });
     const job = await prisma.job.findFirst({ where: { id: params.id, userId: auth.userId } });
     if (!job) return new NextResponse(JSON.stringify({ ok: false, error: "job-not-found" }), { status: 404 });
-    const images = (JSON.parse(job.images) as string[]);
+    let images: string[];
+    try {
+      images = JSON.parse(job.images) as string[];
+      if (!Array.isArray(images)) images = [];
+    } catch {
+      images = [];
+    }
     const served = await Promise.all(images.map((k) => serveUrl(k)));
     return ok({
       job: {

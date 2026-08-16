@@ -1,3 +1,6 @@
+import { getStorage } from "./storage";
+import { getVisionConfig } from "./keys";
+
 const BLOCKED: Array<{ re: RegExp; reason: string }> = [
   { re: /\b(sex|nude|naked|porn|erotic|nsfw|explicit)\b/i, reason: "adult-content" },
   { re: /(色情|裸露|裸体|成人内容)/, reason: "adult-content" },
@@ -60,23 +63,32 @@ async function moderateWithVision(dataUrl: string): Promise<ImageAudit> {
   const cfg = getVisionConfig();
   if (!cfg) return { checked: false };
   try {
-    const res = await fetch(`${cfg.baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.apiKey}` },
-      body: JSON.stringify({
-        model: cfg.model,
-        messages: [
-          {
-            role: "user",
-            content: [
-              { type: "text", text: MODERATION_PROMPT },
-              { type: "image_url", image_url: { url: dataUrl } },
-            ],
-          },
-        ],
-        max_tokens: 120,
-      }),
-    });
+    // Timeout after 30s so moderation cannot stall the worker pipeline.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30_000);
+    let res: Response;
+    try {
+      res = await fetch(`${cfg.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.apiKey}` },
+        body: JSON.stringify({
+          model: cfg.model,
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: MODERATION_PROMPT },
+                { type: "image_url", image_url: { url: dataUrl } },
+              ],
+            },
+          ],
+          max_tokens: 120,
+        }),
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
     if (!res.ok) return { checked: false };
     const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
     const text = data.choices?.[0]?.message?.content;
@@ -123,5 +135,3 @@ export async function analyzeImage(url: string): Promise<ImageAudit> {
   }
   return { checked: false };
 }
-import { getStorage } from "./storage";
-import { getVisionConfig } from "./keys";

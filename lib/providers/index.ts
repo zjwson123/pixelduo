@@ -11,11 +11,20 @@ async function callWithKeys(url: string, body: Record<string, unknown>, keys: st
   let lastErr: unknown;
   for (const key of keys) {
     try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-        body: JSON.stringify(body),
-      });
+      // Timeout after 120s so a hanging provider cannot stall the worker.
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 120_000);
+      let res: Response;
+      try {
+        res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timer);
+      }
       if (res.ok) return (await res.json()) as Record<string, unknown>;
       const text = await res.text();
       const err = new Error(`${res.status}: ${text.slice(0, 240)}`);

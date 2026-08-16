@@ -31,7 +31,9 @@ export async function GET(req: Request, { params }: { params: { key: string[] } 
   if (!buf) return new NextResponse("not found", { status: 404 });
 
   const download = new URL(req.url).searchParams.get("download") === "1";
-  const baseName = key.split("/").pop() || "image";
+  // Sanitize filename to prevent header injection (CR/LF, quotes, path traversal).
+  const rawName = key.split("/").pop() || "image";
+  const baseName = rawName.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 128) || "image";
   const headers: Record<string, string> = {
     "Content-Type": sniffContentType(buf),
     "Cache-Control": "private, max-age=31536000, immutable",

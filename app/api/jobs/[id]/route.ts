@@ -7,7 +7,13 @@ export async function GET(_req: Request, { params }: { params: { id: string } })
     const userId = await requireUserId();
     const job = await getJobForUser(userId, params.id);
     if (!job) return fail(new Error("job-not-found"));
-    const images = (JSON.parse(job.images) as string[]);
+    let images: string[];
+    try {
+      images = JSON.parse(job.images) as string[];
+      if (!Array.isArray(images)) images = [];
+    } catch {
+      images = [];
+    }
     const served = images.map((k) => serveUserUrl(k));
     return ok({
       job: {

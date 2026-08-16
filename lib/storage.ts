@@ -26,8 +26,15 @@ class LocalStorage implements StorageDriver {
   }
 
   private p(key: string): string {
-    const clean = key.replace(/^\/+/, "").split("/").filter(Boolean).join("/");
-    return path.join(this.root, ...clean.split("/"));
+    // Strip leading slashes and resolve; reject any ".." segment to prevent
+    // path traversal (e.g. /api/files/../../etc/passwd).
+    const clean = key.replace(/^\/+/, "").split("/").filter(Boolean);
+    if (clean.some((s) => s === "..")) throw new Error("invalid-key");
+    const resolved = path.join(this.root, ...clean);
+    // Defense in depth: ensure resolved path stays within root.
+    const rel = path.relative(this.root, resolved);
+    if (rel.startsWith("..")) throw new Error("invalid-key");
+    return resolved;
   }
 
   async put(key: string, data: Buffer) {
