@@ -1,8 +1,9 @@
-import { getDeepSeekKey } from "./keys";
+import { getDeepSeekKey, getModelVerseKey, getAliyunKey } from "./keys";
 
 export interface AssistantResult {
   text: string;
   offline: boolean;
+  model?: string;
 }
 
 const SYSTEM =
@@ -22,42 +23,100 @@ const STYLE_HINTS = [
   "minimal, warm neutral palette, centered composition",
 ];
 
-export async function improvePrompt(prompt: string, mode: string): Promise<AssistantResult> {
-  const key = getDeepSeekKey();
-  if (key) {
-    try {
-      // Timeout after 30s so a slow/hanging API cannot stall the request.
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 30_000);
-      let res: Response;
-      try {
-        res = await fetch("https://api.deepseek.com/chat/completions", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-          body: JSON.stringify({
-            model: "deepseek-v4-flash",
-            messages: [
-              { role: "system", content: SYSTEM },
-              { role: "user", content: `${MODE_INSTRUCTIONS[mode] ?? MODE_INSTRUCTIONS.expand}\n\n${prompt}` },
-            ],
-            max_tokens: 320,
-            temperature: 0.8,
-          }),
-          signal: controller.signal,
-        });
-      } finally {
-        clearTimeout(timer);
-      }
-      if (res.ok) {
-        const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
-        const text = data.choices?.[0]?.message?.content?.trim();
-        if (text) return { text, offline: false };
-      }
-    } catch {
-      // fall through to offline mode
-    }
+export interface AssistantModelOption {
+  id: string;
+  label: string;
+}
+
+export const ASSISTANT_MODELS: AssistantModelOption[] = [
+  { id: "deepseek", label: "DeepSeek V4 Flash" },
+  { id: "glm", label: "GLM 5.2 (thinking)" },
+  { id: "qwen", label: "Qwen 3.8 Max" },
+  { id: "kimi", label: "Kimi K2.6" },
+];
+
+export async function improvePrompt(prompt: string, mode: string, modelId: string = "deepseek"): Promise<AssistantResult> {
+  const result = await callAssistantModel(prompt, mode, modelId);
+  if (result) return result;
+  // Fallback to deepseek, then offline
+  if (modelId !== "deepseek") {
+    const fallback = await callAssistantModel(prompt, mode, "deepseek");
+    if (fallback) return fallback;
   }
   return { text: offlineExpand(prompt, mode), offline: true };
+}
+
+async function callAssistantModel(prompt: string, mode: string, modelId: string): Promise<AssistantResult | null> {
+  let apiKey: string | undefined;
+  let apiUrl: string;
+  let modelName: string;
+  let extraBody: Record<string, unknown> = {};
+
+  switch (modelId) {
+    case "deepseek": {
+      apiKey = getDeepSeekKey();
+      apiUrl = "https://api.deepseek.com/chat/completions";
+      modelName = "deepseek-v4-flash";
+      extraBody = { thinking: { type: "disabled" } };
+      break;
+    }
+    case "glm": {
+      apiKey = getAliyunKey();
+      apiUrl = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
+      modelName = "glm-5.2";
+      // GLM-5.2 defaults to thinking mode; keep it for better prompt quality
+      break;
+    }
+    case "qwen": {
+      apiKey = getAliyunKey();
+      apiUrl = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
+      modelName = "qwen3.8-max";
+      break;
+    }
+    case "kimi": {
+      apiKey = getModelVerseKey();
+      apiUrl = "https://api.modelverse.cn/v1/chat/completions";
+      modelName = "kimi-k2.6";
+      break;
+    }
+    default:
+      return null;
+  }
+
+  if (!apiKey) return null;
+
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30_000);
+    let res: Response;
+    try {
+      res = await fetch(apiUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify({
+          model: modelName,
+          messages: [
+            { role: "system", content: SYSTEM },
+            { role: "user", content: `${MODE_INSTRUCTIONS[mode] ?? MODE_INSTRUCTIONS.expand}\n\n${prompt}` },
+          ],
+          max_tokens: 320,
+          temperature: 0.8,
+          ...extraBody,
+        }),
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+    if (res.ok) {
+      const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+      const text = data.choices?.[0]?.message?.content?.trim();
+      if (text) return { text, offline: false, model: modelId };
+    }
+  } catch {
+    // fall through
+  }
+  return null;
 }
 
 function offlineExpand(prompt: string, mode: string): string {

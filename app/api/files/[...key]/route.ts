@@ -5,8 +5,26 @@ import { prisma } from "@/lib/prisma";
 import { getStorage } from "@/lib/storage";
 
 function sniffContentType(buf: Uint8Array): string {
+  // Video: MP4
+  if (
+    buf.length >= 12 &&
+    buf[4] === 0x66 && buf[5] === 0x74 && buf[6] === 0x79 && buf[7] === 0x70 &&
+    buf[8] === 0x69 && buf[9] === 0x73 && buf[10] === 0x6f && buf[11] === 0x6d
+  ) {
+    return "video/mp4";
+  }
+  // Video: WebM
+  if (
+    buf.length >= 4 &&
+    buf[0] === 0x1a && buf[1] === 0x45 && buf[2] === 0xdf && buf[3] === 0xa3
+  ) {
+    return "video/webm";
+  }
+  // Image: JPEG
   if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return "image/jpeg";
+  // Image: PNG
   if (buf.length >= 4 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return "image/png";
+  // Image: WebP (RIFF....WEBP)
   if (
     buf.length >= 12 &&
     buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&

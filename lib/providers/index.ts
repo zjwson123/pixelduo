@@ -1,24 +1,46 @@
-import { getModelVerseKey, getArkKey, getArkBaseUrl } from "../keys";
-import { saveBase64Image } from "../store";
-import type { Quality, ModelId } from "../cost";
+// Provider layer — unified interface for all generation models.
+// Supports: gpt-image-2, doubao-seedream, wan2.7-image(-pro) [image]
+//            doubao-seedance, wan2.7-t2v/i2v [video, async task-based]
+
+import { getModelVerseKey, getArkKey, getArkBaseUrl, getAliyunKey, getAliyunBaseUrl } from "../keys";
+import { saveBase64Image, saveRemoteImage } from "../store";
+import { getModel, type ModelInfo } from "../model-registry";
+import type { Quality } from "../cost";
 
 export interface ProviderImage {
   key: string;
-  model: "gpt" | "seedream";
+  model: string; // model id from registry
 }
 
-async function callWithKeys(url: string, body: Record<string, unknown>, keys: string[]) {
+export interface ProviderVideoResult {
+  key: string; // storage key for the downloaded video
+  model: string;
+  durationSec: number;
+}
+
+export interface VideoTaskResult {
+  taskId: string;
+  model: string;
+}
+
+// === Image generation ===
+
+async function callWithKeys(
+  url: string,
+  body: Record<string, unknown>,
+  keys: string[],
+  headers?: Record<string, string>,
+): Promise<Record<string, unknown>> {
   let lastErr: unknown;
   for (const key of keys) {
     try {
-      // Timeout after 120s so a hanging provider cannot stall the worker.
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 120_000);
       let res: Response;
       try {
         res = await fetch(url, {
           method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}`, ...(headers ?? {}) },
           body: JSON.stringify(body),
           signal: controller.signal,
         });
@@ -40,6 +62,8 @@ async function callWithKeys(url: string, body: Record<string, unknown>, keys: st
   throw lastErr instanceof Error ? lastErr : new Error("provider call failed");
 }
 
+// === GPT Image 2 (ModelVerse) ===
+
 export async function generateWithGpt(prompt: string, quality: Quality, count: number): Promise<ProviderImage[]> {
   const keys = [getModelVerseKey()].filter((k): k is string => Boolean(k));
   if (!keys.length) throw new Error("modelverse key missing — set MODELVERSE_IMAGE_API_KEY or ensure ~/.cc-proxy/config.json has modelverse gateway");
@@ -58,16 +82,46 @@ export async function generateWithGpt(prompt: string, quality: Quality, count: n
   return out;
 }
 
-export async function generateWithSeedream(prompt: string, count: number): Promise<ProviderImage[]> {
+// GPT Image 2 — Edit (image-to-image)
+export async function editWithGpt(prompt: string, imageBase64: string, quality: Quality): Promise<ProviderImage[]> {
+  const keys = [getModelVerseKey()].filter((k): k is string => Boolean(k));
+  if (!keys.length) throw new Error("modelverse key missing");
+  const data = await callWithKeys(
+    "https://api.modelverse.cn/v1/images/edits",
+    {
+      model: "gpt-image-2",
+      prompt,
+      image: `data:image/png;base64,${imageBase64}`,
+      size: "1024x1024",
+      quality,
+      n: 1,
+    },
+    keys,
+  );
+  const items = (data.data as Array<Record<string, unknown>> | undefined) ?? [];
+  const b64 = items[0]?.b64_json as string | undefined;
+  if (!b64) throw new Error("gpt-image-2 edit returned no b64_json");
+  return [{ key: await saveBase64Image(b64), model: "gpt" }];
+}
+
+// === Seedream (Ark) ===
+
+export async function generateWithSeedream(prompt: string, count: number, imageBase64?: string): Promise<ProviderImage[]> {
   const keys = [getArkKey()].filter((k): k is string => Boolean(k));
   if (!keys.length) throw new Error("ark key missing — set ARK_IMAGE_API_KEY or ensure ~/.cc-proxy/config.json has ark gateway");
   const out: ProviderImage[] = [];
   for (let i = 0; i < count; i++) {
-    const data = await callWithKeys(
-      getArkBaseUrl(),
-      { model: "doubao-seedream-5-0-260128", prompt, size: "1920x1920", response_format: "b64_json", n: 1 },
-      keys,
-    );
+    const body: Record<string, unknown> = {
+      model: "doubao-seedream-5-0-260128",
+      prompt,
+      size: "1920x1920",
+      response_format: "b64_json",
+      n: 1,
+    };
+    if (imageBase64) {
+      body.image = imageBase64.startsWith("data:") ? imageBase64 : `data:image/png;base64,${imageBase64}`;
+    }
+    const data = await callWithKeys(getArkBaseUrl(), body, keys);
     const items = (data.data as Array<Record<string, unknown>> | undefined) ?? [];
     const b64 = items[0]?.b64_json as string | undefined;
     if (!b64) throw new Error("seedream returned no b64_json");
@@ -76,24 +130,72 @@ export async function generateWithSeedream(prompt: string, count: number): Promi
   return out;
 }
 
+// === Wan 2.7 Image / Image-Pro (Aliyun DashScope) ===
+
+export async function generateWithWanImage(
+  prompt: string,
+  modelId: "wan2.7-image" | "wan2.7-image-pro",
+  count: number,
+  imageBase64List?: string[],
+): Promise<ProviderImage[]> {
+  const keys = [getAliyunKey()].filter((k): k is string => Boolean(k));
+  if (!keys.length) throw new Error("aliyun key missing — set ALIYUN_API_KEY or ensure ~/.cc-proxy/config.json has aliyun gateway");
+  const out: ProviderImage[] = [];
+  // DashScope image gen is synchronous via multimodal-generation endpoint
+  const content: Array<Record<string, unknown>> = [{ text: prompt }];
+  if (imageBase64List) {
+    for (const img of imageBase64List) {
+      content.push({ image: img.startsWith("data:") ? img : `data:image/png;base64,${img}` });
+    }
+  }
+  const size = modelId === "wan2.7-image-pro" ? "2K" : "2K";
+  const data = await callWithKeys(
+    getAliyunBaseUrl("multimodal-generation"),
+    {
+      model: modelId,
+      input: { messages: [{ role: "user", content }] },
+      parameters: { size, n: count, watermark: false },
+    },
+    keys,
+  );
+  // Response format: { output: { choices: [{ message: { content: [{ image: "url" }] }] }] } }
+  const choices = (data.output as { choices?: Array<{ message?: { content?: Array<{ image?: string }> } }> } | undefined)?.choices ?? [];
+  for (const choice of choices) {
+    const contentItems = choice.message?.content ?? [];
+    for (const item of contentItems) {
+      if (item.image) {
+        // Download the image from the temporary URL and store it
+        const key = await saveRemoteImage(item.image);
+        out.push({ key, model: modelId === "wan2.7-image-pro" ? "wan-image-pro" : "wan-image" });
+      }
+    }
+  }
+  if (!out.length) throw new Error(`${modelId} returned no images`);
+  return out;
+}
+
+// === Unified image generation dispatcher ===
+
 export async function generateImages(input: {
-  model: ModelId;
+  model: string; // model id from registry
   quality: Quality;
   count: number;
   prompt: string;
+  imageBase64?: string; // for image editing (reference image)
+  imageBase64List?: string[]; // for multi-image reference (wan2.7-image-pro)
 }): Promise<ProviderImage[]> {
-  // Mock mode for tests / demos: instant 1x1 PNGs, no external calls.
+  // Mock mode for tests / demos
   if (process.env.MOCK_IMAGE_PROVIDER === "1") {
-    const tinyPng =
-      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+    const tinyPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
     const out: ProviderImage[] = [];
-    const list: Array<"gpt" | "seedream"> =
-      input.model === "both" ? (["gpt", "seedream"] as const) : input.model === "seedream" ? ["seedream"] : ["gpt"];
+    const list = [input.model];
     for (let i = 0; i < input.count; i++) {
       for (const m of list) out.push({ key: await saveBase64Image(tinyPng), model: m });
     }
     return out;
   }
+
+  // Legacy "both" mode: generate with gpt + seedream in parallel
   if (input.model === "both") {
     const [gpt, seed] = await Promise.all([
       generateWithGpt(input.prompt, input.quality, input.count),
@@ -101,6 +203,236 @@ export async function generateImages(input: {
     ]);
     return [...gpt, ...seed];
   }
-  if (input.model === "seedream") return generateWithSeedream(input.prompt, input.count);
-  return generateWithGpt(input.prompt, input.quality, input.count);
+
+  switch (input.model) {
+    case "gpt":
+      if (input.imageBase64) {
+        return editWithGpt(input.prompt, input.imageBase64, input.quality);
+      }
+      return generateWithGpt(input.prompt, input.quality, input.count);
+    case "seedream":
+      return generateWithSeedream(input.prompt, input.count, input.imageBase64);
+    case "wan-image":
+      return generateWithWanImage(input.prompt, "wan2.7-image", input.count, input.imageBase64List);
+    case "wan-image-pro":
+      return generateWithWanImage(input.prompt, "wan2.7-image-pro", input.count, input.imageBase64List);
+    default: {
+      // Check registry for new models
+      const model = getModel(input.model);
+      if (!model) throw new Error(`unknown-model:${input.model}`);
+      if (model.mediaType === "image") {
+        // Route by gateway
+        if (model.gateway === "aliyun") {
+          return generateWithWanImage(input.prompt, model.modelId as "wan2.7-image" | "wan2.7-image-pro", input.count, input.imageBase64List);
+        }
+        if (model.gateway === "modelverse") {
+          return generateWithGpt(input.prompt, input.quality, input.count);
+        }
+        if (model.gateway === "ark") {
+          return generateWithSeedream(input.prompt, input.count, input.imageBase64);
+        }
+      }
+      throw new Error(`model-not-supported-for-image-gen:${input.model}`);
+    }
+  }
+}
+
+// === Video generation (async task-based) ===
+
+export async function createVideoTask(input: {
+  model: string;
+  prompt: string;
+  durationSec: number;
+  imageBase64?: string; // for image-to-video
+}): Promise<VideoTaskResult> {
+  const model = getModel(input.model);
+  if (!model || model.mediaType !== "video") throw new Error(`not-a-video-model:${input.model}`);
+
+  if (process.env.MOCK_IMAGE_PROVIDER === "1") {
+    // Mock: return a fake task id
+    return { taskId: `mock-task-${Date.now()}`, model: input.model };
+  }
+
+  switch (input.model) {
+    case "seedance":
+      return createSeedanceTask(input.prompt, input.durationSec, input.imageBase64);
+    case "wan-t2v":
+      return createWanVideoTask("wan2.7-t2v-2026-06-12", input.prompt, input.durationSec);
+    case "wan-i2v":
+      return createWanVideoTask("wan2.7-i2v-2026-04-25", input.prompt, input.durationSec, input.imageBase64);
+    default:
+      throw new Error(`video-model-not-implemented:${input.model}`);
+  }
+}
+
+async function createSeedanceTask(prompt: string, durationSec: number, imageBase64?: string): Promise<VideoTaskResult> {
+  const keys = [getArkKey()].filter((k): k is string => Boolean(k));
+  if (!keys.length) throw new Error("ark key missing for video generation");
+  const content: Array<Record<string, unknown>> = [{ type: "text", text: prompt }];
+  if (imageBase64) {
+    content.push({
+      type: "image_url",
+      image_url: { url: imageBase64.startsWith("data:") ? imageBase64 : `data:image/png;base64,${imageBase64}` },
+      role: "first_frame",
+    });
+  }
+  const data = await callWithKeys(
+    "https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks",
+    {
+      model: "doubao-seedance-2-0-260128",
+      content,
+      resolution: "720p",
+      ratio: "16:9",
+      duration: durationSec,
+    },
+    keys,
+  );
+  const taskId = (data as { id?: string }).id;
+  if (!taskId) throw new Error("seedance returned no task id");
+  return { taskId, model: "seedance" };
+}
+
+async function createWanVideoTask(
+  modelId: string,
+  prompt: string,
+  durationSec: number,
+  imageBase64?: string,
+): Promise<VideoTaskResult> {
+  const keys = [getAliyunKey()].filter((k): k is string => Boolean(k));
+  if (!keys.length) throw new Error("aliyun key missing for video generation");
+  const inputObj: Record<string, unknown> = { prompt };
+  if (imageBase64) {
+    inputObj.media = [{ type: "first_frame", url: imageBase64.startsWith("data:") ? imageBase64 : `data:image/png;base64,${imageBase64}` }];
+  }
+  // DashScope async: POST + X-DashScope-Async: enable
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 60_000);
+  try {
+    const key = keys[0];
+    const res = await fetch(getAliyunBaseUrl("video-synthesis"), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${key}`,
+        "X-DashScope-Async": "enable",
+      },
+      body: JSON.stringify({
+        model: modelId,
+        input: inputObj,
+        parameters: { duration: durationSec, resolution: "720P" },
+      }),
+      signal: controller.signal,
+    });
+    const data = (await res.json()) as { output?: { task_id?: string }; code?: string; message?: string };
+    if (!res.ok || !data.output?.task_id) {
+      throw new Error(`wan video task creation failed: ${data.code ?? res.status} ${data.message ?? ""}`);
+    }
+    return { taskId: data.output.task_id, model: modelId === "wan2.7-t2v-2026-06-12" ? "wan-t2v" : "wan-i2v" };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Poll video task status
+export interface VideoTaskStatus {
+  status: "pending" | "running" | "succeeded" | "failed" | "unknown";
+  videoUrl?: string;
+  error?: string;
+}
+
+export async function pollVideoTask(model: string, taskId: string): Promise<VideoTaskStatus> {
+  if (process.env.MOCK_IMAGE_PROVIDER === "1") {
+    // Mock: simulate succeeded after first poll
+    return { status: "succeeded", videoUrl: "mock://video.mp4" };
+  }
+
+  const modelInfo = getModel(model);
+  if (!modelInfo) return { status: "unknown", error: "unknown-model" };
+
+  if (modelInfo.gateway === "ark") {
+    return pollSeedanceTask(taskId);
+  }
+  if (modelInfo.gateway === "aliyun") {
+    return pollWanVideoTask(taskId);
+  }
+  return { status: "unknown", error: "unsupported-gateway" };
+}
+
+async function pollSeedanceTask(taskId: string): Promise<VideoTaskStatus> {
+  const keys = [getArkKey()].filter((k): k is string => Boolean(k));
+  if (!keys.length) return { status: "unknown", error: "ark key missing" };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30_000);
+  try {
+    const key = keys[0];
+    const res = await fetch(
+      `https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks/${taskId}`,
+      { headers: { Authorization: `Bearer ${key}` }, signal: controller.signal },
+    );
+    if (!res.ok) return { status: "unknown", error: `poll failed: ${res.status}` };
+    const data = (await res.json()) as {
+      status?: string;
+      content?: { video_url?: { url?: string }[] };
+      error?: { message?: string };
+    };
+    const status = data.status ?? "unknown";
+    if (status === "succeeded") {
+      const url = data.content?.video_url?.[0]?.url;
+      return url ? { status: "succeeded", videoUrl: url } : { status: "succeeded" };
+    }
+    if (status === "failed") return { status: "failed", error: data.error?.message ?? "generation failed" };
+    return { status: status === "running" ? "running" : "pending" };
+  } catch (e) {
+    return { status: "unknown", error: e instanceof Error ? e.message : String(e) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function pollWanVideoTask(taskId: string): Promise<VideoTaskStatus> {
+  const keys = [getAliyunKey()].filter((k): k is string => Boolean(k));
+  if (!keys.length) return { status: "unknown", error: "aliyun key missing" };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30_000);
+  try {
+    const key = keys[0];
+    const res = await fetch(
+      `https://dashscope.aliyuncs.com/api/v1/tasks/${taskId}`,
+      { headers: { Authorization: `Bearer ${key}` }, signal: controller.signal },
+    );
+    if (!res.ok) return { status: "unknown", error: `poll failed: ${res.status}` };
+    const data = (await res.json()) as {
+      output?: { task_status?: string; video_url?: string };
+      request_id?: string;
+    };
+    const status = data.output?.task_status ?? "UNKNOWN";
+    if (status === "SUCCEEDED") {
+      const url = data.output?.video_url;
+      return url ? { status: "succeeded", videoUrl: url } : { status: "succeeded" };
+    }
+    if (status === "FAILED") return { status: "failed", error: "generation failed" };
+    return { status: status === "RUNNING" ? "running" : "pending" };
+  } catch (e) {
+    return { status: "unknown", error: e instanceof Error ? e.message : String(e) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Download a video from a URL and store it
+export async function saveRemoteVideo(url: string): Promise<string> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 120_000);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) throw new Error(`video download failed: ${res.status}`);
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length > 100 * 1024 * 1024) throw new Error("video-too-large");
+    const { getStorage, newStorageKey } = await import("../storage");
+    const key = newStorageKey("mp4");
+    await getStorage().put(key, buf, "video/mp4");
+    return key;
+  } finally {
+    clearTimeout(timer);
+  }
 }

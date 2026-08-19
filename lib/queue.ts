@@ -1,6 +1,6 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "./prisma";
-import { estimateGenerationCost, type ModelId, type Quality } from "./cost";
+import { estimateGenerationCost, estimateModelCost, type ModelId, type Quality } from "./cost";
 import { addCreditsTx, spendCreditsTx, refundCreditsTx, type SpendConsumption } from "./ledger";
 
 export interface CreateJobInput {
@@ -13,14 +13,28 @@ export interface CreateJobInput {
   maxAttempts?: number;
 }
 
+export interface CreateMediaJobInput {
+  userId: string;
+  model: string; // any model id from registry
+  mediaType: "image" | "video";
+  quality: Quality;
+  count: number;
+  prompt: string;
+  idempotencyKey?: string;
+  maxAttempts?: number;
+  durationSec?: number; // for video
+  refImageKey?: string; // for image editing / image-to-video
+}
+
 export interface JobImage {
   url: string;
-  model: "gpt" | "seedream";
+  model: "gpt" | "seedream" | "wan-image" | "wan-image-pro" | "seedance" | "wan-t2v" | "wan-i2v";
   quality: string;
   credits: number;
   prompt: string;
 }
 
+// Legacy: create generation job (backward compat with old API)
 export async function createGenerationJob(input: CreateJobInput) {
   const cost = estimateGenerationCost(input.model, input.quality, input.count);
   return prisma.$transaction(async (tx) => {
@@ -32,6 +46,7 @@ export async function createGenerationJob(input: CreateJobInput) {
       data: {
         userId: input.userId,
         model: input.model,
+        mediaType: "image",
         quality: input.quality,
         count: input.count,
         prompt: input.prompt,
@@ -48,6 +63,46 @@ export async function createGenerationJob(input: CreateJobInput) {
       "job",
       job.id,
       `pre-auth for ${input.model} x${input.count}`,
+    );
+    await tx.job.update({
+      where: { id: job.id },
+      data: { consumption: consumption as unknown as Prisma.InputJsonValue },
+    });
+    return { job, created: true };
+  });
+}
+
+// New: create media job (supports all models including video and edit)
+export async function createMediaJob(input: CreateMediaJobInput) {
+  const cost = estimateModelCost(input.model, input.count, input.quality, input.durationSec ?? 5);
+  return prisma.$transaction(async (tx) => {
+    if (input.idempotencyKey) {
+      const existing = await tx.job.findUnique({ where: { idempotencyKey: input.idempotencyKey } });
+      if (existing) return { job: existing, created: false };
+    }
+    const job = await tx.job.create({
+      data: {
+        userId: input.userId,
+        model: input.model,
+        mediaType: input.mediaType,
+        quality: input.quality,
+        count: input.count,
+        prompt: input.prompt,
+        costCredits: cost.credits,
+        images: "[]",
+        idempotencyKey: input.idempotencyKey ?? null,
+        maxAttempts: input.maxAttempts ?? 3,
+        durationSec: input.durationSec,
+        refImageKey: input.refImageKey,
+      },
+    });
+    const consumption = await spendCreditsTx(
+      tx,
+      input.userId,
+      cost.credits,
+      "job",
+      job.id,
+      `pre-auth for ${input.model} x${input.count}${input.durationSec ? ` ${input.durationSec}s` : ""}`,
     );
     await tx.job.update({
       where: { id: job.id },
@@ -91,7 +146,7 @@ export async function failJob(jobId: string, error: string, opts?: { terminal?: 
   return prisma.$transaction(async (tx) => {
     const job = await tx.job.findUnique({ where: { id: jobId } });
     if (!job || job.status === "failed" || job.status === "done") return;
-    const wasActive = job.status === "running" || job.status === "queued";
+    const wasActive = job.status === "running" || job.status === "queued" || job.status === "polling";
     const nextAttempts = job.attempts + 1;
 
     if (!opts?.terminal && nextAttempts < job.maxAttempts) {
@@ -109,8 +164,7 @@ export async function failJob(jobId: string, error: string, opts?: { terminal?: 
       return;
     }
 
-    // Terminal failure = DLQ; refund the held credits (terminal mode skips
-    // retries, e.g. moderation rejections that cannot succeed on retry).
+    // Terminal failure = DLQ; refund the held credits
     await tx.job.update({
       where: { id: jobId },
       data: {
@@ -136,12 +190,12 @@ export async function failJob(jobId: string, error: string, opts?: { terminal?: 
   });
 }
 
-// Recover jobs stuck in "running" after a worker crash (no heartbeat).
+// Recover jobs stuck in "running" or "polling" after a worker crash
 export async function recoverStuckJobs(maxAgeMs = 180_000): Promise<number> {
   const cutoff = new Date(Date.now() - maxAgeMs);
   const stuck = await prisma.job.findMany({
     where: {
-      status: "running",
+      status: { in: ["running", "polling"] },
       OR: [{ heartbeatAt: null, startedAt: { lte: cutoff } }, { heartbeatAt: { lte: cutoff } }],
     },
     take: 20,
@@ -155,7 +209,7 @@ export async function recoverStuckJobs(maxAgeMs = 180_000): Promise<number> {
 export async function completeJob(jobId: string, images: JobImage[]) {
   return prisma.$transaction(async (tx) => {
     const job = await tx.job.findUnique({ where: { id: jobId } });
-    if (!job || job.status !== "running") throw new Error("job-not-runnable");
+    if (!job || (job.status !== "running" && job.status !== "polling")) throw new Error("job-not-runnable");
     await tx.job.update({
       where: { id: jobId },
       data: { status: "done", images: JSON.stringify(images.map((i) => i.url)), finishedAt: new Date() },
@@ -174,6 +228,14 @@ export async function completeJob(jobId: string, images: JobImage[]) {
       });
     }
     await addCreditsTx(tx, job.userId, "SETTLE", 0, "job", jobId, "settle");
+  });
+}
+
+// Set job to polling state (for video async tasks)
+export async function setJobPolling(jobId: string, providerTaskId: string) {
+  await prisma.job.update({
+    where: { id: jobId },
+    data: { status: "polling", providerTaskId, heartbeatAt: new Date() },
   });
 }
 

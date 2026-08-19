@@ -14,7 +14,7 @@ test("MVP end-to-end: register → generate → template → checkout → ledger
   await expect(page.locator(".balance")).toContainText("30");
 
   // 2. Generate with Seedream (fast path) → balance 30 - 6 = 24
-  await page.locator(".composer .seg button", { hasText: "Seedream 5" }).click();
+  await page.locator(".composer .chip", { hasText: "Seedream 5" }).click();
   await page.locator("button.generate").click();
   await expect(page.locator(".result-card").first()).toBeVisible({ timeout: 30000 });
   await expect(page.locator(".balance")).toContainText("24");

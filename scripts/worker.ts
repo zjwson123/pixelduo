@@ -1,35 +1,56 @@
-import { claimNextJob, completeJob, failJob, heartbeat, recoverStuckJobs } from "../lib/queue";
-import { generateImages } from "../lib/providers";
-import { costForImage } from "../lib/cost";
+import { claimNextJob, completeJob, failJob, heartbeat, recoverStuckJobs, setJobPolling } from "../lib/queue";
+import { generateImages, createVideoTask, pollVideoTask, saveRemoteVideo } from "../lib/providers";
+import { costForImage, modelCost, videoCost } from "../lib/cost";
 import { analyzeImage } from "../lib/safety";
 import { getStorage } from "../lib/storage";
 import { initObservability, captureError } from "../lib/observability";
 import { bakeWatermark } from "../lib/watermark";
 import { prisma } from "../lib/prisma";
+import { getModel } from "../lib/model-registry";
 
 initObservability("worker");
 
-async function tick(workerId: string): Promise<boolean> {
-  const job = await claimNextJob(workerId);
-  if (!job) return false;
-  console.log(`[worker ${workerId}] job ${job.id} ${job.model} x${job.count} (${job.quality})`);
+async function processImageJob(job: {
+  id: string;
+  model: string;
+  quality: string;
+  count: number;
+  prompt: string;
+  userId: string;
+  refImageKey: string | null;
+}, workerId: string): Promise<boolean> {
+  const model = job.model as "gpt" | "seedream" | "both" | "wan-image" | "wan-image-pro";
   const hb = setInterval(() => heartbeat(job.id).catch(() => undefined), 20_000);
   try {
+    // Get reference image if this is an edit job
+    let imageBase64: string | undefined;
+    let imageBase64List: string[] | undefined;
+    if (job.refImageKey) {
+      const refBuf = await getStorage().get(job.refImageKey);
+      if (refBuf) {
+        imageBase64 = refBuf.toString("base64");
+        imageBase64List = [imageBase64];
+      }
+    }
+
     const images = await generateImages({
-      model: job.model as "gpt" | "seedream" | "both",
+      model: job.model,
       quality: job.quality as "low" | "medium" | "high",
       count: job.count,
       prompt: job.prompt,
+      imageBase64,
+      imageBase64List,
     });
+
     const rows = images.map((img) => ({
       url: img.key,
-      model: img.model,
-      quality: img.model === "seedream" ? "standard" : (job.quality as string),
-      credits: costForImage(img.model, job.quality as "low" | "medium" | "high").credits,
+      model: img.model as "gpt" | "seedream" | "wan-image" | "wan-image-pro",
+      quality: img.model === "seedream" || img.model.startsWith("wan-") ? "standard" : (job.quality as string),
+      credits: modelCost(img.model, job.quality as "low" | "medium" | "high").credits,
       prompt: job.prompt,
     }));
-    // Free-tier gpt-image-2 outputs get a baked "AI 生成" label (compliance:
-    // gpt images carry no built-in AI marker; Seedream has its own).
+
+    // Free-tier gpt-image-2 outputs get a baked "AI 生成" label
     const user = await prisma.user.findUnique({ where: { id: job.userId } });
     if (user?.plan === "free") {
       for (const img of images) {
@@ -40,6 +61,7 @@ async function tick(workerId: string): Promise<boolean> {
         await getStorage().put(img.key, baked, "image/png");
       }
     }
+
     const audits = await Promise.all(rows.map((r) => analyzeImage(r.url)));
     if (audits.some((a) => a.flagged)) {
       const msg = "image-flagged: moderation rejected the generated image";
@@ -66,9 +88,97 @@ async function tick(workerId: string): Promise<boolean> {
   return true;
 }
 
+async function processVideoJob(job: {
+  id: string;
+  model: string;
+  prompt: string;
+  userId: string;
+  durationSec: number | null;
+  refImageKey: string | null;
+  providerTaskId: string | null;
+  status: string;
+}, workerId: string): Promise<boolean> {
+  const modelInfo = getModel(job.model);
+  if (!modelInfo) {
+    await failJob(job.id, `unknown-model:${job.model}`, { terminal: true });
+    return true;
+  }
+
+  const hb = setInterval(() => heartbeat(job.id).catch(() => undefined), 20_000);
+  try {
+    // Phase 1: create the async task if not yet created
+    if (!job.providerTaskId || job.status === "running") {
+      let imageBase64: string | undefined;
+      if (job.refImageKey) {
+        const refBuf = await getStorage().get(job.refImageKey);
+        if (refBuf) imageBase64 = refBuf.toString("base64");
+      }
+      console.log(`[worker ${workerId}] job ${job.id}: creating video task (${job.model})`);
+      const result = await createVideoTask({
+        model: job.model,
+        prompt: job.prompt,
+        durationSec: job.durationSec ?? 5,
+        imageBase64,
+      });
+      await setJobPolling(job.id, result.taskId);
+      console.log(`[worker ${workerId}] job ${job.id}: video task created (${result.taskId}), polling...`);
+      return true; // will be picked up in next tick for polling
+    }
+
+    // Phase 2: poll the async task
+    if (job.status === "polling") {
+      console.log(`[worker ${workerId}] job ${job.id}: polling video task ${job.providerTaskId}`);
+      const status = await pollVideoTask(job.model, job.providerTaskId);
+
+      if (status.status === "succeeded" && status.videoUrl) {
+        console.log(`[worker ${workerId}] job ${job.id}: video ready, downloading...`);
+        // Download and store the video
+        const videoKey = await saveRemoteVideo(status.videoUrl);
+        const vc = videoCost(job.model, job.durationSec ?? 5);
+        const rows = [{
+          url: videoKey,
+          model: job.model as "gpt" | "seedream" | "wan-image" | "wan-image-pro" | "seedance" | "wan-t2v" | "wan-i2v",
+          quality: "standard",
+          credits: vc.credits,
+          prompt: job.prompt,
+        }];
+        await completeJob(job.id, rows);
+        console.log(`[worker ${workerId}] job ${job.id} done (video: ${videoKey})`);
+      } else if (status.status === "failed") {
+        await failJob(job.id, `video generation failed: ${status.error ?? "unknown"}`, { terminal: true });
+        console.error(`[worker ${workerId}] job ${job.id} video failed: ${status.error}`);
+      } else {
+        // Still pending/running, update heartbeat
+        await heartbeat(job.id);
+        console.log(`[worker ${workerId}] job ${job.id}: video task ${status.status}, will retry next tick`);
+      }
+      return true;
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    await failJob(job.id, msg);
+    console.error(`[worker ${workerId}] job ${job.id} failed: ${msg}`);
+    captureError(e, { jobId: job.id, model: job.model });
+  } finally {
+    clearInterval(hb);
+  }
+  return true;
+}
+
+async function tick(workerId: string): Promise<boolean> {
+  const job = await claimNextJob(workerId);
+  if (!job) return false;
+  console.log(`[worker ${workerId}] job ${job.id} ${job.model} x${job.count} (${job.quality}) [${job.mediaType}]`);
+
+  if (job.mediaType === "video") {
+    return processVideoJob(job, workerId);
+  }
+  return processImageJob(job, workerId);
+}
+
 async function main() {
   const workerId = `worker-${process.pid}`;
-  console.log(`[worker] PixelDuo image worker started: ${workerId}`);
+  console.log(`[worker] PixelDuo media worker started: ${workerId}`);
   let idle = 0;
   let sweep = 0;
   for (;;) {
