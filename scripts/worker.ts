@@ -1,14 +1,31 @@
-import { claimNextJob, completeJob, failJob, heartbeat, recoverStuckJobs, setJobPolling } from "../lib/queue";
+import { claimNextJob, completeJob, failJob, heartbeat, recoverStuckJobs, setJobPolling, schedulePoll } from "../lib/queue";
 import { generateImages, createVideoTask, pollVideoTask, saveRemoteVideo } from "../lib/providers";
-import { costForImage, modelCost, videoCost } from "../lib/cost";
+import { modelCost, videoCost } from "../lib/cost";
 import { analyzeImage } from "../lib/safety";
 import { getStorage } from "../lib/storage";
 import { initObservability, captureError } from "../lib/observability";
 import { bakeWatermark } from "../lib/watermark";
-import { prisma } from "../lib/prisma";
 import { getModel } from "../lib/model-registry";
 
 initObservability("worker");
+
+// Hard cap on a single video job (task creation + polling). Long after a
+// normal provider task finishes, this turns a zombie into a refund.
+const VIDEO_HARD_TIMEOUT_MS = 30 * 60_000;
+
+// Provider errors that retries can never fix (auth, key restrictions,
+// delisted models). Failing these terminally refunds the user in seconds
+// instead of after 3 rounds of backoff.
+export function isPermanentProviderError(msg: string): boolean {
+  return (
+    /\b40[13]\b/.test(msg) ||
+    /access ?denied/i.test(msg) ||
+    /invalid.?api.?key/i.test(msg) ||
+    /model .*is offline/i.test(msg) ||
+    /model not exist/i.test(msg) ||
+    /unknown-model|model-not-supported|not-a-video-model|model-disabled/i.test(msg)
+  );
+}
 
 async function processImageJob(job: {
   id: string;
@@ -50,16 +67,15 @@ async function processImageJob(job: {
       prompt: job.prompt,
     }));
 
-    // Free-tier gpt-image-2 outputs get a baked "AI 生成" label
-    const user = await prisma.user.findUnique({ where: { id: job.userId } });
-    if (user?.plan === "free") {
-      for (const img of images) {
-        if (img.model !== "gpt") continue;
-        const raw = await getStorage().get(img.key);
-        if (!raw) throw new Error("watermark: image missing from storage");
-        const baked = await bakeWatermark(raw);
-        await getStorage().put(img.key, baked, "image/png");
-      }
+    // AIGC labeling compliance: bake a visible "AI 生成" badge into every
+    // image whose provider doesn't already watermark its output (Seedream
+    // does). Applies to all plans, not just free tier.
+    for (const img of images) {
+      if (getModel(img.model)?.builtInWatermark) continue;
+      const raw = await getStorage().get(img.key);
+      if (!raw) throw new Error("watermark: image missing from storage");
+      const baked = await bakeWatermark(raw);
+      await getStorage().put(img.key, baked, "image/png");
     }
 
     const audits = await Promise.all(rows.map((r) => analyzeImage(r.url)));
@@ -79,7 +95,7 @@ async function processImageJob(job: {
     console.log(`[worker ${workerId}] job ${job.id} done (${rows.length} images)`);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    await failJob(job.id, msg);
+    await failJob(job.id, msg, { terminal: isPermanentProviderError(msg) });
     console.error(`[worker ${workerId}] job ${job.id} failed: ${msg}`);
     captureError(e, { jobId: job.id, model: job.model, quality: job.quality });
   } finally {
@@ -97,6 +113,7 @@ async function processVideoJob(job: {
   refImageKey: string | null;
   providerTaskId: string | null;
   status: string;
+  startedAt: Date | null;
 }, workerId: string): Promise<boolean> {
   const modelInfo = getModel(job.model);
   if (!modelInfo) {
@@ -106,8 +123,9 @@ async function processVideoJob(job: {
 
   const hb = setInterval(() => heartbeat(job.id).catch(() => undefined), 20_000);
   try {
-    // Phase 1: create the async task if not yet created
-    if (!job.providerTaskId || job.status === "running") {
+    // Phase 1: create the upstream task exactly once. providerTaskId is the
+    // source of truth — re-creating on retry would double-bill the provider.
+    if (!job.providerTaskId) {
       let imageBase64: string | undefined;
       if (job.refImageKey) {
         const refBuf = await getStorage().get(job.refImageKey);
@@ -122,41 +140,49 @@ async function processVideoJob(job: {
       });
       await setJobPolling(job.id, result.taskId);
       console.log(`[worker ${workerId}] job ${job.id}: video task created (${result.taskId}), polling...`);
-      return true; // will be picked up in next tick for polling
+      return true; // claimed again once nextAttemptAt is due
     }
 
-    // Phase 2: poll the async task
-    if (job.status === "polling") {
-      console.log(`[worker ${workerId}] job ${job.id}: polling video task ${job.providerTaskId}`);
-      const status = await pollVideoTask(job.model, job.providerTaskId);
-
-      if (status.status === "succeeded" && status.videoUrl) {
-        console.log(`[worker ${workerId}] job ${job.id}: video ready, downloading...`);
-        // Download and store the video
-        const videoKey = await saveRemoteVideo(status.videoUrl);
-        const vc = videoCost(job.model, job.durationSec ?? 5);
-        const rows = [{
-          url: videoKey,
-          model: job.model as "gpt" | "seedream" | "wan-image" | "wan-image-pro" | "seedance" | "wan-t2v" | "wan-i2v",
-          quality: "standard",
-          credits: vc.credits,
-          prompt: job.prompt,
-        }];
-        await completeJob(job.id, rows);
-        console.log(`[worker ${workerId}] job ${job.id} done (video: ${videoKey})`);
-      } else if (status.status === "failed") {
-        await failJob(job.id, `video generation failed: ${status.error ?? "unknown"}`, { terminal: true });
-        console.error(`[worker ${workerId}] job ${job.id} video failed: ${status.error}`);
-      } else {
-        // Still pending/running, update heartbeat
-        await heartbeat(job.id);
-        console.log(`[worker ${workerId}] job ${job.id}: video task ${status.status}, will retry next tick`);
-      }
+    // Phase 2: poll the existing upstream task (whatever status we were
+    // claimed in — polling directly, or running/queued after recovery).
+    if (job.startedAt && Date.now() - new Date(job.startedAt).getTime() > VIDEO_HARD_TIMEOUT_MS) {
+      const msg = "video-timeout: task exceeded 30 minutes";
+      await failJob(job.id, msg, { terminal: true });
+      console.error(`[worker ${workerId}] job ${job.id}: ${msg}`);
       return true;
     }
+    console.log(`[worker ${workerId}] job ${job.id}: polling video task ${job.providerTaskId}`);
+    const status = await pollVideoTask(job.model, job.providerTaskId);
+
+    if (status.status === "succeeded" && status.videoUrl) {
+      console.log(`[worker ${workerId}] job ${job.id}: video ready, downloading...`);
+      // Download and store the video
+      const videoKey = await saveRemoteVideo(status.videoUrl);
+      const vc = videoCost(job.model, job.durationSec ?? 5);
+      const rows = [{
+        url: videoKey,
+        model: job.model as "gpt" | "seedream" | "wan-image" | "wan-image-pro" | "seedance" | "wan-t2v" | "wan-i2v",
+        quality: "standard",
+        credits: vc.credits,
+        prompt: job.prompt,
+      }];
+      await completeJob(job.id, rows);
+      console.log(`[worker ${workerId}] job ${job.id} done (video: ${videoKey})`);
+    } else if (status.status === "succeeded") {
+      // Succeeded but no URL — nothing to deliver; refund rather than poll forever.
+      await failJob(job.id, "video generation succeeded without a video URL", { terminal: true });
+    } else if (status.status === "failed") {
+      await failJob(job.id, `video generation failed: ${status.error ?? "unknown"}`, { terminal: true });
+      console.error(`[worker ${workerId}] job ${job.id} video failed: ${status.error}`);
+    } else {
+      // Still pending/running (or a transient poll error) — re-arm the next poll.
+      await schedulePoll(job.id);
+      console.log(`[worker ${workerId}] job ${job.id}: video task ${status.status}, will retry next tick`);
+    }
+    return true;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    await failJob(job.id, msg);
+    await failJob(job.id, msg, { terminal: isPermanentProviderError(msg) });
     console.error(`[worker ${workerId}] job ${job.id} failed: ${msg}`);
     captureError(e, { jobId: job.id, model: job.model });
   } finally {
@@ -169,6 +195,15 @@ async function tick(workerId: string): Promise<boolean> {
   const job = await claimNextJob(workerId);
   if (!job) return false;
   console.log(`[worker ${workerId}] job ${job.id} ${job.model} x${job.count} (${job.quality}) [${job.mediaType}]`);
+
+  // Jobs for models disabled after the fact (e.g. wan on DashScope 403):
+  // fail terminally + refund instead of burning a provider call.
+  const modelInfo = getModel(job.model);
+  if (modelInfo && !modelInfo.enabled) {
+    await failJob(job.id, `model-disabled:${job.model}`, { terminal: true });
+    console.warn(`[worker ${workerId}] job ${job.id}: model ${job.model} is disabled — refunded`);
+    return true;
+  }
 
   if (job.mediaType === "video") {
     return processVideoJob(job, workerId);

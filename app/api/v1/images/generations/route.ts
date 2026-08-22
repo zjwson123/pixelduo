@@ -5,11 +5,12 @@ import { rateLimit } from "@/lib/rate-limit";
 import { authenticateApiKey } from "@/lib/apikey";
 import { checkPrompt } from "@/lib/safety";
 import { createGenerationJob, createMediaJob } from "@/lib/queue";
+import { enabledImageModelIds, enabledVideoModelIds, getModel, modelEnum } from "@/lib/model-registry";
 import { randomUUID } from "crypto";
 
 const schema = z.object({
   prompt: z.string().min(3).max(2000),
-  model: z.enum(["gpt", "seedream", "both", "wan-image", "wan-image-pro", "seedance", "wan-t2v", "wan-i2v"]).default("gpt"),
+  model: z.enum(modelEnum([...enabledImageModelIds(), "both", ...enabledVideoModelIds()])).default("gpt"),
   quality: z.enum(["low", "medium", "high"]).default("medium"),
   n: z.number().int().min(1).max(4).default(1),
   duration: z.number().int().min(2).max(15).default(5),
@@ -47,7 +48,7 @@ export async function POST(req: Request) {
     }
 
     const model = body.model;
-    const isVideo = model === "seedance" || model === "wan-t2v" || model === "wan-i2v";
+    const isVideo = getModel(model)?.mediaType === "video";
 
     if (isVideo) {
       const { job, created } = await createMediaJob({

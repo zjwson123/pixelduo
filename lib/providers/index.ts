@@ -421,6 +421,13 @@ async function pollWanVideoTask(taskId: string): Promise<VideoTaskStatus> {
 
 // Download a video from a URL and store it
 export async function saveRemoteVideo(url: string): Promise<string> {
+  // Mock provider URLs (e2e/CI) — store a stub instead of fetching.
+  if (url.startsWith("mock://")) {
+    const { getStorage, newStorageKey } = await import("../storage");
+    const key = newStorageKey("mp4");
+    await getStorage().put(key, Buffer.from("mock-video"), "video/mp4");
+    return key;
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 120_000);
   try {

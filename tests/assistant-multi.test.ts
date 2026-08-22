@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 // Mock keys module
 vi.mock("../lib/keys", () => ({
   getDeepSeekKey: () => "test-key",
+  getDeepSeekBaseUrl: () => "https://api.deepseek.com",
   getModelVerseKey: () => "test-mv-key",
   getAliyunKey: () => "test-aliyun-key",
   getArkKey: () => "test-ark-key",
@@ -11,9 +12,9 @@ vi.mock("../lib/keys", () => ({
 const { improvePrompt, ASSISTANT_MODELS } = await import("../lib/assistant");
 
 describe("assistant multi-model", () => {
-  it("exports model options", () => {
-    expect(ASSISTANT_MODELS.length).toBe(4);
-    expect(ASSISTANT_MODELS.map((m) => m.id)).toEqual(["deepseek", "glm", "qwen", "kimi"]);
+  it("exports model options (qwen dropped: DashScope key restricted 2026-08)", () => {
+    expect(ASSISTANT_MODELS.length).toBe(3);
+    expect(ASSISTANT_MODELS.map((m) => m.id)).toEqual(["deepseek", "glm", "kimi"]);
   });
 
   it("falls back to offline when no key", async () => {

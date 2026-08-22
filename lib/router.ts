@@ -1,8 +1,8 @@
 // Smart model router — uses a text model to analyze the prompt and recommend
 // the best image generation model based on prompt characteristics.
 
-import { getDeepSeekKey } from "./keys";
-import { getImageModels, type ModelInfo } from "./model-registry";
+import { getDeepSeekKey, getDeepSeekBaseUrl } from "./keys";
+import { getImageModels } from "./model-registry";
 
 export interface RoutingResult {
   recommendedModel: string;
@@ -10,40 +10,48 @@ export interface RoutingResult {
   offline: boolean;
 }
 
-const SYSTEM_PROMPT = `You are a model router for an AI image generation service. Given a user's prompt, analyze its characteristics and recommend the best model.
+// Built from the enabled models in the registry so this prompt can never
+// drift from what the UI/API actually offer.
+function buildSystemPrompt(): string {
+  const modelLines = getImageModels()
+    .map((m) => `- ${m.id}: ${m.displayName}. ${m.description} Cost: ${m.costPerUnit.credits} credits.`)
+    .join("\n");
+  return `You are a model router for an AI image generation service. Given a user's prompt, analyze its characteristics and recommend the best model.
 
 Available models:
-- gpt: GPT Image 2. Best for: text rendering, logos, typography, fine detail, complex compositions. Slower (30-120s). Cost: 8 credits.
-- seedream: Seedream 5. Best for: realistic photos, portraits, fast generation, real-world scenes. Fast (5-15s). Cost: 6 credits. Has built-in AI watermark.
-- wan-image: Wan 2.7. Best for: quick drafts, budget-friendly, simple images. Fastest. Cost: 4 credits.
-- wan-image-pro: Wan 2.7 Pro. Best for: 4K high resolution, group images, multi-image editing, complex instructions. Cost: 10 credits.
+${modelLines}
 
 Rules:
-- If prompt contains text, logos, or typography requests → recommend "gpt"
-- If prompt requests realistic photos, portraits, or real-world scenes → recommend "seedream" or "wan-image-pro"
-- If prompt is simple or budget-conscious → recommend "wan-image"
-- If prompt requests 4K, multi-image, or editing → recommend "wan-image-pro"
-- Default to "seedream" for general use
+- If prompt contains text, logos, or typography requests → recommend a model strong at text rendering
+- If prompt requests realistic photos or portraits → recommend the realistic/fast model
+- If prompt is simple or budget-conscious → recommend the cheapest model
+- Default to the fast general-purpose model otherwise
 
 Reply with JSON only: {"model": "<model_id>", "reason": "<one sentence explanation>"}`;
+}
 
 export async function routePrompt(prompt: string): Promise<RoutingResult> {
+  const enabled = getImageModels();
+  const offlineDefault = (): RoutingResult => ({
+    // Seedream is the fast, mid-priced general default when it's available
+    recommendedModel: enabled.some((m) => m.id === "seedream") ? "seedream" : enabled[0]?.id ?? "seedream",
+    reason: "offline default",
+    offline: true,
+  });
   const key = getDeepSeekKey();
-  if (!key) {
-    return { recommendedModel: "seedream", reason: "offline default", offline: true };
-  }
+  if (!key) return offlineDefault();
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 15_000);
     let res: Response;
     try {
-      res = await fetch("https://api.deepseek.com/chat/completions", {
+      res = await fetch(`${getDeepSeekBaseUrl()}/chat/completions`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
         body: JSON.stringify({
           model: "deepseek-v4-flash",
           messages: [
-            { role: "system", content: SYSTEM_PROMPT },
+            { role: "system", content: buildSystemPrompt() },
             { role: "user", content: prompt },
           ],
           max_tokens: 100,
@@ -72,5 +80,5 @@ export async function routePrompt(prompt: string): Promise<RoutingResult> {
   } catch {
     // fall through to offline
   }
-  return { recommendedModel: "seedream", reason: "offline default", offline: true };
+  return offlineDefault();
 }

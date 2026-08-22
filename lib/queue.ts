@@ -112,19 +112,40 @@ export async function createMediaJob(input: CreateMediaJobInput) {
   });
 }
 
+// How often a worker re-polls an async (video) task. The claim CAS pushes
+// nextAttemptAt forward by this amount, so two workers can never poll the
+// same task concurrently.
+export const POLL_INTERVAL_MS = 10_000;
+
 export async function claimNextJob(worker: string) {
+  const now = new Date();
+  const due = { OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }] };
+
+  // 1. Fresh/retried jobs (queued → running, atomic via status CAS).
   for (let attempt = 0; attempt < 5; attempt++) {
     const candidate = await prisma.job.findFirst({
-      where: {
-        status: "queued",
-        OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: new Date() } }],
-      },
+      where: { status: "queued", ...due },
       orderBy: { createdAt: "asc" },
     });
-    if (!candidate) return null;
+    if (!candidate) break;
     const res = await prisma.job.updateMany({
       where: { id: candidate.id, status: "queued" },
       data: { status: "running", worker, startedAt: new Date(), heartbeatAt: new Date() },
+    });
+    if (res.count === 1) return prisma.job.findUnique({ where: { id: candidate.id } });
+  }
+
+  // 2. Async (video) tasks due for a poll. Status stays "polling"; the CAS
+  //    also matches on nextAttemptAt so only one worker wins the poll slot.
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const candidate = await prisma.job.findFirst({
+      where: { status: "polling", ...due },
+      orderBy: { nextAttemptAt: "asc" },
+    });
+    if (!candidate) return null;
+    const res = await prisma.job.updateMany({
+      where: { id: candidate.id, status: "polling", ...due },
+      data: { worker, heartbeatAt: new Date(), nextAttemptAt: new Date(Date.now() + POLL_INTERVAL_MS) },
     });
     if (res.count === 1) return prisma.job.findUnique({ where: { id: candidate.id } });
   }
@@ -133,7 +154,7 @@ export async function claimNextJob(worker: string) {
 
 export async function heartbeat(jobId: string) {
   await prisma.job.updateMany({
-    where: { id: jobId, status: "running" },
+    where: { id: jobId, status: { in: ["running", "polling"] } },
     data: { heartbeatAt: new Date() },
   });
 }
@@ -231,11 +252,26 @@ export async function completeJob(jobId: string, images: JobImage[]) {
   });
 }
 
-// Set job to polling state (for video async tasks)
+// Move a video job into "polling" after creating the provider task.
+// nextAttemptAt throttles re-polls; recoverStuckJobs is the crash safety net.
 export async function setJobPolling(jobId: string, providerTaskId: string) {
-  await prisma.job.update({
-    where: { id: jobId },
-    data: { status: "polling", providerTaskId, heartbeatAt: new Date() },
+  await prisma.job.updateMany({
+    where: { id: jobId, status: { in: ["running", "queued"] } },
+    data: {
+      status: "polling",
+      providerTaskId,
+      heartbeatAt: new Date(),
+      nextAttemptAt: new Date(Date.now() + POLL_INTERVAL_MS),
+    },
+  });
+}
+
+// Keep polling: task still pending/running upstream. Re-arms nextAttemptAt
+// and refreshes the heartbeat so recoverStuckJobs doesn't reap an active task.
+export async function schedulePoll(jobId: string, delayMs = POLL_INTERVAL_MS) {
+  await prisma.job.updateMany({
+    where: { id: jobId, status: { in: ["running", "polling", "queued"] } },
+    data: { status: "polling", heartbeatAt: new Date(), nextAttemptAt: new Date(Date.now() + delayMs) },
   });
 }
 

@@ -3,15 +3,20 @@ import { requireVerifiedUser, ok, fail, enforceRateLimit } from "@/lib/api";
 import { checkPrompt } from "@/lib/safety";
 import { createMediaJob } from "@/lib/queue";
 import { getStorage, newStorageKey } from "@/lib/storage";
+import { getImageModels, modelEnum } from "@/lib/model-registry";
 import { randomUUID } from "crypto";
+
+const EDITABLE_MODEL_IDS = getImageModels()
+  .filter((m) => m.supportsImageInput)
+  .map((m) => m.id);
 
 const schema = z.object({
   prompt: z.string().min(3).max(2000),
-  model: z.enum(["gpt", "seedream", "wan-image", "wan-image-pro"]).default("gpt"),
+  model: z.enum(modelEnum(EDITABLE_MODEL_IDS)).default("gpt"),
   quality: z.enum(["low", "medium", "high"]).default("medium"),
   // Reference image as base64 (data URL or raw base64)
   image: z.string().min(100).max(2_000_000), // up to ~2MB base64
-  // For multi-image editing (wan-image-pro): up to 9 images
+  // For multi-image editing (image-input capable models): up to 9 images
   extraImages: z.array(z.string().min(100).max(2_000_000)).max(8).optional(),
   idempotencyKey: z.string().max(128).optional(),
 });

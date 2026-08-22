@@ -6,7 +6,7 @@
 - 产品大纲：[PRODUCT_OUTLINE.md](PRODUCT_OUTLINE.md)（v0.6）
 - PRD：[docs/plans/2026-08-11-pixelduo-prd.md](docs/plans/2026-08-11-pixelduo-prd.md)
 - 设计原型：[designs/pixelduo/](designs/pixelduo/)
-- 黑暗测试：[research/darktest/report.md](research/darktest/report.md)
+- 黑暗测试：[docs/archive/research/darktest/report.md](docs/archive/research/darktest/report.md)
 - 合规：[docs/compliance/](docs/compliance/)
 
 ## 技术栈
@@ -209,7 +209,7 @@ scripts/             worker / rollover / recover / backup
 tests/               单元测试（vitest）
 e2e/                 端到端测试（playwright）
 designs/             高保真设计原型与预览图
-research/            竞品/成本/支付调研
+docs/archive/        归档的调研与共创过程记录（findings/progress/research）
 docs/                PRD、合规文档、共创记录
 .github/workflows/    CI
 ```

@@ -26,9 +26,27 @@ export interface ModelInfo {
   async: boolean;
   // Whether the model supports reference image input (image-to-image / image-to-video)
   supportsImageInput: boolean;
+  // Whether a reference image is REQUIRED (pure i2v models). Models that
+  // accept an optional first frame (e.g. seedance) leave this false.
+  requiresImageInput?: boolean;
+  // Whether this model is offered in the UI/API. Disabled models are hidden
+  // from selection but stay in the catalog so queued jobs still settle and
+  // old gallery records keep their labels.
+  enabled: boolean;
+  // Whether the provider already bakes an AI-content marker into outputs
+  // (if not, the worker bakes the compliance watermark itself).
+  builtInWatermark: boolean;
 }
 
 // 1 credit = $0.01. Calibrated by dark test + official pricing (2026-08-19).
+//
+// Availability audit 2026-08-22 (probed with live keys, empty-param requests):
+//   ✅ gpt-image-2 @ modelverse (images + edits)
+//   ✅ doubao-seedream-5-0-260128 @ ark
+//   ✅ doubao-seedance-2-0-260128 @ ark
+//   ❌ wan2.7-* @ aliyun — 403 "Access denied by API-Key restrictions"
+//      (models exist in DashScope's catalog; our key lost model access).
+//      Re-enable after fixing the key's model restrictions in the DashScope console.
 
 export const MODELS: ModelInfo[] = [
   // === Image generation models ===
@@ -44,6 +62,8 @@ export const MODELS: ModelInfo[] = [
     costPerUnit: { credits: 8, usd: 0.08, label: "medium · 1024²" },
     async: false,
     supportsImageInput: true, // supports edits API
+    enabled: true,
+    builtInWatermark: false,
   },
   {
     id: "seedream",
@@ -57,6 +77,8 @@ export const MODELS: ModelInfo[] = [
     costPerUnit: { credits: 6, usd: 0.06, label: "standard · 1920²" },
     async: false,
     supportsImageInput: true,
+    enabled: true,
+    builtInWatermark: true, // Ark bakes an "AI生成" marker into outputs
   },
   {
     id: "wan-image",
@@ -70,6 +92,8 @@ export const MODELS: ModelInfo[] = [
     costPerUnit: { credits: 4, usd: 0.04, label: "standard · 2K" },
     async: false,
     supportsImageInput: true, // supports editing via multi-image reference
+    enabled: false, // DashScope key restrictions — see audit note above
+    builtInWatermark: false,
   },
   {
     id: "wan-image-pro",
@@ -83,6 +107,8 @@ export const MODELS: ModelInfo[] = [
     costPerUnit: { credits: 10, usd: 0.10, label: "standard · 2K" },
     async: false,
     supportsImageInput: true,
+    enabled: false, // DashScope key restrictions — see audit note above
+    builtInWatermark: false,
   },
 
   // === Video generation models (async task-based) ===
@@ -99,6 +125,8 @@ export const MODELS: ModelInfo[] = [
     costPerUnit: { credits: 14, usd: 0.14, label: "per second" },
     async: true,
     supportsImageInput: true, // image-to-video supported
+    enabled: true,
+    builtInWatermark: false, // video watermarking not implemented — see docs
   },
   {
     id: "wan-t2v",
@@ -113,6 +141,8 @@ export const MODELS: ModelInfo[] = [
     costPerUnit: { credits: 10, usd: 0.10, label: "per second (720P)" },
     async: true,
     supportsImageInput: false,
+    enabled: false, // DashScope key restrictions — see audit note above
+    builtInWatermark: false,
   },
   {
     id: "wan-i2v",
@@ -126,6 +156,9 @@ export const MODELS: ModelInfo[] = [
     costPerUnit: { credits: 10, usd: 0.10, label: "per second (720P)" },
     async: true,
     supportsImageInput: true,
+    requiresImageInput: true, // pure i2v model — first frame is mandatory
+    enabled: false, // DashScope key restrictions — see audit note above
+    builtInWatermark: false,
   },
 ];
 
@@ -133,20 +166,43 @@ const MODEL_MAP: Record<string, ModelInfo> = Object.fromEntries(
   MODELS.map((m) => [m.id, m]),
 );
 
+// Any model (enabled or not) — job settlement and history labels need these.
 export function getModel(id: string): ModelInfo | undefined {
   return MODEL_MAP[id];
 }
 
+export function getAllModels(): ModelInfo[] {
+  return MODELS;
+}
+
+export function getEnabledModels(): ModelInfo[] {
+  return MODELS.filter((m) => m.enabled);
+}
+
+// Enabled-only views: what the UI offers and the APIs accept.
 export function getImageModels(): ModelInfo[] {
-  return MODELS.filter((m) => m.mediaType === "image");
+  return getEnabledModels().filter((m) => m.mediaType === "image");
 }
 
 export function getVideoModels(): ModelInfo[] {
-  return MODELS.filter((m) => m.mediaType === "video");
+  return getEnabledModels().filter((m) => m.mediaType === "video");
 }
 
 export function getAsyncModels(): ModelInfo[] {
-  return MODELS.filter((m) => m.async);
+  return getEnabledModels().filter((m) => m.async);
+}
+
+export function enabledImageModelIds(): string[] {
+  return getImageModels().map((m) => m.id);
+}
+
+export function enabledVideoModelIds(): string[] {
+  return getVideoModels().map((m) => m.id);
+}
+
+// z.enum() needs a non-empty tuple; this adapts the id arrays for route schemas.
+export function modelEnum(ids: string[]): [string, ...string[]] {
+  return ids as [string, ...string[]];
 }
 
 // Backward-compatible legacy ModelId type for existing code

@@ -26,6 +26,10 @@ echo "[3/6] unit tests"
 # Mirrors CI: the test-unit job does NOT auto-verify (auth-flow covers the
 # pending-verification flow); only the e2e job sets EMAIL_VERIFY_AUTO=1.
 unset EMAIL_VERIFY_AUTO || true
+# Rate-limit counters persist in Redis between local runs (CI gets a fresh
+# instance); clear them so repeated local runs don't trip auth-flow tests.
+docker exec pixelduo-redis redis-cli --scan --pattern 'rl:*' 2>/dev/null \
+  | xargs -r -I{} docker exec pixelduo-redis redis-cli del {} >/dev/null 2>&1 || true
 npm test
 
 echo "[4/6] production build"

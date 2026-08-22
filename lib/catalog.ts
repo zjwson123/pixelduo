@@ -15,10 +15,10 @@ export interface Pack {
 }
 
 export const PLANS: Plan[] = [
-  { id: "free", name: "Free", price: 0, credits: 0, features: ["30 credits on signup", "2 credits daily check-in", "Watermarked previews"], featured: false },
-  { id: "starter", name: "Starter", price: 9, credits: 800, features: ["≈ 100–130 images", "No platform watermark", "Priority queue"], featured: false },
+  { id: "free", name: "Free", price: 0, credits: 0, features: ["30 credits on signup", "2 credits daily check-in", "Image & video generation"], featured: false },
+  { id: "starter", name: "Starter", price: 9, credits: 800, features: ["≈ 100–130 images", "Video generation (Seedance)", "Priority queue"], featured: false },
   { id: "pro", name: "Pro", price: 19, credits: 2000, features: ["≈ 250–330 images", "30% quota rollover", "Batch generation"], featured: true },
-  { id: "studio", name: "Studio", price: 39, credits: 5000, features: ["Team & privacy mode", "API trial quota", "Priority support"], featured: false },
+  { id: "studio", name: "Studio", price: 39, credits: 5000, features: ["≈ 625–830 images", "Team & privacy mode", "API trial quota", "Priority support"], featured: false },
 ];
 
 export const PACKS: Pack[] = [

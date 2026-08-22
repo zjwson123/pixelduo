@@ -83,20 +83,32 @@ export function getAliyunBaseUrl(service: "multimodal-generation" | "video-synth
   }
 }
 
+// Key for the DeepSeek chat API (prompt assistant + smart routing).
+// Priority: env var → a dedicated deepseek gateway in cc-proxy. The
+// modelverse key is deliberately NOT used: it is not valid on
+// api.deepseek.com, and modelverse delisted deepseek models anyway
+// (probed 2026-08-22: "model [deepseek-v4-flash] is offline").
 export function getDeepSeekKey(): string | undefined {
   if (process.env.DEEPSEEK_API_KEY) return process.env.DEEPSEEK_API_KEY;
   const cfg = loadCcProxyConfig();
-  const gws = cfg?.gateways ?? {};
-  // Check modelverse gateway for deepseek models
-  const mv = gws.modelverse;
-  if (mv?.api_keys?.find((x) => x.length > 0)) return mv.api_keys[0];
-  for (const [name, gw] of Object.entries(gws)) {
+  for (const [name, gw] of Object.entries(cfg?.gateways ?? {})) {
     if (/deepseek|ds-/i.test(name)) {
       const k = gw.api_keys?.find((x) => x.length > 0);
       if (k) return k;
     }
   }
   return undefined;
+}
+
+// Chat-completions base for DeepSeek (no trailing slash, no path).
+export function getDeepSeekBaseUrl(): string {
+  const trim = (u: string) => u.replace(/\/+$/, "");
+  if (process.env.DEEPSEEK_BASE_URL) return trim(process.env.DEEPSEEK_BASE_URL);
+  const cfg = loadCcProxyConfig();
+  for (const [name, gw] of Object.entries(cfg?.gateways ?? {})) {
+    if (/deepseek|ds-/i.test(name) && gw.base_url) return trim(gw.base_url);
+  }
+  return "https://api.deepseek.com";
 }
 
 export interface VisionConfig {

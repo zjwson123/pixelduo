@@ -3,14 +3,18 @@ import { requireVerifiedUser, ok, fail, enforceRateLimit } from "@/lib/api";
 import { checkPrompt } from "@/lib/safety";
 import { createMediaJob } from "@/lib/queue";
 import { getStorage, newStorageKey } from "@/lib/storage";
+import { enabledVideoModelIds, getModel, modelEnum } from "@/lib/model-registry";
 import { randomUUID } from "crypto";
+
+const VIDEO_MODEL_IDS = enabledVideoModelIds();
 
 const schema = z.object({
   prompt: z.string().min(3).max(2000),
-  model: z.enum(["seedance", "wan-t2v", "wan-i2v"]).default("wan-t2v"),
+  model: z.enum(modelEnum(VIDEO_MODEL_IDS)).default(VIDEO_MODEL_IDS[0] ?? "seedance"),
   duration: z.number().int().min(2).max(15).default(5),
-  // For image-to-video models: reference image as base64
-  image: z.string().min(100).max(2_000_000).optional(),
+  // For image-to-video models: reference image as base64 (nullish — some
+  // clients send explicit null when unset)
+  image: z.string().min(100).max(2_000_000).nullish(),
   idempotencyKey: z.string().max(128).optional(),
 });
 
@@ -23,9 +27,9 @@ export async function POST(req: Request) {
     const safety = checkPrompt(body.prompt);
     if (!safety.ok) return fail(new Error(`blocked:${safety.reason}`));
 
-    // If image-to-video model requires an image, validate it's present
-    if (body.model === "wan-i2v" && !body.image) {
-      return fail(new Error("invalid-input: wan-i2v requires a reference image"));
+    // Pure i2v models need a first frame; seedance-style models accept one optionally
+    if (getModel(body.model)?.requiresImageInput && !body.image) {
+      return fail(new Error(`invalid-input: ${body.model} requires a reference image`));
     }
 
     let refImageKey: string | undefined;

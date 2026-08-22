@@ -22,7 +22,7 @@
 - 出海支付与合规（Paddle / Stripe / LemonSqueezy / Creem）
 - 开源生态与可复用脚手架（GitHub 8+ 项目）
 
-完整调研明细见 `research/` 目录；关键决策点见 §10，需要你逐条拍板。
+完整调研明细见 `docs/archive/research/` 目录；关键决策点见 §10，需要你逐条拍板。
 
 ---
 
@@ -197,7 +197,7 @@
 | Seedream 5.0 Lite | ≈ $0.035/张 | 渠道价（ofox） |
 | DeepSeek V4-flash（Prompt 助手） | <$0.001/次 | 输入 $0.14/M、输出 $0.28/M，缓存命中更低 |
 
-**黑暗测试实测（2026-08-11，详见 research/darktest/report.md）**
+**黑暗测试实测（2026-08-11，详见 docs/archive/research/darktest/report.md）**
 
 | 实测项 | 延迟 | 成本（官方价） | 备注 |
 |---|---|---|---|

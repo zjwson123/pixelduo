@@ -1,4 +1,8 @@
-import { getDeepSeekKey, getModelVerseKey, getAliyunKey } from "./keys";
+import { getDeepSeekKey, getDeepSeekBaseUrl, getModelVerseKey, getAliyunKey } from "./keys";
+import { ASSISTANT_MODELS } from "./assistant-models";
+
+export { ASSISTANT_MODELS };
+export type { AssistantModelOption } from "./assistant-models";
 
 export interface AssistantResult {
   text: string;
@@ -23,18 +27,6 @@ const STYLE_HINTS = [
   "minimal, warm neutral palette, centered composition",
 ];
 
-export interface AssistantModelOption {
-  id: string;
-  label: string;
-}
-
-export const ASSISTANT_MODELS: AssistantModelOption[] = [
-  { id: "deepseek", label: "DeepSeek V4 Flash" },
-  { id: "glm", label: "GLM 5.2 (thinking)" },
-  { id: "qwen", label: "Qwen 3.8 Max" },
-  { id: "kimi", label: "Kimi K2.6" },
-];
-
 export async function improvePrompt(prompt: string, mode: string, modelId: string = "deepseek"): Promise<AssistantResult> {
   const result = await callAssistantModel(prompt, mode, modelId);
   if (result) return result;
@@ -55,7 +47,7 @@ async function callAssistantModel(prompt: string, mode: string, modelId: string)
   switch (modelId) {
     case "deepseek": {
       apiKey = getDeepSeekKey();
-      apiUrl = "https://api.deepseek.com/chat/completions";
+      apiUrl = `${getDeepSeekBaseUrl()}/chat/completions`;
       modelName = "deepseek-v4-flash";
       extraBody = { thinking: { type: "disabled" } };
       break;
@@ -65,12 +57,6 @@ async function callAssistantModel(prompt: string, mode: string, modelId: string)
       apiUrl = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
       modelName = "glm-5.2";
       // GLM-5.2 defaults to thinking mode; keep it for better prompt quality
-      break;
-    }
-    case "qwen": {
-      apiKey = getAliyunKey();
-      apiUrl = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
-      modelName = "qwen3.8-max";
       break;
     }
     case "kimi": {

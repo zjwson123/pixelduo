@@ -5,9 +5,8 @@ import { improvePrompt, ASSISTANT_MODELS } from "@/lib/assistant";
 const schema = z.object({
   prompt: z.string().max(2000),
   mode: z.enum(["expand", "translate", "style", "inspire"]).default("expand"),
-  model: z.enum(["deepseek", "glm", "qwen", "kimi"]).default("deepseek"),
+  model: z.enum(ASSISTANT_MODELS.map((m) => m.id) as [string, ...string[]]).default("deepseek"),
 });
-
 export async function POST(req: Request) {
   try {
     await requireUserId();

@@ -15,7 +15,7 @@ async function registerAndLogin(page: import("@playwright/test").Page) {
 }
 
 test.describe("Multi-model image generation", () => {
-  test("shows all image model options", async ({ page }) => {
+  test("shows enabled image model options (wan disabled 2026-08)", async ({ page }) => {
     await registerAndLogin(page);
     await page.waitForSelector(".composer");
 
@@ -23,23 +23,27 @@ test.describe("Multi-model image generation", () => {
     const allText = modelChips.join(" ");
     expect(allText).toContain("GPT Image 2");
     expect(allText).toContain("Seedream 5");
-    expect(allText).toContain("Wan 2.7");
-    expect(allText).toContain("Wan 2.7 Pro");
     expect(allText).toContain("Both");
+    // wan models were disabled after the DashScope key lost model access
+    expect(allText).not.toContain("Wan 2.7");
   });
 
-  test("generates with wan-image model", async ({ page }) => {
+  test("generates with seedream model", async ({ page }) => {
     await registerAndLogin(page);
     await page.waitForSelector(".composer");
 
-    // Select wan-image model (not Pro)
-    await page.locator(".composer .chip", { hasText: "Wan 2.7" }).first().click();
+    // Select seedream model
+    await page.locator(".composer .chip", { hasText: "Seedream 5" }).first().click();
 
     await page.fill("textarea", "a beautiful sunset over the ocean");
     await page.locator("button.generate").click();
 
-    // Wait for job to complete (mock mode = instant)
-    await page.waitForSelector(".result-card img, .empty .serif", { timeout: 30_000 });
+    // Wait for the job to reach a terminal state (mock mode = fast).
+    // Previously this awaited loose selectors that also matched in-flight
+    // states, hiding the video polling bug.
+    await expect(
+      page.locator(".result-card img, .empty .serif").first(),
+    ).toBeVisible({ timeout: 30_000 });
   });
 
   test("shows edit tab and upload area", async ({ page }) => {
@@ -51,7 +55,7 @@ test.describe("Multi-model image generation", () => {
     expect(uploadText).toContain("upload");
   });
 
-  test("shows video tab with video models", async ({ page }) => {
+  test("shows video tab with enabled video models", async ({ page }) => {
     await registerAndLogin(page);
     await page.locator("button.tab", { hasText: "Video" }).click();
     await page.waitForSelector(".composer");
@@ -59,19 +63,32 @@ test.describe("Multi-model image generation", () => {
     const modelChips = await page.locator(".composer .chip").allTextContents();
     const allText = modelChips.join(" ");
     expect(allText).toContain("Seedance");
-    expect(allText).toContain("Wan 2.7 T2V");
-    expect(allText).toContain("Wan 2.7 I2V");
+    expect(allText).not.toContain("Wan 2.7 T2V");
+    expect(allText).not.toContain("Wan 2.7 I2V");
   });
 
-  test("generates video with mock provider", async ({ page }) => {
+  test("generates video end-to-end with mock provider", async ({ page }) => {
     await registerAndLogin(page);
+
+    // Top up first: signup bonus (30) can't cover a 5s video (70 credits).
+    // Reload afterwards so the page picks up the new balance (the client
+    // side credit pre-check otherwise sees the stale signup balance).
+    const paid = await page.request.post(`${BASE}/api/checkout`, {
+      data: { kind: "pack", itemId: "p1" },
+    });
+    expect(paid.ok()).toBeTruthy();
+    await page.goto(`${BASE}/studio`);
+
     await page.locator("button.tab", { hasText: "Video" }).click();
 
     await page.fill("textarea", "a cat walking in the garden");
     await page.locator("button.generate").click();
 
-    // Wait for completion (mock mode)
-    await page.waitForSelector("video, .gen-step.active, .serif", { timeout: 60_000 });
+    // Must reach the DONE state and render the video element. The loose
+    // ".gen-step.active" matcher used to pass while polling jobs were stuck
+    // in an unclaimable state (see tests/queue-video.test.ts).
+    await expect(page.locator("video")).toBeVisible({ timeout: 60_000 });
+    await expect(page.locator(".results-head")).toContainText(/video/i, { timeout: 10_000 });
   });
 
   test("smart routing button exists and is clickable", async ({ page }) => {
@@ -89,7 +106,8 @@ test.describe("Multi-model image generation", () => {
     const options = await selector.locator("option").allTextContents();
     expect(options.join(" ")).toContain("DeepSeek");
     expect(options.join(" ")).toContain("GLM");
-    expect(options.join(" ")).toContain("Qwen");
     expect(options.join(" ")).toContain("Kimi");
+    // qwen dropped: DashScope key is restricted from qwen* models
+    expect(options.join(" ")).not.toContain("Qwen");
   });
 });

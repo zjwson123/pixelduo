@@ -1,8 +1,14 @@
 # PixelDuo API
 
-Programmatic image generation, billed from your PixelDuo credits at the same
-per-image cost as the workbench (e.g. Seedream 6 / GPT medium 8 / GPT high 26
-credits per image).
+Programmatic image and video generation, billed from your PixelDuo credits at
+the same per-unit cost as the workbench (e.g. Seedream 6 / GPT medium 8 / GPT
+high 26 credits per image; Seedance 14 credits per second of video).
+
+> **Model availability (2026-08):** `gpt` (GPT Image 2), `seedream` (Seedream 5)
+> and `seedance` (Seedance 2.0 video) are live. The Wan 2.7 family
+> (`wan-image`, `wan-image-pro`, `wan-t2v`, `wan-i2v`) is temporarily disabled
+> until the DashScope key's model restrictions are lifted — requests naming
+> them return `400 invalid-input`.
 
 ## Authentication
 
@@ -22,13 +28,15 @@ curl -X POST https://pixelduo.ai/api/v1/images/generations \
 `POST /api/v1/images/generations`
 
 ```json
-{ "prompt": "…", "model": "gpt|seedream|both", "quality": "low|medium|high", "n": 1 }
+{ "prompt": "…", "model": "gpt|seedream|both|seedance", "quality": "low|medium|high", "n": 1, "duration": 5 }
 ```
 
 - `prompt` required (3–2000 chars)
-- `model` default `gpt`; `both` generates one image per engine per count
+- `model` default `gpt`; `both` generates one image per engine per count;
+  `seedance` creates a video job
 - `quality` default `medium` (ignored for seedream)
-- `n` 1–4 images
+- `n` 1–4 images (image models only)
+- `duration` 2–15 seconds, default 5 (video models only, billed per second)
 
 Response (async — generation runs in the worker):
 
@@ -45,7 +53,8 @@ Response (async — generation runs in the worker):
 ```
 
 `images` are presigned object-store URLs (valid ~1h); in self-hosted local mode
-they are session-protected web URLs intended for browser use.
+they are session-protected web URLs intended for browser use. Video jobs go
+through `queued → polling → done` (async provider task, typically 1–3 min).
 
 ## Limits & errors
 

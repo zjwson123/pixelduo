@@ -5,7 +5,8 @@ import { signOut } from "next-auth/react";
 import Link from "next/link";
 import { estimateGenerationCost, estimateModelCost, type ModelId, type Quality } from "@/lib/cost";
 import { PLANS, PACKS } from "@/lib/catalog";
-import { MODELS, getImageModels, getVideoModels } from "@/lib/model-registry";
+import { MODELS, getModel, getImageModels, getVideoModels } from "@/lib/model-registry";
+import { ASSISTANT_MODELS } from "@/lib/assistant-models";
 
 interface Me {
   credits: number;
@@ -105,19 +106,14 @@ const VIDEO_MODEL_OPTIONS: Array<{ value: string; label: string }> = VIDEO_MODEL
 
 const DURATION_OPTIONS = [3, 5, 10, 15];
 
-const EDIT_MODEL_OPTIONS: Array<{ value: string; label: string }> = [
-  { value: "gpt", label: "GPT Image 2" },
-  { value: "seedream", label: "Seedream 5" },
-  { value: "wan-image", label: "Wan 2.7" },
-  { value: "wan-image-pro", label: "Wan 2.7 Pro" },
-];
+// Edit tab: enabled image models that accept a reference image
+const EDIT_MODEL_OPTIONS: Array<{ value: string; label: string }> = IMAGE_MODELS
+  .filter((m) => m.supportsImageInput)
+  .map((m) => ({ value: m.id, label: m.displayName }));
 
-const ASSISTANT_MODEL_OPTIONS: Array<{ value: string; label: string }> = [
-  { value: "deepseek", label: "DeepSeek" },
-  { value: "glm", label: "GLM 5.2" },
-  { value: "qwen", label: "Qwen 3.8" },
-  { value: "kimi", label: "Kimi K2.6" },
-];
+const ASSISTANT_MODEL_OPTIONS: Array<{ value: string; label: string }> = ASSISTANT_MODELS.map(
+  (m) => ({ value: m.id, label: m.label }),
+);
 
 const STYLE_HINTS = [
   "soft studio lighting, high detail",
@@ -179,9 +175,9 @@ const LOCALE_STRINGS: Record<Locale, {
     orderStatus: { paid: "Paid", pending: "Pending", refunded: "Refunded" },
     ledgerLabels: { SIGNUP_BONUS: "Signup bonus", CHECKIN: "Daily check-in", PURCHASE: "Credit pack", SUBSCRIPTION: "Plan subscription", PRE_AUTH: "Generation (pre-auth)", SETTLE: "Generation settled", REFUND: "Refund (failure)", REVOKE: "Refund (payment)", EXPIRE: "Expired", ADMIN: "Adjustment" },
     pageHead: {
-      create: { title: "Create", desc: "Four image engines — pick the best for your prompt. Cost shown before you commit." },
+      create: { title: "Create", desc: "Twin image engines — pick the best for your prompt. Cost shown before you commit." },
       edit: { title: "Edit", desc: "Upload a reference image and describe what to change." },
-      video: { title: "Video", desc: "Text-to-video and image-to-video. Powered by Seedance 2.0 and Wan 2.7." },
+      video: { title: "Video", desc: "Text-to-video and image-to-video, powered by Seedance 2.0." },
       explore: { title: "Explore", desc: "Ready-made prompts with the exact model and parameters attached." },
       gallery: { title: "Gallery", desc: "Your history — every image and video keeps its prompt, engine, and exact cost." },
       ledger: { title: "Ledger", desc: "Every credit movement, in one transparent log." },
@@ -198,7 +194,7 @@ const LOCALE_STRINGS: Record<Locale, {
     videoPrompt: "Prompt", duration: "Duration", refImage: "Reference image (first frame)", genVideo: "Generate Video", genVideoing: "Generating video… (1-3 min)",
     videoCreating: "Creating video task…", videoPolling: "Polling video task…", videoWait: "This may take 1-3 minutes",
     emptyCreate: "Your canvas is empty", emptyCreateDesc: "Type a prompt, pick an engine, and press Generate.",
-    emptyEdit: "Upload an image to start editing", emptyEditDesc: "Supported: GPT Image 2, Wan 2.7 Pro, Seedream reference.",
+    emptyEdit: "Upload an image to start editing", emptyEditDesc: "Supported: GPT Image 2 edits, Seedream reference.",
     emptyVideo: "Create your first video", emptyVideoDesc: "Text-to-video or image-to-video.",
     latestResults: "Latest results", recentImages: "Recent images", total: "total", editResult: "Edit result", videoResult: "Video result",
     genFailed: "Generation failed", videoFailed: "Video generation failed", charged: "Charged", download: "Download",
@@ -220,9 +216,9 @@ const LOCALE_STRINGS: Record<Locale, {
     orderStatus: { paid: "已支付", pending: "待支付", refunded: "已退款" },
     ledgerLabels: { SIGNUP_BONUS: "注册奖励", CHECKIN: "每日签到", PURCHASE: "积分包", SUBSCRIPTION: "订阅", PRE_AUTH: "生成（预扣）", SETTLE: "生成完成", REFUND: "退款（失败）", REVOKE: "退款（支付）", EXPIRE: "已过期", ADMIN: "管理员调整" },
     pageHead: {
-      create: { title: "创作", desc: "四大图像引擎 — 为你的提示词选最佳模型，生成前透明计费。" },
+      create: { title: "创作", desc: "双图像引擎 — 为你的提示词选最佳模型，生成前透明计费。" },
       edit: { title: "编辑", desc: "上传参考图，描述要修改的内容。" },
-      video: { title: "视频", desc: "文生视频和图生视频，由 Seedance 2.0 和万相 2.7 驱动。" },
+      video: { title: "视频", desc: "文生视频和图生视频，由 Seedance 2.0 驱动。" },
       explore: { title: "灵感库", desc: "精选模板，附带模型与参数，一键复用。" },
       gallery: { title: "画廊", desc: "你的历史记录 — 每张图都保留提示词、引擎和精确成本。" },
       ledger: { title: "账本", desc: "每一笔积分变动，透明可查。余额 = 流水汇总。" },
@@ -239,7 +235,7 @@ const LOCALE_STRINGS: Record<Locale, {
     videoPrompt: "提示词", duration: "时长", refImage: "参考图（首帧）", genVideo: "生成视频", genVideoing: "视频生成中…（1-3 分钟）",
     videoCreating: "正在创建视频任务…", videoPolling: "正在轮询视频任务…", videoWait: "预计需要 1-3 分钟",
     emptyCreate: "画布还是空的", emptyCreateDesc: "输入提示词，选择引擎，点击生成。",
-    emptyEdit: "上传图片开始编辑", emptyEditDesc: "支持 GPT Image 2、万相 2.7 Pro、Seedream 参考图。",
+    emptyEdit: "上传图片开始编辑", emptyEditDesc: "支持 GPT Image 2 编辑、Seedream 参考图。",
     emptyVideo: "创建你的第一个视频", emptyVideoDesc: "文生视频或图生视频。",
     latestResults: "最新结果", recentImages: "最近图片", total: "共", editResult: "编辑结果", videoResult: "视频结果",
     genFailed: "生成失败", videoFailed: "视频生成失败", charged: "已扣", download: "下载",
@@ -297,16 +293,9 @@ function Seg<T extends string | number>({ options, value, onChange, tone }: {
 }
 
 function ModelPill({ model }: { model: string }) {
-  const labels: Record<string, string> = {
-    gpt: "GPT Image 2",
-    seedream: "Seedream 5",
-    "wan-image": "Wan 2.7",
-    "wan-image-pro": "Wan 2.7 Pro",
-    seedance: "Seedance 2.0",
-    "wan-t2v": "Wan T2V",
-    "wan-i2v": "Wan I2V",
-  };
-  const cls = model === "gpt" ? "gpt" : model.startsWith("wan") ? "gpt" : "seed";
+  // Full catalog (incl. disabled models) so historical records keep their labels
+  const labels: Record<string, string> = Object.fromEntries(MODELS.map((m) => [m.id, m.displayName]));
+  const cls = model === "gpt" || model.startsWith("wan") ? "gpt" : "seed";
   return (
     <span className={`model-pill ${cls}`}>
       <i></i>
@@ -356,7 +345,7 @@ export function Workbench() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Video tab state
-  const [videoModel, setVideoModel] = useState("wan-t2v");
+  const [videoModel, setVideoModel] = useState(VIDEO_MODEL_OPTIONS[0]?.value ?? "seedance");
   const [videoPrompt, setVideoPrompt] = useState("a golden retriever running through a sunlit wheat field, cinematic wide shot");
   const [videoDuration, setVideoDuration] = useState(5);
   const [videoImage, setVideoImage] = useState<string | null>(null);
@@ -496,18 +485,19 @@ export function Workbench() {
   const generateVideo = async () => {
     if (!videoPrompt.trim()) return setToast("Write a video prompt");
     if (me && !me.emailVerified) return setToast(t.verifyFirst);
-    const isI2V = videoModel === "wan-i2v" || videoModel === "seedance";
-    if (isI2V && !videoImage) return setToast(t.clickUpload);
+    // Pure i2v models need a first frame; seedance-style models take one optionally
+    if (getModel(videoModel)?.requiresImageInput && !videoImage) return setToast(t.clickUpload);
     const vCost = estimateModelCost(videoModel, 1, "standard", videoDuration);
     if (me && me.credits < vCost.credits) return setToast(t.insufficient);
     try {
       const data = await api<{ jobId: string }>("/api/video", {
         method: "POST",
+        // image must be omitted (not null) when unset — zod .optional() rejects null
         body: JSON.stringify({
           prompt: videoPrompt.trim(),
           model: videoModel,
           duration: videoDuration,
-          image: videoImage,
+          ...(videoImage ? { image: videoImage } : {}),
         }),
       });
       const poll = await api<{ job: JobStatus }>(`/api/jobs/${data.jobId}`);
@@ -616,7 +606,7 @@ export function Workbench() {
   const cats = ["全部", ...Array.from(new Set(templates.map((tm) => tm.cat)))];
 
   const generating = activeJob !== null && (activeJob.status === "queued" || activeJob.status === "running" || activeJob.status === "polling");
-  const isVideoJob = activeJob !== null && (activeJob.model === "seedance" || activeJob.model === "wan-t2v" || activeJob.model === "wan-i2v");
+  const isVideoJob = activeJob !== null && getModel(activeJob.model)?.mediaType === "video";
 
   return (
     <div>
@@ -725,14 +715,14 @@ export function Workbench() {
                       </button>
                     ))}
                   </div>
-                  {model !== "both" && model !== "seedream" && model !== "wan-image" && model !== "wan-image-pro" && (
+                  {IMAGE_MODELS.find((m) => m.id === model) && (
                     <div style={{ marginTop: 6, fontSize: 12, color: "var(--ink-3)" }}>
                       {IMAGE_MODELS.find((m) => m.id === model)?.description ?? ""}
                     </div>
                   )}
                 </div>
 
-                {model !== "seedream" && model !== "wan-image" && model !== "wan-image-pro" && model !== "both" && (
+                {IMAGE_MODELS.find((m) => m.id === model)?.supportsQuality && (
                   <div className="opt-row">
                     <span className="field-label">{t.quality}</span>
                     <div style={{ width: 230 }}><Seg options={QUALITY_OPTIONS} value={quality} onChange={setQuality} tone="gpt" /></div>
@@ -876,7 +866,7 @@ export function Workbench() {
                   </div>
                 </div>
 
-                {editModel === "gpt" && (
+                {IMAGE_MODELS.find((m) => m.id === editModel)?.supportsQuality && (
                   <div className="opt-row">
                     <span className="field-label">{t.quality}</span>
                     <div style={{ width: 230 }}><Seg options={QUALITY_OPTIONS} value={quality} onChange={setQuality} tone="gpt" /></div>
@@ -970,7 +960,7 @@ export function Workbench() {
                   </div>
                 </div>
 
-                {(videoModel === "wan-i2v" || videoModel === "seedance") && (
+                {VIDEO_MODELS.find((m) => m.id === videoModel)?.supportsImageInput && (
                   <div>
                     <div className="field-label">{t.refImage}</div>
                     <input type="file" accept="image/*" style={{ display: "none" }} id="video-file-input" onChange={(e) => handleFileUpload(e, setVideoImage)} />
@@ -1002,7 +992,7 @@ export function Workbench() {
               </div>
 
               <div className="card results">
-                {activeJob && (activeJob.model === "seedance" || activeJob.model === "wan-t2v" || activeJob.model === "wan-i2v") ? (
+                {activeJob && getModel(activeJob.model)?.mediaType === "video" ? (
                   activeJob.status === "done" ? (
                     <>
                       <div className="results-head">

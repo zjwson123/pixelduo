@@ -2,12 +2,13 @@ import { z } from "zod";
 import { requireVerifiedUser, ok, fail } from "@/lib/api";
 import { checkPrompt } from "@/lib/safety";
 import { createGenerationJob, createMediaJob } from "@/lib/queue";
+import { enabledImageModelIds, modelEnum } from "@/lib/model-registry";
 import { randomUUID } from "crypto";
 import { enforceRateLimit } from "@/lib/api";
 
 const schema = z.object({
   prompt: z.string().min(3).max(2000),
-  model: z.enum(["gpt", "seedream", "both", "wan-image", "wan-image-pro"]).default("gpt"),
+  model: z.enum(modelEnum([...enabledImageModelIds(), "both"])).default("gpt"),
   quality: z.enum(["low", "medium", "high"]).default("medium"),
   count: z.number().int().min(1).max(4).default(1),
   idempotencyKey: z.string().max(128).optional(),

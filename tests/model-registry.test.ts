@@ -1,10 +1,20 @@
 import { describe, it, expect } from "vitest";
-import { MODELS, getModel, getImageModels, getVideoModels, getAsyncModels } from "../lib/model-registry";
+import {
+  MODELS,
+  getModel,
+  getAllModels,
+  getEnabledModels,
+  getImageModels,
+  getVideoModels,
+  getAsyncModels,
+  enabledImageModelIds,
+  enabledVideoModelIds,
+} from "../lib/model-registry";
 import { estimateModelCost, modelCost, videoCost, gptCost, seedreamCost } from "../lib/cost";
 
 describe("model-registry", () => {
-  it("registers all expected models", () => {
-    const ids = MODELS.map((m) => m.id);
+  it("registers all expected models (incl. disabled ones)", () => {
+    const ids = getAllModels().map((m) => m.id);
     expect(ids).toContain("gpt");
     expect(ids).toContain("seedream");
     expect(ids).toContain("wan-image");
@@ -14,19 +24,42 @@ describe("model-registry", () => {
     expect(ids).toContain("wan-i2v");
   });
 
-  it("separates image and video models", () => {
-    const imgs = getImageModels();
-    const vids = getVideoModels();
-    expect(imgs.every((m) => m.mediaType === "image")).toBe(true);
-    expect(vids.every((m) => m.mediaType === "video")).toBe(true);
-    expect(imgs.map((m) => m.id)).toEqual(["gpt", "seedream", "wan-image", "wan-image-pro"]);
-    expect(vids.map((m) => m.id)).toEqual(["seedance", "wan-t2v", "wan-i2v"]);
+  it("keeps disabled models in the catalog but out of the enabled views", () => {
+    // wan models disabled 2026-08-22: DashScope key lost model access (403)
+    for (const id of ["wan-image", "wan-image-pro", "wan-t2v", "wan-i2v"]) {
+      expect(getModel(id)?.enabled).toBe(false);
+    }
+    for (const id of ["gpt", "seedream", "seedance"]) {
+      expect(getModel(id)?.enabled).toBe(true);
+    }
+    expect(getEnabledModels().map((m) => m.id)).toEqual(["gpt", "seedream", "seedance"]);
   });
 
-  it("identifies async (video) models", () => {
+  it("enabled image/video views exclude disabled models", () => {
+    const imgs = getImageModels();
+    const vids = getVideoModels();
+    expect(imgs.every((m) => m.mediaType === "image" && m.enabled)).toBe(true);
+    expect(vids.every((m) => m.mediaType === "video" && m.enabled)).toBe(true);
+    expect(imgs.map((m) => m.id)).toEqual(["gpt", "seedream"]);
+    expect(vids.map((m) => m.id)).toEqual(["seedance"]);
+    expect(enabledImageModelIds()).toEqual(["gpt", "seedream"]);
+    expect(enabledVideoModelIds()).toEqual(["seedance"]);
+  });
+
+  it("identifies async (video) models among the enabled set", () => {
     const async = getAsyncModels();
-    expect(async.length).toBe(3);
+    expect(async.map((m) => m.id)).toEqual(["seedance"]);
     expect(async.every((m) => m.async && m.mediaType === "video")).toBe(true);
+  });
+
+  it("marks which models bake their own AI watermark", () => {
+    expect(getModel("seedream")?.builtInWatermark).toBe(true);
+    expect(getModel("gpt")?.builtInWatermark).toBe(false);
+  });
+
+  it("flags pure i2v models as requiring a reference image", () => {
+    expect(getModel("wan-i2v")?.requiresImageInput).toBe(true);
+    expect(getModel("seedance")?.requiresImageInput).toBeFalsy(); // first frame optional
   });
 
   it("getModel returns model by id", () => {
@@ -38,6 +71,10 @@ describe("model-registry", () => {
 
   it("getModel returns undefined for unknown id", () => {
     expect(getModel("nonexistent")).toBeUndefined();
+  });
+
+  it("MODELS export still exposes the full catalog for record labels", () => {
+    expect(MODELS.length).toBe(7);
   });
 });
 
