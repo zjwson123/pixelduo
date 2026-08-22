@@ -317,7 +317,17 @@ export function Workbench() {
     localStorage.setItem("pd-lang", l);
   };
 
-  const [tab, setTab] = useState<Tab>("create");
+  const [tab, setTabState] = useState<Tab>("create");
+  // Keep the active tab in the URL hash so a page refresh (or shared link)
+  // restores it instead of always landing on Create
+  const setTab = (tb: Tab) => {
+    setTabState(tb);
+    history.replaceState(null, "", `#${tb}`);
+  };
+  useEffect(() => {
+    const hash = window.location.hash.replace(/^#/, "");
+    if (TABS.some((t) => t.id === hash)) setTabState(hash as Tab);
+  }, []);
   const [me, setMe] = useState<Me | null>(null);
   const [prompt, setPrompt] = useState("a minimalist ceramic coffee mug on a warm beige background");
   const [model, setModel] = useState<string>("gpt");
@@ -411,6 +421,15 @@ export function Workbench() {
     api<{ templates: Template[] }>("/api/templates")
       .then((d) => setTemplates(d.templates))
       .catch(() => undefined);
+    // Resume tracking an in-flight job (navigation/refresh unmounts this
+    // component and its state — the job itself keeps running server-side)
+    api<{ job: JobStatus | null }>("/api/jobs")
+      .then((d) => {
+        if (d.job && (d.job.status === "queued" || d.job.status === "running" || d.job.status === "polling")) {
+          setActiveJob(d.job);
+        }
+      })
+      .catch(() => undefined);
   }, [refreshMe, refreshGallery, refreshLedger, refreshOrders]);
 
   useEffect(() => {
@@ -434,7 +453,10 @@ export function Workbench() {
       try {
         const data = await api<{ job: JobStatus }>(`/api/jobs/${activeJob.id}`);
         setActiveJob(data.job);
-      } catch {}
+      } catch (e) {
+        // Job vanished (e.g. admin cleanup) — stop polling instead of retrying forever
+        if (e instanceof Error && e.message.includes("job-not-found")) setActiveJob(null);
+      }
     }, 2500);
     return () => clearTimeout(tm);
   }, [activeJob, refreshMe, refreshGallery, refreshLedger, refreshOrders]);

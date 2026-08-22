@@ -167,8 +167,23 @@ export interface CheckinResult {
   credits: number;
 }
 
+// Check-in day key, computed in a fixed timezone (default Asia/Shanghai) so
+// the "day" rolls over at local midnight, not at UTC midnight (08:00 for
+// UTC+8 users — which allowed two check-ins in one local day). en-CA yields
+// YYYY-MM-DD.
+const fmtCache = new Map<string, Intl.DateTimeFormat>();
+export function checkinDateKey(now = new Date()): string {
+  const tz = process.env.CHECKIN_TIMEZONE || "Asia/Shanghai";
+  let fmt = fmtCache.get(tz);
+  if (!fmt) {
+    fmt = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" });
+    fmtCache.set(tz, fmt);
+  }
+  return fmt.format(now);
+}
+
 export async function dailyCheckin(userId: string): Promise<CheckinResult> {
-  const date = new Date().toISOString().slice(0, 10);
+  const date = checkinDateKey();
   return prisma.$transaction(async (tx) => {
     const existing = await tx.checkin.findUnique({
       where: { userId_date: { userId, date } },

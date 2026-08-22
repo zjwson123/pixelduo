@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { prisma } from "../lib/prisma";
-import { addCreditsTx, signupBonus, dailyCheckin, fulfillOrder, revokeOrderCreditsTx } from "../lib/ledger";
+import { addCreditsTx, signupBonus, dailyCheckin, checkinDateKey, fulfillOrder, revokeOrderCreditsTx } from "../lib/ledger";
 import { createGenerationJob, completeJob, failJob } from "../lib/queue";
 
 let userId: string;
@@ -34,6 +34,19 @@ describe("credit ledger", () => {
     expect(second.claimed).toBe(false);
     const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
     expect(user.credits).toBe(32);
+  });
+
+  it("check-in day key follows CHECKIN_TIMEZONE, not UTC", () => {
+    // Default Asia/Shanghai: 2026-08-22T15:59Z is Aug 22 23:59 Beijing,
+    // one minute later the local day has rolled over
+    expect(checkinDateKey(new Date("2026-08-22T15:59:00Z"))).toBe("2026-08-22");
+    expect(checkinDateKey(new Date("2026-08-22T16:00:00Z"))).toBe("2026-08-23");
+    // Same instants under UTC keep the UTC date (legacy behavior, opt-in)
+    const prev = process.env.CHECKIN_TIMEZONE;
+    process.env.CHECKIN_TIMEZONE = "UTC";
+    expect(checkinDateKey(new Date("2026-08-22T16:00:00Z"))).toBe("2026-08-22");
+    if (prev === undefined) delete process.env.CHECKIN_TIMEZONE;
+    else process.env.CHECKIN_TIMEZONE = prev;
   });
 
   it("pre-auth deducts, failure refunds, success settles", async () => {

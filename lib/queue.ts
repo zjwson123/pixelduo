@@ -278,3 +278,13 @@ export async function schedulePoll(jobId: string, delayMs = POLL_INTERVAL_MS) {
 export async function getJobForUser(userId: string, jobId: string) {
   return prisma.job.findFirst({ where: { id: jobId, userId } });
 }
+
+// Latest not-yet-finished job for a user (queued/running/polling). Used by the
+// workbench to resume tracking an in-flight generation after navigation or a
+// page refresh — the job keeps running server-side either way.
+export function getActiveJobForUser(userId: string) {
+  return prisma.job.findFirst({
+    where: { userId, status: { in: ["queued", "running", "polling"] } },
+    orderBy: { createdAt: "desc" },
+  });
+}
