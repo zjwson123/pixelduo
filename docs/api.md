@@ -37,6 +37,10 @@ curl -X POST https://pixelduo.ai/api/v1/images/generations \
 - `quality` default `medium` (ignored for seedream)
 - `n` 1–4 images (image models only)
 - `duration` 2–15 seconds, default 5 (video models only, billed per second)
+- Concurrency: jobs are queued asynchronously — submit freely while earlier
+  jobs run. Each user may hold up to **5 in-flight jobs** (queued/running/
+  polling); beyond that the API returns `400 queue-full`. Failed/rejected
+  submissions never charge (pre-auth is refunded on failure).
 
 Response (async — generation runs in the worker):
 

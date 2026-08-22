@@ -60,6 +60,8 @@ interface JobStatus {
   id: string;
   status: string;
   model: string;
+  mediaType?: "image" | "video"; // absent on very old payloads
+  isEdit?: boolean; // image job created from the Edit tab
   quality: string;
   count: number;
   prompt: string;
@@ -339,13 +341,16 @@ export function Workbench() {
   const [ledger, setLedger] = useState<LedgerRow[]>([]);
   const [orders, setOrders] = useState<OrderRow[]>([]);
   const [expiring, setExpiring] = useState<ExpiringCredit[]>([]);
-  const [activeJob, setActiveJob] = useState<JobStatus | null>(null);
+  // All tracked jobs for this session (in-flight AND recently finished),
+  // newest first. Submitting is never blocked by a running job — the queue
+  // allows up to 5 concurrent jobs per user (server-enforced).
+  const [jobs, setJobs] = useState<JobStatus[]>([]);
+  const finishedNotifiedRef = useRef<Set<string>>(new Set());
   const [assistantOut, setAssistantOut] = useState("");
   const [assistantModel, setAssistantModel] = useState("deepseek");
   const [toast, setToast] = useState("");
   const [checkout, setCheckout] = useState<null | { kind: "pack" | "plan"; itemId: string; name: string; price: number; credits: number }>(null);
   const [method, setMethod] = useState("Card");
-  const idemKeyRef = useRef<string | null>(null);
 
   // Edit tab state
   const [editModel, setEditModel] = useState("gpt");
@@ -407,7 +412,19 @@ export function Workbench() {
     const msg = e instanceof Error ? e.message : "";
     if (msg === "verify-email-required") return "Verify your email first to start generating.";
     if (msg === "insufficient-credits") return "Insufficient credits — top up first";
+    if (msg.startsWith("queue-full")) return "Too many jobs in flight (max 5) — wait for one to finish";
     return msg || "Something went wrong";
+  };
+
+  // Track a freshly submitted job (prepend, cap the session list)
+  const trackJob = async (jobId: string) => {
+    try {
+      const poll = await api<{ job: JobStatus }>(`/api/jobs/${jobId}`);
+      setJobs((prev) => [poll.job, ...prev.filter((p) => p.id !== poll.job.id)].slice(0, 8));
+    } catch {
+      // fetch failed — mount-resume will pick the job up on next navigation
+    }
+    refreshMe(); // balance already reflects the pre-auth hold
   };
 
   useEffect(() => {
@@ -421,12 +438,12 @@ export function Workbench() {
     api<{ templates: Template[] }>("/api/templates")
       .then((d) => setTemplates(d.templates))
       .catch(() => undefined);
-    // Resume tracking an in-flight job (navigation/refresh unmounts this
-    // component and its state — the job itself keeps running server-side)
-    api<{ job: JobStatus | null }>("/api/jobs")
+    // Resume tracking in-flight jobs (navigation/refresh unmounts this
+    // component and its state — the jobs themselves keep running server-side)
+    api<{ jobs: JobStatus[] }>("/api/jobs")
       .then((d) => {
-        if (d.job && (d.job.status === "queued" || d.job.status === "running" || d.job.status === "polling")) {
-          setActiveJob(d.job);
+        if (d.jobs.length) {
+          setJobs((prev) => [...d.jobs, ...prev.filter((p) => !d.jobs.some((r) => r.id === p.id))]);
         }
       })
       .catch(() => undefined);
@@ -438,28 +455,58 @@ export function Workbench() {
     return () => clearTimeout(tm);
   }, [toast]);
 
-  // Poll active job until terminal state
+  // Poll every in-flight tracked job on a fixed interval. An interval (not a
+  // state-chained timeout) guarantees polling continues even when a tick
+  // observes no status change — long video tasks would otherwise stall the
+  // chain. Submission stays open while jobs run.
+  const jobsRef = useRef(jobs);
   useEffect(() => {
-    if (!activeJob) return;
-    if (activeJob.status === "done" || activeJob.status === "failed") {
-      if (activeJob.status === "failed") setToast(t.genFailed + " — credits refunded.");
-      refreshMe();
-      refreshGallery();
-      refreshLedger();
-      refreshOrders();
-      return;
-    }
-    const tm = setTimeout(async () => {
-      try {
-        const data = await api<{ job: JobStatus }>(`/api/jobs/${activeJob.id}`);
-        setActiveJob(data.job);
-      } catch (e) {
-        // Job vanished (e.g. admin cleanup) — stop polling instead of retrying forever
-        if (e instanceof Error && e.message.includes("job-not-found")) setActiveJob(null);
-      }
+    jobsRef.current = jobs;
+  }, [jobs]);
+  useEffect(() => {
+    const iv = setInterval(async () => {
+      const pending = jobsRef.current.filter((j) => j.status === "queued" || j.status === "running" || j.status === "polling");
+      if (!pending.length) return;
+      const updates: Array<JobStatus | { id: string; gone: true } | null> = await Promise.all(
+        pending.map((j) =>
+          api<{ job: JobStatus }>(`/api/jobs/${j.id}`)
+            .then((r) => r.job)
+            .catch((e: unknown) =>
+              e instanceof Error && e.message.includes("job-not-found") ? ({ id: j.id, gone: true } as const) : null,
+            ),
+        ),
+      );
+      setJobs((prev) =>
+        prev
+          .filter((p) => {
+            const u = updates.find((u) => u && u.id === p.id);
+            return !(u && "gone" in u); // vanished (e.g. admin cleanup) — stop tracking
+          })
+          .map((p) => {
+            const u = updates.find((u) => u && u.id === p.id);
+            return u && !("gone" in u) && u.status !== p.status ? u : p;
+          }),
+      );
     }, 2500);
-    return () => clearTimeout(tm);
-  }, [activeJob, refreshMe, refreshGallery, refreshLedger, refreshOrders]);
+    return () => clearInterval(iv);
+  }, []);
+
+  // Terminal transitions: refresh balances/history once per job, surface failures
+  useEffect(() => {
+    for (const j of jobs) {
+      if ((j.status === "done" || j.status === "failed") && !finishedNotifiedRef.current.has(j.id)) {
+        finishedNotifiedRef.current.add(j.id);
+        if (j.status === "failed") {
+          const prompt = j.prompt.length > 40 ? `${j.prompt.slice(0, 40)}…` : j.prompt;
+          setToast(`${prompt} — ${j.mediaType === "video" ? t.videoFailed : t.genFailed} (${t.charged} ${t.credits} refunded)`);
+        }
+        refreshMe();
+        refreshGallery();
+        refreshLedger();
+        refreshOrders();
+      }
+    }
+  }, [jobs, t, refreshMe, refreshGallery, refreshLedger, refreshOrders]);
 
   const generate = async () => {
     if (!prompt.trim()) return setToast(t.writePrompt);
@@ -467,14 +514,11 @@ export function Workbench() {
     if (me && me.credits < costCredits) return setToast(t.insufficient);
     setAssistantOut("");
     try {
-      if (!idemKeyRef.current) idemKeyRef.current = crypto.randomUUID();
       const data = await api<{ jobId: string }>("/api/generate", {
         method: "POST",
-        body: JSON.stringify({ prompt: prompt.trim(), model, quality, count, idempotencyKey: idemKeyRef.current }),
+        body: JSON.stringify({ prompt: prompt.trim(), model, quality, count }),
       });
-      idemKeyRef.current = null;
-      const poll = await api<{ job: JobStatus }>(`/api/jobs/${data.jobId}`);
-      setActiveJob(poll.job);
+      await trackJob(data.jobId);
     } catch (e) {
       setToast(friendlyError(e));
     }
@@ -496,9 +540,7 @@ export function Workbench() {
           image: editImage,
         }),
       });
-      const poll = await api<{ job: JobStatus }>(`/api/jobs/${data.jobId}`);
-      setActiveJob(poll.job);
-      setToast("Edit job submitted");
+      await trackJob(data.jobId);
     } catch (e) {
       setToast(friendlyError(e));
     }
@@ -522,8 +564,7 @@ export function Workbench() {
           ...(videoImage ? { image: videoImage } : {}),
         }),
       });
-      const poll = await api<{ job: JobStatus }>(`/api/jobs/${data.jobId}`);
-      setActiveJob(poll.job);
+      await trackJob(data.jobId);
       setToast("Video generation started — this may take 1-3 minutes");
     } catch (e) {
       setToast(friendlyError(e));
@@ -627,8 +668,66 @@ export function Workbench() {
   const filteredTemplates = cat === "全部" ? templates : templates.filter((tm) => tm.cat === cat);
   const cats = ["全部", ...Array.from(new Set(templates.map((tm) => tm.cat)))];
 
-  const generating = activeJob !== null && (activeJob.status === "queued" || activeJob.status === "running" || activeJob.status === "polling");
-  const isVideoJob = activeJob !== null && getModel(activeJob.model)?.mediaType === "video";
+  // Session job list, split per workbench panel (create / edit / video)
+  const isTerminal = (j: JobStatus) => j.status === "done" || j.status === "failed";
+  const jobPanel = (j: JobStatus): "create" | "edit" | "video" => {
+    if (j.mediaType === "video") return "video";
+    return j.isEdit ? "edit" : "create";
+  };
+  const panelJobs = (panel: "create" | "edit" | "video") => jobs.filter((j) => jobPanel(j) === panel);
+  const inFlightLabel = (j: JobStatus) =>
+    j.mediaType === "video" && j.status === "polling" ? t.videoPolling : t.generating;
+
+  const renderInFlight = (j: JobStatus) => (
+    <div key={j.id} className="gen-steps" style={{ marginBottom: 14 }}>
+      <div className="gen-step active"><span className="dot"></span>{inFlightLabel(j)}</div>
+      <div className="gen-step"><span className="dot"></span>{t.charged} {j.costCredits} {t.credits} — refunded on failure</div>
+      <div style={{ fontSize: 12, color: "var(--ink-3)" }}>
+        <ModelPill model={j.model} /> {j.prompt.slice(0, 90)}{j.prompt.length > 90 ? "…" : ""}
+      </div>
+    </div>
+  );
+
+  const renderFailed = (j: JobStatus) => (
+    <div key={j.id} className="empty" style={{ marginBottom: 14 }}>
+      <span className="serif">{j.mediaType === "video" ? t.videoFailed : t.genFailed}</span>
+      <span>{j.prompt.slice(0, 90)} — {j.error ?? "Unknown error"} · {t.charged} {j.costCredits} {t.credits} refunded.</span>
+    </div>
+  );
+
+  const renderResultCard = (j: JobStatus, src: string, i: number) => (
+    <div key={`${j.id}-${i}`} className="result-card" style={j.mediaType === "video" ? { gridColumn: "1 / -1" } : undefined}>
+      {j.mediaType === "video" ? (
+        <video src={src} controls style={{ width: "100%", borderRadius: 8 }} />
+      ) : (
+        <img src={src} alt={j.prompt} />
+      )}
+      {me?.plan === "free" && j.mediaType !== "video" && <div className="wm-badge">PixelDuo · AI 生成</div>}
+      <div className="result-actions">
+        <a className="result-btn" href={`${src}?download=1`} download aria-label={t.download} title={t.download}>↓</a>
+      </div>
+      <div className="result-meta">
+        <ModelPill model={j.model} />
+      </div>
+    </div>
+  );
+
+  const renderFinished = (j: JobStatus) =>
+    j.status === "failed" ? (
+      renderFailed(j)
+    ) : (
+      <div key={j.id} style={{ marginBottom: 18 }}>
+        <div className="results-head">
+          <h2>{jobPanel(j) === "video" ? t.videoResult : jobPanel(j) === "edit" ? t.editResult : t.latestResults}</h2>
+          <span className="count">
+            {j.images.length} {j.mediaType === "video" ? t.videos : t.imagesVideo} · {j.costCredits} {t.credits}
+          </span>
+        </div>
+        <div className="results-grid">
+          {j.images.map((src, i) => renderResultCard(j, src, i))}
+        </div>
+      </div>
+    );
 
   return (
     <div>
@@ -770,75 +869,54 @@ export function Workbench() {
                   )}
                 </div>
 
-                <button className="generate" disabled={generating} onClick={generate}>
-                  {generating ? t.generating : t.generate}
+                <button className="generate" onClick={generate}>
+                  {t.generate}
                 </button>
               </div>
 
               <div className="card results">
-                {generating ? (
-                  <div className="gen-steps">
-                    <div className="gen-step active"><span className="dot"></span>{isVideoJob ? t.genVideoing : t.generating}</div>
-                    <div className="gen-step"><span className="dot"></span>{t.charged} {activeJob!.costCredits} {t.credits} — refunded on failure</div>
-                  </div>
-                ) : activeJob && activeJob.status === "failed" ? (
-                  <div className="empty">
-                    <span className="serif">{t.genFailed}</span>
-                    <span>{activeJob.error ?? "Unknown error"} — credits refunded.</span>
-                  </div>
-                ) : activeJob && activeJob.status === "done" ? (
-                  <>
-                    <div className="results-head">
-                      <h2>{isVideoJob ? t.videoResult : t.latestResults}</h2>
-                      <span className="count">{activeJob.images.length} {isVideoJob ? t.videos : t.imagesVideo} · {activeJob.costCredits} {t.credits}</span>
-                    </div>
-                    <div className="results-grid">
-                      {activeJob.images.map((src, i) => (
-                        <div key={i} className="result-card">
-                          {isVideoJob ? (
-                            <video src={src} controls style={{ width: "100%", borderRadius: 8 }} />
-                          ) : (
-                            <img src={src} alt={activeJob.prompt} />
-                          )}
-                          {me?.plan === "free" && !isVideoJob && <div className="wm-badge">PixelDuo · AI 生成</div>}
-                          <div className="result-actions">
-                            <a className="result-btn" href={`${src}?download=1`} download aria-label={t.download} title={t.download}>↓</a>
+                {(() => {
+                  const tracked = panelJobs("create");
+                  if (tracked.length) {
+                    return (
+                      <>
+                        {tracked.filter((j) => !isTerminal(j)).map(renderInFlight)}
+                        {tracked.filter(isTerminal).map(renderFinished)}
+                      </>
+                    );
+                  }
+                  if (gallery.length === 0) {
+                    return (
+                      <div className="empty">
+                        <span className="serif">{t.emptyCreate}</span>
+                        <span>{t.emptyCreateDesc}</span>
+                      </div>
+                    );
+                  }
+                  return (
+                    <>
+                      <div className="results-head">
+                        <h2>{t.recentImages}</h2>
+                        <span className="count">{gallery.length} {t.total}</span>
+                      </div>
+                      <div className="results-grid">
+                        {gallery.slice(0, 8).map((g) => (
+                          <div key={g.id} className="result-card">
+                            <img src={g.url} alt={g.prompt} />
+                            {me?.plan === "free" && <div className="wm-badge">PixelDuo · AI 生成</div>}
+                            <div className="result-actions">
+                              <a className="result-btn" href={`${g.url}?download=1`} download aria-label={t.download} title={t.download}>↓</a>
+                            </div>
+                            <div className="result-meta">
+                              <ModelPill model={g.model} />
+                              <span style={{ marginLeft: "auto" }}>{g.credits} {t.credits}</span>
+                            </div>
                           </div>
-                          <div className="result-meta">
-                            <ModelPill model={activeJob.model} />
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </>
-                ) : gallery.length === 0 ? (
-                  <div className="empty">
-                    <span className="serif">{t.emptyCreate}</span>
-                    <span>{t.emptyCreateDesc}</span>
-                  </div>
-                ) : (
-                  <>
-                    <div className="results-head">
-                      <h2>{t.recentImages}</h2>
-                      <span className="count">{gallery.length} {t.total}</span>
-                    </div>
-                    <div className="results-grid">
-                      {gallery.slice(0, 8).map((g) => (
-                        <div key={g.id} className="result-card">
-                          <img src={g.url} alt={g.prompt} />
-                          {me?.plan === "free" && <div className="wm-badge">PixelDuo · AI 生成</div>}
-                          <div className="result-actions">
-                            <a className="result-btn" href={`${g.url}?download=1`} download aria-label={t.download} title={t.download}>↓</a>
-                          </div>
-                          <div className="result-meta">
-                            <ModelPill model={g.model} />
-                            <span style={{ marginLeft: "auto" }}>{g.credits} {t.credits}</span>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </>
-                )}
+                        ))}
+                      </div>
+                    </>
+                  );
+                })()}
               </div>
             </div>
           </>
@@ -902,37 +980,29 @@ export function Workbench() {
                   </span>
                 </div>
 
-                <button className="generate" disabled={generating || !editImage} onClick={generateEdit}>
-                  {generating ? t.generating : t.editImage}
+                <button className="generate" disabled={!editImage} onClick={generateEdit}>
+                  {t.editImage}
                 </button>
               </div>
 
               <div className="card results">
-                {activeJob && activeJob.status === "done" ? (
-                  <>
-                    <div className="results-head">
-                      <h2>{t.editResult}</h2>
+                {(() => {
+                  const tracked = panelJobs("edit");
+                  if (tracked.length) {
+                    return (
+                      <>
+                        {tracked.filter((j) => !isTerminal(j)).map(renderInFlight)}
+                        {tracked.filter(isTerminal).map(renderFinished)}
+                      </>
+                    );
+                  }
+                  return (
+                    <div className="empty">
+                      <span className="serif">{t.emptyEdit}</span>
+                      <span>{t.emptyEditDesc}</span>
                     </div>
-                    <div className="results-grid">
-                      {activeJob.images.map((src, i) => (
-                        <div key={i} className="result-card">
-                          <img src={src} alt={activeJob.prompt} />
-                          <div className="result-actions">
-                            <a className="result-btn" href={`${src}?download=1`} download>↓</a>
-                          </div>
-                          <div className="result-meta">
-                            <ModelPill model={activeJob.model} />
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </>
-                ) : (
-                  <div className="empty">
-                    <span className="serif">{t.emptyEdit}</span>
-                    <span>{t.emptyEditDesc}</span>
-                  </div>
-                )}
+                  );
+                })()}
               </div>
             </div>
           </>
@@ -1008,50 +1078,29 @@ export function Workbench() {
                   )}
                 </div>
 
-                <button className="generate" disabled={generating} onClick={generateVideo}>
-                  {generating ? t.genVideoing : t.genVideo}
+                <button className="generate" onClick={generateVideo}>
+                  {t.genVideo}
                 </button>
               </div>
 
               <div className="card results">
-                {activeJob && getModel(activeJob.model)?.mediaType === "video" ? (
-                  activeJob.status === "done" ? (
-                    <>
-                      <div className="results-head">
-                        <h2>{t.videoResult}</h2>
-                        <span className="count">{activeJob.costCredits} {t.credits}</span>
-                      </div>
-                      <div className="results-grid">
-                        {activeJob.images.map((src, i) => (
-                          <div key={i} className="result-card" style={{ gridColumn: "1 / -1" }}>
-                            <video src={src} controls style={{ width: "100%", borderRadius: 8 }} />
-                            <div className="result-actions">
-                              <a className="result-btn" href={`${src}?download=1`} download>↓</a>
-                            </div>
-                            <div className="result-meta">
-                              <ModelPill model={activeJob.model} />
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </>
-                  ) : activeJob.status === "failed" ? (
+                {(() => {
+                  const tracked = panelJobs("video");
+                  if (tracked.length) {
+                    return (
+                      <>
+                        {tracked.filter((j) => !isTerminal(j)).map(renderInFlight)}
+                        {tracked.filter(isTerminal).map(renderFinished)}
+                      </>
+                    );
+                  }
+                  return (
                     <div className="empty">
-                      <span className="serif">{t.videoFailed}</span>
-                      <span>{activeJob.error ?? "Unknown error"} — credits refunded.</span>
+                      <span className="serif">{t.emptyVideo}</span>
+                      <span>{t.emptyVideoDesc}</span>
                     </div>
-                  ) : (
-                    <div className="gen-steps">
-                      <div className="gen-step active"><span className="dot"></span>{activeJob.status === "polling" ? t.videoPolling : t.videoCreating}</div>
-                      <div className="gen-step"><span className="dot"></span>{t.videoWait}</div>
-                    </div>
-                  )
-                ) : (
-                  <div className="empty">
-                    <span className="serif">{t.emptyVideo}</span>
-                    <span>{t.emptyVideoDesc}</span>
-                  </div>
-                )}
+                  );
+                })()}
               </div>
             </div>
           </>

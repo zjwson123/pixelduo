@@ -44,10 +44,16 @@ describe("subscription carryover and downgrade", () => {
     });
 
     // Spend 482 credits inside the ended cycle (57 medium + 1 high).
+    // Jobs are marked terminal right away so they don't pile up against
+    // the per-user in-flight cap (usage is already in the ledger).
+    const spend = async (quality: "medium" | "high", prompt: string) => {
+      const { job } = await createGenerationJob({ userId, model: "gpt", quality, count: 1, prompt });
+      await prisma.job.update({ where: { id: job.id }, data: { status: "done", finishedAt: new Date() } });
+    };
     for (let i = 0; i < 57; i++) {
-      await createGenerationJob({ userId, model: "gpt", quality: "medium", count: 1, prompt: `p${i}` });
+      await spend("medium", `p${i}`);
     }
-    await createGenerationJob({ userId, model: "gpt", quality: "high", count: 1, prompt: "h" });
+    await spend("high", "h");
 
     const cycleStart = new Date();
     cycleStart.setMonth(cycleStart.getMonth() - 1);

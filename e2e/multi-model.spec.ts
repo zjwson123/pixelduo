@@ -91,6 +91,23 @@ test.describe("Multi-model image generation", () => {
     await expect(page.locator(".results-head")).toContainText(/video/i, { timeout: 10_000 });
   });
 
+  test("queues two image jobs back-to-back and completes both", async ({ page }) => {
+    await registerAndLogin(page);
+    await page.waitForSelector(".composer");
+
+    await page.fill("textarea", "a red apple on a wooden table");
+    await page.locator("button.generate").click();
+
+    // The Generate button must stay clickable — submit a second job while
+    // the first is still running (queue, don't block)
+    await page.fill("textarea", "a blue ceramic mug on a desk");
+    await page.locator("button.generate").click();
+
+    // Both jobs must reach done and render their own result group
+    await expect(page.locator(".result-card img").first()).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator(".results-head", { hasText: "Latest results" })).toHaveCount(2, { timeout: 30_000 });
+  });
+
   test("smart routing button exists and is clickable", async ({ page }) => {
     await registerAndLogin(page);
     await page.waitForSelector(".composer");

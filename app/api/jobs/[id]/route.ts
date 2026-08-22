@@ -20,6 +20,8 @@ export async function GET(_req: Request, { params }: { params: { id: string } })
         id: job.id,
         status: job.status,
         model: job.model,
+        mediaType: job.mediaType,
+        isEdit: Boolean(job.refImageKey),
         quality: job.quality,
         count: job.count,
         prompt: job.prompt,

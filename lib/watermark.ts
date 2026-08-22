@@ -7,8 +7,13 @@ import sharp from "sharp";
 export async function bakeWatermark(buf: Buffer): Promise<Buffer> {
   const meta = await sharp(buf).metadata();
   const width = meta.width ?? 1024;
+  const height = meta.height ?? width;
   const fontSize = Math.max(24, Math.round(width / 32));
   const pad = Math.max(12, Math.round(width / 60));
+  // Images too small to carry a readable badge (e.g. the 1×1 mock
+  // placeholders in tests) pass through untouched — sharp cannot composite
+  // a badge larger than the canvas anyway.
+  if (height < fontSize + pad * 2) return buf;
   const label = process.env.WATERMARK_TEXT || "PixelDuo · AI 生成";
   // Escape XML special characters to prevent SVG injection from env var.
   const safeLabel = label

@@ -29,4 +29,16 @@ describe("bakeWatermark", () => {
     expect(meta.width).toBe(1024);
     expect(baked.length).toBeGreaterThan(base.length);
   });
+
+  it("passes tiny images through instead of failing to composite", async () => {
+    // 1×1 is what MOCK_IMAGE_PROVIDER stores; sharp cannot composite a
+    // badge bigger than the canvas — this used to fail every mock gpt job
+    const base = await sharp({
+      create: { width: 1, height: 1, channels: 3, background: { r: 0, g: 0, b: 0 } },
+    })
+      .png()
+      .toBuffer();
+    const baked = await bakeWatermark(base);
+    expect(baked.equals(base)).toBe(true);
+  });
 });

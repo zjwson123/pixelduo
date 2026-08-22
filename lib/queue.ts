@@ -34,10 +34,25 @@ export interface JobImage {
   prompt: string;
 }
 
+// Max queued/running/polling jobs per user. The queue itself supports any
+// number of concurrent jobs; this cap stops one user from monopolizing the
+// workers. Each job pre-auths its credits, so balance is the real spend guard.
+export const MAX_INFLIGHT_JOBS = 5;
+
+async function enforceInflightCap(tx: Prisma.TransactionClient, userId: string) {
+  const inflight = await tx.job.count({
+    where: { userId, status: { in: ["queued", "running", "polling"] } },
+  });
+  if (inflight >= MAX_INFLIGHT_JOBS) {
+    throw new Error(`queue-full: max ${MAX_INFLIGHT_JOBS} concurrent jobs — wait for one to finish`);
+  }
+}
+
 // Legacy: create generation job (backward compat with old API)
 export async function createGenerationJob(input: CreateJobInput) {
   const cost = estimateGenerationCost(input.model, input.quality, input.count);
   return prisma.$transaction(async (tx) => {
+    await enforceInflightCap(tx, input.userId);
     if (input.idempotencyKey) {
       const existing = await tx.job.findUnique({ where: { idempotencyKey: input.idempotencyKey } });
       if (existing) return { job: existing, created: false };
@@ -76,6 +91,7 @@ export async function createGenerationJob(input: CreateJobInput) {
 export async function createMediaJob(input: CreateMediaJobInput) {
   const cost = estimateModelCost(input.model, input.count, input.quality, input.durationSec ?? 5);
   return prisma.$transaction(async (tx) => {
+    await enforceInflightCap(tx, input.userId);
     if (input.idempotencyKey) {
       const existing = await tx.job.findUnique({ where: { idempotencyKey: input.idempotencyKey } });
       if (existing) return { job: existing, created: false };
@@ -279,12 +295,14 @@ export async function getJobForUser(userId: string, jobId: string) {
   return prisma.job.findFirst({ where: { id: jobId, userId } });
 }
 
-// Latest not-yet-finished job for a user (queued/running/polling). Used by the
-// workbench to resume tracking an in-flight generation after navigation or a
-// page refresh — the job keeps running server-side either way.
-export function getActiveJobForUser(userId: string) {
-  return prisma.job.findFirst({
+// All not-yet-finished jobs for a user (queued/running/polling), newest
+// first. The workbench resumes tracking these on mount so navigation or a
+// page refresh doesn't lose in-flight generations — the jobs keep running
+// server-side either way.
+export function getActiveJobsForUser(userId: string) {
+  return prisma.job.findMany({
     where: { userId, status: { in: ["queued", "running", "polling"] } },
     orderBy: { createdAt: "desc" },
+    take: MAX_INFLIGHT_JOBS,
   });
 }
