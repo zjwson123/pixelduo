@@ -349,6 +349,7 @@ export function Workbench() {
   const [assistantOut, setAssistantOut] = useState("");
   const [assistantModel, setAssistantModel] = useState("deepseek");
   const [toast, setToast] = useState("");
+  const [lightbox, setLightbox] = useState<string | null>(null);
   const [checkout, setCheckout] = useState<null | { kind: "pack" | "plan"; itemId: string; name: string; price: number; credits: number }>(null);
   const [method, setMethod] = useState("Card");
 
@@ -454,6 +455,16 @@ export function Workbench() {
     const tm = setTimeout(() => setToast(""), 2600);
     return () => clearTimeout(tm);
   }, [toast]);
+
+  // Esc closes the image lightbox
+  useEffect(() => {
+    if (!lightbox) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setLightbox(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [lightbox]);
 
   // Poll every in-flight tracked job on a fixed interval. An interval (not a
   // state-chained timeout) guarantees polling continues even when a tick
@@ -700,7 +711,7 @@ export function Workbench() {
       {j.mediaType === "video" ? (
         <video src={src} controls style={{ width: "100%", borderRadius: 8 }} />
       ) : (
-        <img src={src} alt={j.prompt} />
+        <img src={src} alt={j.prompt} style={{ cursor: "zoom-in" }} onClick={() => setLightbox(src)} />
       )}
       {me?.plan === "free" && j.mediaType !== "video" && <div className="wm-badge">PixelDuo · AI 生成</div>}
       <div className="result-actions">
@@ -902,7 +913,7 @@ export function Workbench() {
                       <div className="results-grid">
                         {gallery.slice(0, 8).map((g) => (
                           <div key={g.id} className="result-card">
-                            <img src={g.url} alt={g.prompt} />
+                            <img src={g.url} alt={g.prompt} style={{ cursor: "zoom-in" }} onClick={() => setLightbox(g.url)} />
                             {me?.plan === "free" && <div className="wm-badge">PixelDuo · AI 生成</div>}
                             <div className="result-actions">
                               <a className="result-btn" href={`${g.url}?download=1`} download aria-label={t.download} title={t.download}>↓</a>
@@ -1155,7 +1166,7 @@ export function Workbench() {
               <div className="gallery-grid">
                 {gallery.map((g) => (
                   <div key={g.id} className="card gal-card">
-                    <img src={g.url} alt={g.prompt} />
+                    <img src={g.url} alt={g.prompt} style={{ cursor: "zoom-in" }} onClick={() => setLightbox(g.url)} />
                     <div className="gal-body">
                       <div className="prompt">{g.prompt}</div>
                       <div className="gal-meta">
@@ -1321,6 +1332,21 @@ export function Workbench() {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {lightbox && (
+        <div className="lightbox" onClick={() => setLightbox(null)}>
+          <button className="lightbox-close" aria-label="Close preview" onClick={(e) => { e.stopPropagation(); setLightbox(null); }}>✕</button>
+          <img src={lightbox} alt="preview" onClick={(e) => e.stopPropagation()} />
+          <a
+            className="result-btn lightbox-dl"
+            href={`${lightbox}?download=1`}
+            download
+            onClick={(e) => e.stopPropagation()}
+          >
+            ↓ Download
+          </a>
         </div>
       )}
 

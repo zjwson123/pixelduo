@@ -28,7 +28,7 @@ test.describe("Multi-model image generation", () => {
     expect(allText).not.toContain("Wan 2.7");
   });
 
-  test("generates with seedream model", async ({ page }) => {
+  test("generates with seedream model, then click-to-zoom preview", async ({ page }) => {
     await registerAndLogin(page);
     await page.waitForSelector(".composer");
 
@@ -39,11 +39,18 @@ test.describe("Multi-model image generation", () => {
     await page.locator("button.generate").click();
 
     // Wait for the job to reach a terminal state (mock mode = fast).
-    // Previously this awaited loose selectors that also matched in-flight
-    // states, hiding the video polling bug.
     await expect(
       page.locator(".result-card img, .empty .serif").first(),
     ).toBeVisible({ timeout: 30_000 });
+
+    // Click the image → full-screen preview opens; Esc closes it
+    const img = page.locator(".result-card img").first();
+    if (await img.count()) {
+      await img.click();
+      await expect(page.locator(".lightbox img")).toBeVisible({ timeout: 5_000 });
+      await page.keyboard.press("Escape");
+      await expect(page.locator(".lightbox")).toHaveCount(0);
+    }
   });
 
   test("shows edit tab and upload area", async ({ page }) => {

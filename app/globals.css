@@ -491,3 +491,23 @@ table.ledger .status-refunded { background: rgba(235, 87, 87, .12); color: #eb57
 @media (max-width: 560px) {
   .landing .plan-grid, .landing .feat-grid { grid-template-columns: 1fr; }
 }
+
+/* Full-screen image preview (click a generated image to open) */
+.lightbox {
+  position: fixed; inset: 0; z-index: 95; background: rgba(20,19,18,.88); backdrop-filter: blur(4px);
+  display: flex; align-items: center; justify-content: center; cursor: zoom-out; animation: fade .14s ease;
+}
+.lightbox img {
+  max-width: 92vw; max-height: 86vh; border-radius: 10px;
+  box-shadow: 0 18px 60px rgba(0,0,0,.55); cursor: default;
+}
+.lightbox-close {
+  position: absolute; top: 18px; right: 22px; width: 38px; height: 38px; border-radius: 50%;
+  border: none; background: rgba(255,255,255,.14); color: #fff; font-size: 16px; cursor: pointer;
+}
+.lightbox-close:hover { background: rgba(255,255,255,.26); }
+.lightbox-dl {
+  position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%);
+  width: auto; padding: 8px 18px; font-size: 13.5px; text-decoration: none;
+}
+@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
