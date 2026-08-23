@@ -6,6 +6,7 @@ import { getStorage } from "../lib/storage";
 import { initObservability, captureError } from "../lib/observability";
 import { bakeWatermark } from "../lib/watermark";
 import { getModel } from "../lib/model-registry";
+import { prisma } from "../lib/prisma";
 
 initObservability("worker");
 
@@ -50,6 +51,14 @@ async function processImageJob(job: {
       }
     }
 
+    // Watermark policy (product decision): free plans get marked outputs,
+    // paid plans get clean files. Provider-side marks (Seedream's baked-in
+    // "AI生成") are toggled via the API; models without one (GPT Image 2)
+    // get our badge baked in for free users. Videos carry a UI badge only —
+    // file-level video marking would need ffmpeg transcoding.
+    const user = await prisma.user.findUnique({ where: { id: job.userId } });
+    const isFree = (user?.plan ?? "free") === "free";
+
     const images = await generateImages({
       model: job.model,
       quality: job.quality as "low" | "medium" | "high",
@@ -57,6 +66,7 @@ async function processImageJob(job: {
       prompt: job.prompt,
       imageBase64,
       imageBase64List,
+      watermark: isFree,
     });
 
     const rows = images.map((img) => ({
@@ -67,15 +77,15 @@ async function processImageJob(job: {
       prompt: job.prompt,
     }));
 
-    // AIGC labeling compliance: bake a visible "AI 生成" badge into every
-    // image whose provider doesn't already watermark its output (Seedream
-    // does). Applies to all plans, not just free tier.
-    for (const img of images) {
-      if (getModel(img.model)?.builtInWatermark) continue;
-      const raw = await getStorage().get(img.key);
-      if (!raw) throw new Error("watermark: image missing from storage");
-      const baked = await bakeWatermark(raw);
-      await getStorage().put(img.key, baked, "image/png");
+    // Free-tier outputs from providers without a built-in mark get our badge
+    if (isFree) {
+      for (const img of images) {
+        if (getModel(img.model)?.builtInWatermark) continue;
+        const raw = await getStorage().get(img.key);
+        if (!raw) throw new Error("watermark: image missing from storage");
+        const baked = await bakeWatermark(raw);
+        await getStorage().put(img.key, baked, "image/png");
+      }
     }
 
     const audits = await Promise.all(rows.map((r) => analyzeImage(r.url)));

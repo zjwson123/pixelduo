@@ -1,9 +1,10 @@
 import sharp from "sharp";
 
 // Bake a visible "AI 生成" badge into an image (bottom-right).
-// gpt-image-2 outputs carry no built-in AI marker (unlike Seedream's
-// "AI生成" watermark), so free-tier gpt images get a baked label.
-// Paid-tier watermark removal is a future product feature.
+// Watermark is a plan perk: free plans get marked outputs, paid plans get
+// clean files. gpt-image-2 has no built-in AI marker (unlike Seedream's
+// provider-side "AI生成" mark, toggled via the API watermark param), so for
+// free-tier gpt/wan images we bake our own badge here.
 export async function bakeWatermark(buf: Buffer): Promise<Buffer> {
   const meta = await sharp(buf).metadata();
   const width = meta.width ?? 1024;

@@ -713,7 +713,7 @@ export function Workbench() {
       ) : (
         <img src={src} alt={j.prompt} style={{ cursor: "zoom-in" }} onClick={() => setLightbox(src)} />
       )}
-      {me?.plan === "free" && j.mediaType !== "video" && <div className="wm-badge">PixelDuo · AI 生成</div>}
+      {me?.plan === "free" && <div className="wm-badge">PixelDuo · AI 生成</div>}
       <div className="result-actions">
         <a className="result-btn" href={`${src}?download=1`} download aria-label={t.download} title={t.download}>↓</a>
       </div>

@@ -125,7 +125,10 @@ export async function editWithGpt(prompt: string, imageBase64: string, quality: 
 
 // === Seedream (Ark) ===
 
-export async function generateWithSeedream(prompt: string, count: number, imageBase64?: string): Promise<ProviderImage[]> {
+// `watermark` toggles Ark's baked-in "AI生成" mark: free plans keep it,
+// paid plans get clean files. Passed explicitly so provider default
+// changes can't flip the behavior.
+export async function generateWithSeedream(prompt: string, count: number, imageBase64?: string, watermark = true): Promise<ProviderImage[]> {
   const keys = [getArkKey()].filter((k): k is string => Boolean(k));
   if (!keys.length) throw new Error("ark key missing — set ARK_IMAGE_API_KEY or ensure ~/.cc-proxy/config.json has ark gateway");
   const out: ProviderImage[] = [];
@@ -136,6 +139,7 @@ export async function generateWithSeedream(prompt: string, count: number, imageB
       size: "1920x1920",
       response_format: "b64_json",
       n: 1,
+      watermark,
     };
     if (imageBase64) {
       body.image = imageBase64.startsWith("data:") ? imageBase64 : `data:image/png;base64,${imageBase64}`;
@@ -156,6 +160,7 @@ export async function generateWithWanImage(
   modelId: "wan2.7-image" | "wan2.7-image-pro",
   count: number,
   imageBase64List?: string[],
+  watermark?: boolean,
 ): Promise<ProviderImage[]> {
   const keys = [getAliyunKey()].filter((k): k is string => Boolean(k));
   if (!keys.length) throw new Error("aliyun key missing — set ALIYUN_API_KEY or ensure ~/.cc-proxy/config.json has aliyun gateway");
@@ -173,7 +178,7 @@ export async function generateWithWanImage(
     {
       model: modelId,
       input: { messages: [{ role: "user", content }] },
-      parameters: { size, n: count, watermark: false },
+      parameters: { size, n: count, watermark: watermark ?? true },
     },
     keys,
   );
@@ -202,6 +207,7 @@ export async function generateImages(input: {
   prompt: string;
   imageBase64?: string; // for image editing (reference image)
   imageBase64List?: string[]; // for multi-image reference (wan2.7-image-pro)
+  watermark?: boolean; // free plans keep provider/baked marks, paid get clean files
 }): Promise<ProviderImage[]> {
   // Mock mode for tests / demos
   if (process.env.MOCK_IMAGE_PROVIDER === "1") {
@@ -218,7 +224,7 @@ export async function generateImages(input: {
   if (input.model === "both") {
     const [gpt, seed] = await Promise.all([
       generateWithGpt(input.prompt, input.quality, input.count),
-      generateWithSeedream(input.prompt, input.count),
+      generateWithSeedream(input.prompt, input.count, undefined, input.watermark ?? true),
     ]);
     return [...gpt, ...seed];
   }
@@ -230,11 +236,11 @@ export async function generateImages(input: {
       }
       return generateWithGpt(input.prompt, input.quality, input.count);
     case "seedream":
-      return generateWithSeedream(input.prompt, input.count, input.imageBase64);
+      return generateWithSeedream(input.prompt, input.count, input.imageBase64, input.watermark ?? true);
     case "wan-image":
-      return generateWithWanImage(input.prompt, "wan2.7-image", input.count, input.imageBase64List);
+      return generateWithWanImage(input.prompt, "wan2.7-image", input.count, input.imageBase64List, input.watermark);
     case "wan-image-pro":
-      return generateWithWanImage(input.prompt, "wan2.7-image-pro", input.count, input.imageBase64List);
+      return generateWithWanImage(input.prompt, "wan2.7-image-pro", input.count, input.imageBase64List, input.watermark);
     default: {
       // Check registry for new models
       const model = getModel(input.model);
@@ -242,13 +248,13 @@ export async function generateImages(input: {
       if (model.mediaType === "image") {
         // Route by gateway
         if (model.gateway === "aliyun") {
-          return generateWithWanImage(input.prompt, model.modelId as "wan2.7-image" | "wan2.7-image-pro", input.count, input.imageBase64List);
+          return generateWithWanImage(input.prompt, model.modelId as "wan2.7-image" | "wan2.7-image-pro", input.count, input.imageBase64List, input.watermark);
         }
         if (model.gateway === "modelverse") {
           return generateWithGpt(input.prompt, input.quality, input.count);
         }
         if (model.gateway === "ark") {
-          return generateWithSeedream(input.prompt, input.count, input.imageBase64);
+          return generateWithSeedream(input.prompt, input.count, input.imageBase64, input.watermark ?? true);
         }
       }
       throw new Error(`model-not-supported-for-image-gen:${input.model}`);
