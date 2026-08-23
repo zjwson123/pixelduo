@@ -51,6 +51,15 @@ export async function POST(req: Request) {
     const isVideo = getModel(model)?.mediaType === "video";
 
     if (isVideo) {
+      // Provider-enforced duration range (Seedance 2.0 rejects <4s) — check
+      // before pre-authing credits
+      const range = getModel(model)?.durationSecRange;
+      if (range && (body.duration < range.min || body.duration > range.max)) {
+        return new NextResponse(
+          JSON.stringify({ ok: false, error: `invalid-input: ${model} supports ${range.min}-${range.max}s videos` }),
+          { status: 400 },
+        );
+      }
       const { job, created } = await createMediaJob({
         userId: auth.userId,
         model,

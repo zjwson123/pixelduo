@@ -29,6 +29,10 @@ export interface ModelInfo {
   // Whether a reference image is REQUIRED (pure i2v models). Models that
   // accept an optional first frame (e.g. seedance) leave this false.
   requiresImageInput?: boolean;
+  // Valid video duration range in whole seconds (provider-enforced).
+  // Seedance 2.0: [4, 15] per Ark docs — a 3s request is rejected after
+  // the queue accepts it, so we validate before billing.
+  durationSecRange?: { min: number; max: number };
   // Whether this model is offered in the UI/API. Disabled models are hidden
   // from selection but stay in the catalog so queued jobs still settle and
   // old gallery records keep their labels.
@@ -125,6 +129,7 @@ export const MODELS: ModelInfo[] = [
     costPerUnit: { credits: 14, usd: 0.14, label: "per second" },
     async: true,
     supportsImageInput: true, // image-to-video supported
+    durationSecRange: { min: 4, max: 15 }, // Ark: [4,15] or -1 (auto)
     enabled: true,
     builtInWatermark: false, // video watermarking not implemented — see docs
   },

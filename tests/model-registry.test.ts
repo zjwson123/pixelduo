@@ -57,6 +57,10 @@ describe("model-registry", () => {
     expect(getModel("gpt")?.builtInWatermark).toBe(false);
   });
 
+  it("declares provider-enforced video duration ranges", () => {
+    expect(getModel("seedance")?.durationSecRange).toEqual({ min: 4, max: 15 }); // Ark docs
+  });
+
   it("flags pure i2v models as requiring a reference image", () => {
     expect(getModel("wan-i2v")?.requiresImageInput).toBe(true);
     expect(getModel("seedance")?.requiresImageInput).toBeFalsy(); // first frame optional

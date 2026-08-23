@@ -31,6 +31,12 @@ export async function POST(req: Request) {
     if (getModel(body.model)?.requiresImageInput && !body.image) {
       return fail(new Error(`invalid-input: ${body.model} requires a reference image`));
     }
+    // Provider-enforced duration range (Seedance 2.0 rejects <4s) — check
+    // before pre-authing credits
+    const range = getModel(body.model)?.durationSecRange;
+    if (range && (body.duration < range.min || body.duration > range.max)) {
+      return fail(new Error(`invalid-input: ${body.model} supports ${range.min}-${range.max}s videos`));
+    }
 
     let refImageKey: string | undefined;
     if (body.image) {

@@ -1059,7 +1059,20 @@ export function Workbench() {
                 <div className="opt-row">
                   <span className="field-label">{t.duration}</span>
                   <div style={{ width: 200 }}>
-                    <Seg options={DURATION_OPTIONS.map((d) => ({ value: d, label: `${d}${t.sec}` }))} value={videoDuration} onChange={setVideoDuration} />
+                    <Seg
+                      options={
+                        // Only offer durations the selected model accepts
+                        // (Seedance 2.0: 4-15s — a 3s request is provider-rejected)
+                        DURATION_OPTIONS
+                          .filter((d) => {
+                            const r = getModel(videoModel)?.durationSecRange;
+                            return !r || (d >= r.min && d <= r.max);
+                          })
+                          .map((d) => ({ value: d, label: `${d}${t.sec}` }))
+                      }
+                      value={videoDuration}
+                      onChange={setVideoDuration}
+                    />
                   </div>
                 </div>
 

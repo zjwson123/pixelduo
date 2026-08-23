@@ -29,18 +29,22 @@ async function callWithKeys(
   url: string,
   body: Record<string, unknown>,
   keys: string[],
-  headers?: Record<string, string>,
+  opts?: { headers?: Record<string, string>; timeoutMs?: number },
 ): Promise<Record<string, unknown>> {
+  // Image models are slow: gpt-image-2 high quality routinely takes 2-5 min
+  // (a 120s cap aborted every attempt and burned the retries). Default
+  // 300s for image work; callers doing fast calls pass a shorter one.
+  const timeoutMs = opts?.timeoutMs ?? 300_000;
   let lastErr: unknown;
   for (const key of keys) {
     try {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 120_000);
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
       let res: Response;
       try {
         res = await fetch(url, {
           method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}`, ...(headers ?? {}) },
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}`, ...(opts?.headers ?? {}) },
           body: JSON.stringify(body),
           signal: controller.signal,
         });
@@ -86,22 +90,37 @@ export async function generateWithGpt(prompt: string, quality: Quality, count: n
 export async function editWithGpt(prompt: string, imageBase64: string, quality: Quality): Promise<ProviderImage[]> {
   const keys = [getModelVerseKey()].filter((k): k is string => Boolean(k));
   if (!keys.length) throw new Error("modelverse key missing");
-  const data = await callWithKeys(
-    "https://api.modelverse.cn/v1/images/edits",
-    {
-      model: "gpt-image-2",
-      prompt,
-      image: `data:image/png;base64,${imageBase64}`,
-      size: "1024x1024",
-      quality,
-      n: 1,
-    },
-    keys,
-  );
-  const items = (data.data as Array<Record<string, unknown>> | undefined) ?? [];
-  const b64 = items[0]?.b64_json as string | undefined;
-  if (!b64) throw new Error("gpt-image-2 edit returned no b64_json");
-  return [{ key: await saveBase64Image(b64), model: "gpt" }];
+  // ModelVerse's edits endpoint only accepts multipart/form-data with an
+  // `image` file field. JSON bodies are rejected ("use 'images' (array)")
+  // and every JSON object shape fails their gateway unmarshal — verified by
+  // live probing 2026-08-23; multipart with a real-size image returns
+  // b64_json normally.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 300_000);
+  try {
+    const key = keys[0];
+    const fd = new FormData();
+    fd.append("model", "gpt-image-2");
+    fd.append("prompt", prompt);
+    fd.append("size", "1024x1024");
+    fd.append("quality", quality);
+    fd.append("n", "1");
+    fd.append("image", new Blob([Buffer.from(imageBase64, "base64")], { type: "image/png" }), "input.png");
+    const res = await fetch("https://api.modelverse.cn/v1/images/edits", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}` },
+      body: fd,
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`${res.status}: ${(await res.text()).slice(0, 240)}`);
+    const data = (await res.json()) as Record<string, unknown>;
+    const items = (data.data as Array<Record<string, unknown>> | undefined) ?? [];
+    const b64 = items[0]?.b64_json as string | undefined;
+    if (!b64) throw new Error("gpt-image-2 edit returned no b64_json");
+    return [{ key: await saveBase64Image(b64), model: "gpt" }];
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // === Seedream (Ark) ===
@@ -358,6 +377,15 @@ export async function pollVideoTask(model: string, taskId: string): Promise<Vide
   return { status: "unknown", error: "unsupported-gateway" };
 }
 
+// Ark returns content.video_url as a plain string; tolerate an array of
+// {url} too so an upstream shape change can't silently discard a finished
+// video (this exact mismatch turned a real successful video into a
+// "succeeded without URL" failure on 2026-08-23).
+export function parseSeedanceVideoUrl(vu: string | Array<{ url?: string }> | undefined): string | undefined {
+  if (typeof vu === "string") return vu || undefined;
+  return vu?.[0]?.url;
+}
+
 async function pollSeedanceTask(taskId: string): Promise<VideoTaskStatus> {
   const keys = [getArkKey()].filter((k): k is string => Boolean(k));
   if (!keys.length) return { status: "unknown", error: "ark key missing" };
@@ -372,12 +400,12 @@ async function pollSeedanceTask(taskId: string): Promise<VideoTaskStatus> {
     if (!res.ok) return { status: "unknown", error: `poll failed: ${res.status}` };
     const data = (await res.json()) as {
       status?: string;
-      content?: { video_url?: { url?: string }[] };
+      content?: { video_url?: string | Array<{ url?: string }> };
       error?: { message?: string };
     };
     const status = data.status ?? "unknown";
     if (status === "succeeded") {
-      const url = data.content?.video_url?.[0]?.url;
+      const url = parseSeedanceVideoUrl(data.content?.video_url);
       return url ? { status: "succeeded", videoUrl: url } : { status: "succeeded" };
     }
     if (status === "failed") return { status: "failed", error: data.error?.message ?? "generation failed" };

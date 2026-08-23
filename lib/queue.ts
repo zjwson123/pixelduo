@@ -249,7 +249,7 @@ export async function completeJob(jobId: string, images: JobImage[]) {
     if (!job || (job.status !== "running" && job.status !== "polling")) throw new Error("job-not-runnable");
     await tx.job.update({
       where: { id: jobId },
-      data: { status: "done", images: JSON.stringify(images.map((i) => i.url)), finishedAt: new Date() },
+      data: { status: "done", images: JSON.stringify(images.map((i) => i.url)), error: null, finishedAt: new Date() },
     });
     for (const img of images) {
       await tx.image.create({
