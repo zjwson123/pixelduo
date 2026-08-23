@@ -454,6 +454,19 @@ async function pollWanVideoTask(taskId: string): Promise<VideoTaskStatus> {
 }
 
 // Download a video from a URL and store it
+function isPublicHttpUrl(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+    const h = parsed.hostname.toLowerCase();
+    if (h === "localhost" || h === "" || h.startsWith("127.") || h.startsWith("10.") ||
+        h.startsWith("192.168.") || h.startsWith("169.254.") || h.endsWith(".local") ||
+        h.endsWith(".internal") || /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(h) ||
+        h === "::1" || h.startsWith("fe80:") || h.startsWith("0.0.0.0")) return false;
+    return true;
+  } catch { return false; }
+}
+
 export async function saveRemoteVideo(url: string): Promise<string> {
   // Mock provider URLs (e2e/CI) — store a stub instead of fetching.
   if (url.startsWith("mock://")) {
@@ -462,6 +475,8 @@ export async function saveRemoteVideo(url: string): Promise<string> {
     await getStorage().put(key, Buffer.from("mock-video"), "video/mp4");
     return key;
   }
+  // SSRF guard: only download from public http(s) URLs returned by the provider.
+  if (!isPublicHttpUrl(url)) throw new Error("blocked-internal-url");
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 120_000);
   try {

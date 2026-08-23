@@ -57,6 +57,12 @@ export function fail(error: unknown) {
   const expected =
     msg.startsWith("invalid-") ||
     msg.startsWith("blocked:") ||
+    msg.startsWith("queue-full:") ||
+    msg.startsWith("unknown-model:") ||
+    msg.startsWith("model-disabled:") ||
+    msg.startsWith("not-a-video-model:") ||
+    msg.startsWith("video-timeout:") ||
+    msg.startsWith("image-flagged:") ||
     msg.includes("insufficient") ||
     msg.includes("already") ||
     msg.includes("not-found") ||
