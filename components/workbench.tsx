@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { signOut } from "next-auth/react";
 import Link from "next/link";
-import { estimateGenerationCost, estimateModelCost, type ModelId, type Quality } from "@/lib/cost";
+import { estimateGenerationCost, estimateModelCost, type Quality } from "@/lib/cost";
 import { PLANS, PACKS } from "@/lib/catalog";
 import { MODELS, getModel, getImageModels, getVideoModels } from "@/lib/model-registry";
 import { ASSISTANT_MODELS } from "@/lib/assistant-models";
@@ -417,19 +417,23 @@ export function Workbench() {
     }
   };
 
-  // Refresh templates when Explore filters change (category / search / page / featured)
+  // Refresh templates when Explore filters change (category / search / page / featured).
+  // Search is debounced so fast typing doesn't flood the API.
   useEffect(() => {
     const params = new URLSearchParams({ pageSize: "30", page: String(tmplPage) });
     if (cat !== "全部") params.set("cat", cat);
     if (search.trim()) params.set("q", search.trim());
     if (showFeaturedOnly) params.set("featured", "1");
-    api<{ templates: Template[]; total: number; totalPages: number }>(`/api/templates?${params}`)
-      .then((d) => {
-        setTemplates(d.templates);
-        setTmplTotal(d.total);
-        setTmplTotalPages(d.totalPages);
-      })
-      .catch(() => undefined);
+    const handle = setTimeout(() => {
+      api<{ templates: Template[]; total: number; totalPages: number }>(`/api/templates?${params}`)
+        .then((d) => {
+          setTemplates(d.templates);
+          setTmplTotal(d.total);
+          setTmplTotalPages(d.totalPages);
+        })
+        .catch(() => undefined);
+    }, 300);
+    return () => clearTimeout(handle);
   }, [cat, search, tmplPage, showFeaturedOnly]);
 
   const friendlyError = (e: unknown) => {
@@ -522,8 +526,14 @@ export function Workbench() {
     return () => clearInterval(iv);
   }, []);
 
-  // Terminal transitions: refresh balances/history once per job, surface failures
+  // Terminal transitions: refresh balances/history once per job, surface failures.
+  // Prune the notification set for jobs no longer tracked (done/failed slide off
+  // the session list over time) so the Set doesn't grow without bound.
   useEffect(() => {
+    const trackedIds = new Set(jobs.map((j) => j.id));
+    for (const id of finishedNotifiedRef.current) {
+      if (!trackedIds.has(id)) finishedNotifiedRef.current.delete(id);
+    }
     for (const j of jobs) {
       if ((j.status === "done" || j.status === "failed") && !finishedNotifiedRef.current.has(j.id)) {
         finishedNotifiedRef.current.add(j.id);

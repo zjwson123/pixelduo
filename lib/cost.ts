@@ -1,7 +1,7 @@
 // Cost calculation — delegates to the model registry.
 // 1 credit = $0.01.
 
-import { getModel, type ModelInfo, type Quality, MODELS } from "./model-registry";
+import { getModel, type Quality } from "./model-registry";
 import type { ModelCost } from "./model-registry";
 
 export type { Quality } from "./model-registry";
@@ -16,16 +16,7 @@ export interface Cost {
   label: string;
 }
 
-// GPT quality multipliers (medium is base, low = 0.25x, high = 3.25x)
-const GPT_QUALITY_MULTIPLIER: Record<Quality, number> = {
-  low: 0.25,
-  medium: 1,
-  high: 3.25,
-  standard: 1,
-};
-
-const GPT_BASE = { credits: 8, usd: 0.08 };
-
+// GPT quality cost table (medium is base, low = 0.25x, high = 3.25x)
 const GPT_COSTS: Record<Quality, Cost> = {
   low: { credits: 2, usd: 0.02, label: "low · 1024²" },
   medium: { credits: 8, usd: 0.08, label: "medium · 1024²" },

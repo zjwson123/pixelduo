@@ -227,13 +227,20 @@ export async function failJob(jobId: string, error: string, opts?: { terminal?: 
   });
 }
 
-// Recover jobs stuck in "running" or "polling" after a worker crash
-export async function recoverStuckJobs(maxAgeMs = 180_000): Promise<number> {
+// Recover jobs stuck in "running" or "polling" after a worker crash.
+// Polling (video) tasks can legitimately run for minutes — use a longer
+// cutoff than for running (image) jobs so a slow provider doesn't get
+// reaped mid-poll. schedulePoll refreshes heartbeatAt on every tick, so
+// a live worker's polling job never approaches this threshold.
+export async function recoverStuckJobs(maxAgeMs = 180_000, pollMaxAgeMs = 600_000): Promise<number> {
   const cutoff = new Date(Date.now() - maxAgeMs);
+  const pollCutoff = new Date(Date.now() - pollMaxAgeMs);
   const stuck = await prisma.job.findMany({
     where: {
-      status: { in: ["running", "polling"] },
-      OR: [{ heartbeatAt: null, startedAt: { lte: cutoff } }, { heartbeatAt: { lte: cutoff } }],
+      OR: [
+        { status: "running", OR: [{ heartbeatAt: null, startedAt: { lte: cutoff } }, { heartbeatAt: { lte: cutoff } }] },
+        { status: "polling", OR: [{ heartbeatAt: null, startedAt: { lte: pollCutoff } }, { heartbeatAt: { lte: pollCutoff } }] },
+      ],
     },
     take: 20,
   });

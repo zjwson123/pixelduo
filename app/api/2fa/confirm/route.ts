@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { requireVerifiedUser, ok, fail } from "@/lib/api";
+import { requireVerifiedUser, ok, fail, enforceRateLimit } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { verifyTotp, generateBackupCodes, hashBackupCode } from "@/lib/twofa";
 
@@ -7,9 +7,12 @@ const schema = z.object({ token: z.string().min(6).max(20) });
 
 // Step 2: confirm the pending secret with a live TOTP code; on success enable
 // 2FA and mint single-use backup codes (returned to the user exactly once).
+// Rate-limited: 6-digit TOTP has only ~1M combinations.
 export async function POST(req: Request) {
   try {
     const userId = await requireVerifiedUser();
+    const limited = await enforceRateLimit(req, "2fa-confirm", 5, 60_000);
+    if (limited) return limited;
     const body = schema.parse(await req.json());
     const user = await prisma.user.findUniqueOrThrow({
       where: { id: userId },

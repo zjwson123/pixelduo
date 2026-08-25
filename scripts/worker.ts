@@ -37,7 +37,6 @@ async function processImageJob(job: {
   userId: string;
   refImageKey: string | null;
 }, workerId: string): Promise<boolean> {
-  const model = job.model as "gpt" | "seedream" | "both" | "wan-image" | "wan-image-pro";
   const hb = setInterval(() => heartbeat(job.id).catch(() => undefined), 20_000);
   try {
     // Get reference image if this is an edit job
