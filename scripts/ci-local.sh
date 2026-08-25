@@ -37,6 +37,7 @@ npm run build
 
 echo "[5/6] seed + start app/worker (port 3100)"
 export EMAIL_VERIFY_AUTO="1" # e2e needs auto-verified registrations
+export PAYMENT_ALLOW_MOCK="1" # test the checkout flow against a prod build
 npx tsx prisma/seed.ts >/dev/null
 npx next start -p 3100 >/tmp/pd-ci-app.log 2>&1 &
 APP_PID=$!

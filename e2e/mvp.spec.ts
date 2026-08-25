@@ -19,10 +19,11 @@ test("MVP end-to-end: register → generate → template → checkout → ledger
   await expect(page.locator(".result-card").first()).toBeVisible({ timeout: 30000 });
   await expect(page.locator(".balance")).toContainText("24");
 
-  // 3. Template reuse
+  // 3. Template reuse — wait for async template fetch to render cards.
+  // Click the body (not the image — it opens a lightbox that stops propagation)
   await page.locator("button.tab", { hasText: "Explore" }).click();
-  await expect(page.locator(".tmpl-card").first()).toBeVisible();
-  await page.locator(".tmpl-card").first().click();
+  await expect(page.locator(".tmpl-card").first()).toBeVisible({ timeout: 10_000 });
+  await page.locator(".tmpl-body").first().click();
   await expect(page.locator("button.tab", { hasText: "Create" })).toHaveClass(/active/);
 
   // 4. Pricing → pack checkout (mock) → balance 24 + 1050 = 1074

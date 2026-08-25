@@ -27,6 +27,9 @@ interface Template {
   quality: string;
   credits: number;
   img: string;
+  sourceUrl?: string | null;
+  tags?: { styles?: string[]; scenes?: string[]; category?: string } | null;
+  featured?: boolean;
 }
 
 interface GalleryImage {
@@ -337,6 +340,11 @@ export function Workbench() {
   const [count, setCount] = useState(1);
   const [templates, setTemplates] = useState<Template[]>([]);
   const [cat, setCat] = useState("全部");
+  const [search, setSearch] = useState("");
+  const [tmplPage, setTmplPage] = useState(1);
+  const [tmplTotalPages, setTmplTotalPages] = useState(1);
+  const [tmplTotal, setTmplTotal] = useState(0);
+  const [showFeaturedOnly, setShowFeaturedOnly] = useState(false);
   const [gallery, setGallery] = useState<GalleryImage[]>([]);
   const [ledger, setLedger] = useState<LedgerRow[]>([]);
   const [orders, setOrders] = useState<OrderRow[]>([]);
@@ -409,6 +417,21 @@ export function Workbench() {
     }
   };
 
+  // Refresh templates when Explore filters change (category / search / page / featured)
+  useEffect(() => {
+    const params = new URLSearchParams({ pageSize: "30", page: String(tmplPage) });
+    if (cat !== "全部") params.set("cat", cat);
+    if (search.trim()) params.set("q", search.trim());
+    if (showFeaturedOnly) params.set("featured", "1");
+    api<{ templates: Template[]; total: number; totalPages: number }>(`/api/templates?${params}`)
+      .then((d) => {
+        setTemplates(d.templates);
+        setTmplTotal(d.total);
+        setTmplTotalPages(d.totalPages);
+      })
+      .catch(() => undefined);
+  }, [cat, search, tmplPage, showFeaturedOnly]);
+
   const friendlyError = (e: unknown) => {
     const msg = e instanceof Error ? e.message : "";
     if (msg === "verify-email-required") return "Verify your email first to start generating.";
@@ -435,9 +458,6 @@ export function Workbench() {
     refreshOrders();
     api<{ expiring: ExpiringCredit[] }>("/api/credits/expiring")
       .then((d) => setExpiring(d.expiring))
-      .catch(() => undefined);
-    api<{ templates: Template[] }>("/api/templates")
-      .then((d) => setTemplates(d.templates))
       .catch(() => undefined);
     // Resume tracking in-flight jobs (navigation/refresh unmounts this
     // component and its state — the jobs themselves keep running server-side)
@@ -676,8 +696,9 @@ export function Workbench() {
     }
   };
 
-  const filteredTemplates = cat === "全部" ? templates : templates.filter((tm) => tm.cat === cat);
-  const cats = ["全部", ...Array.from(new Set(templates.map((tm) => tm.cat)))];
+  // Explore categories — stable list so the filter bar renders even before
+  // the first fetch returns (the API filters server-side now)
+  const EXPLORE_CATS = ["全部", "UI 与界面", "图表信息图", "海报排版", "商品电商", "品牌标志", "建筑空间", "摄影写实", "插画艺术", "人物角色", "场景叙事", "历史古风", "文档出版", "其他应用"];
 
   // Session job list, split per workbench panel (create / edit / video)
   const isTerminal = (j: JobStatus) => j.status === "done" || j.status === "failed";
@@ -1138,28 +1159,93 @@ export function Workbench() {
                 <h1>{t.pageHead.explore.title}</h1>
                 <p>{t.pageHead.explore.desc}</p>
               </div>
+              <span className="chip" style={{ cursor: "default" }}>{tmplTotal} {locale === "zh" ? "个案例" : "cases"}</span>
+            </div>
+            <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap", alignItems: "center" }}>
+              <input
+                type="search"
+                placeholder={locale === "zh" ? "搜索标题或提示词…" : "Search title or prompt…"}
+                value={search}
+                onChange={(e) => { setSearch(e.target.value); setTmplPage(1); }}
+                style={{ flex: 1, minWidth: 200, padding: "8px 12px", borderRadius: 8, border: "1px solid var(--ink-4)", fontSize: 13.5 }}
+              />
+              <button
+                className={`chip${showFeaturedOnly ? " on" : ""}`}
+                onClick={() => { setShowFeaturedOnly((v) => !v); setTmplPage(1); }}
+              >
+                ★ {locale === "zh" ? "精选" : "Featured"}
+              </button>
             </div>
             <div className="cat-row">
-              {cats.map((c) => (
-                <button key={c} className={`chip${cat === c ? " on" : ""}`} onClick={() => setCat(c)}>{c}</button>
+              {EXPLORE_CATS.map((c) => (
+                <button
+                  key={c}
+                  className={`chip${cat === c ? " on" : ""}`}
+                  onClick={() => { setCat(c); setTmplPage(1); }}
+                >
+                  {c}
+                </button>
               ))}
             </div>
             <div className="tmpl-grid">
-              {filteredTemplates.map((tm) => (
+              {templates.map((tm) => (
                 <div key={tm.id} className="card tmpl-card" onClick={() => pickTemplate(tm)}>
-                  <img src={tm.img} alt={tm.title} />
+                  <img
+                    src={tm.img}
+                    alt={tm.title}
+                    style={{ cursor: "zoom-in" }}
+                    onClick={(e) => { e.stopPropagation(); setLightbox(tm.img); }}
+                  />
+                  {tm.featured && <div className="feat-badge">★</div>}
                   <div className="tmpl-body">
                     <h3>{tm.title}</h3>
                     <p>{tm.prompt}</p>
                     <div className="tmpl-foot">
                       <ModelPill model={tm.model} />
                       <span>{tm.credits} {t.credits}</span>
+                      {tm.sourceUrl && (
+                        <a
+                          href={tm.sourceUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={(e) => e.stopPropagation()}
+                          style={{ fontSize: 11, color: "var(--ink-3)" }}
+                        >
+                          ↗ {locale === "zh" ? "来源" : "source"}
+                        </a>
+                      )}
                       <span className="spacer"></span>
                       <span style={{ color: "var(--indigo)", fontWeight: 700 }}>Use →</span>
                     </div>
                   </div>
                 </div>
               ))}
+            </div>
+            {tmplTotalPages > 1 && (
+              <div style={{ display: "flex", justifyContent: "center", gap: 8, marginTop: 18, alignItems: "center" }}>
+                <button
+                  className="btn btn-ghost btn-sm"
+                  disabled={tmplPage <= 1}
+                  onClick={() => setTmplPage((p) => Math.max(1, p - 1))}
+                >
+                  ←
+                </button>
+                <span style={{ fontSize: 13, color: "var(--ink-2)" }}>
+                  {tmplPage} / {tmplTotalPages}
+                </span>
+                <button
+                  className="btn btn-ghost btn-sm"
+                  disabled={tmplPage >= tmplTotalPages}
+                  onClick={() => setTmplPage((p) => Math.min(tmplTotalPages, p + 1))}
+                >
+                  →
+                </button>
+              </div>
+            )}
+            <div style={{ textAlign: "center", fontSize: 11.5, color: "var(--ink-3)", marginTop: 18 }}>
+              {locale === "zh"
+                ? "案例来源：awesome-gpt-image-2 (MIT License) · 529+ 工业级 GPT-Image-2 提示词案例"
+                : "Cases from awesome-gpt-image-2 (MIT License) · 529+ industrial-grade GPT-Image-2 prompt cases"}
             </div>
           </>
         )}

@@ -178,14 +178,17 @@ model Image {
 }
 
 model Template {
-  id      String @id
-  cat     String
-  title   String
-  prompt  String
-  model   String // gpt | seedream
-  quality String
-  credits Int
-  img     String
+  id        String   @id
+  cat       String
+  title     String
+  prompt    String
+  model     String   // gpt | seedream (heuristic for imported cases)
+  quality   String
+  credits   Int
+  img       String
+  sourceUrl String?  // attribution link for community-sourced cases
+  tags      Json?     // { styles: [...], scenes: [...] } from upstream tags
+  featured  Boolean  @default(false)
 }
 
 model Order {

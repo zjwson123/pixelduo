@@ -511,3 +511,11 @@ table.ledger .status-refunded { background: rgba(235, 87, 87, .12); color: #eb57
   width: auto; padding: 8px 18px; font-size: 13.5px; text-decoration: none;
 }
 @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+
+/* Featured case badge (Explore tab) */
+.tmpl-card { position: relative; }
+.feat-badge {
+  position: absolute; top: 8px; right: 8px; width: 26px; height: 26px; border-radius: 50%;
+  background: var(--indigo); color: #fff; display: flex; align-items: center; justify-content: center;
+  font-size: 13px; font-weight: 700; box-shadow: 0 2px 8px rgba(0,0,0,.2);
+}

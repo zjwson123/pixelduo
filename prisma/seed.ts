@@ -167,6 +167,45 @@ async function main() {
   for (const t of FINAL) byCat.set(t.cat, (byCat.get(t.cat) ?? 0) + 1);
   console.log(`seeded ${FINAL.length} templates`);
   console.log([...byCat.entries()].map(([c, n]) => `${c}:${n}`).join(" "));
+
+  // CI / dev: import featured cases from awesome-gpt-image-2 so the Explore
+  // tab has real content without the full 529-case import. Production uses
+  // scripts/import-cases.ts for the complete dataset.
+  const ciCasesPath = path.join(process.cwd(), "data", "cases.ci.json");
+  if (fs.existsSync(ciCasesPath)) {
+    const ciCases = JSON.parse(fs.readFileSync(ciCasesPath, "utf8")) as { cases: Array<{
+      id: number; title: string; prompt: string; category: string;
+      styles: string[]; scenes: string[]; featured: boolean; sourceUrl?: string;
+    }> };
+    const CAT_ZH: Record<string, string> = {
+      "UI & Interfaces": "UI 与界面", "Charts & Infographics": "图表信息图",
+      "Posters & Typography": "海报排版", "Products & E-commerce": "商品电商",
+      "Brand & Logos": "品牌标志", "Architecture & Spaces": "建筑空间",
+      "Photography & Realism": "摄影写实", "Illustration & Art": "插画艺术",
+      "Characters & People": "人物角色", "Scenes & Storytelling": "场景叙事",
+      "History & Classical Themes": "历史古风", "Documents & Publishing": "文档出版",
+      "Other Use Cases": "其他应用",
+    };
+    for (const c of ciCases.cases) {
+      await prisma.template.upsert({
+        where: { id: String(c.id) },
+        create: {
+          id: String(c.id), cat: CAT_ZH[c.category] ?? c.category,
+          title: c.title, prompt: c.prompt, model: "gpt", quality: "medium",
+          credits: 8, img: "/templates/gpt_medium_1024.png",
+          sourceUrl: c.sourceUrl ?? null,
+          tags: { styles: c.styles, scenes: c.scenes, category: c.category } as object,
+          featured: c.featured,
+        },
+        update: {
+          cat: CAT_ZH[c.category] ?? c.category, title: c.title, prompt: c.prompt,
+          tags: { styles: c.styles, scenes: c.scenes, category: c.category } as object,
+          featured: c.featured,
+        },
+      });
+    }
+    console.log(`seeded ${ciCases.cases.length} cases from awesome-gpt-image-2`);
+  }
 }
 
 main()
