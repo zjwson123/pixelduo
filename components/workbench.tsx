@@ -358,6 +358,10 @@ export function Workbench() {
   const [assistantModel, setAssistantModel] = useState("deepseek");
   const [toast, setToast] = useState("");
   const [lightbox, setLightbox] = useState<string | null>(null);
+  // Per-panel submitting guard — prevents double-click double-charge.
+  // The server generates its own idempotency key when none is sent, so
+  // two clicks create two distinct jobs and bill twice.
+  const [submitting, setSubmitting] = useState<null | "create" | "edit" | "video">(null);
   const [checkout, setCheckout] = useState<null | { kind: "pack" | "plan"; itemId: string; name: string; price: number; credits: number }>(null);
   const [method, setMethod] = useState("Card");
 
@@ -418,22 +422,28 @@ export function Workbench() {
   };
 
   // Refresh templates when Explore filters change (category / search / page / featured).
-  // Search is debounced so fast typing doesn't flood the API.
+  // Search is debounced 300ms; stale responses are cancelled via AbortController
+  // so fast typing doesn't overwrite newer results with older data.
   useEffect(() => {
     const params = new URLSearchParams({ pageSize: "30", page: String(tmplPage) });
     if (cat !== "全部") params.set("cat", cat);
     if (search.trim()) params.set("q", search.trim());
     if (showFeaturedOnly) params.set("featured", "1");
+    const controller = new AbortController();
     const handle = setTimeout(() => {
-      api<{ templates: Template[]; total: number; totalPages: number }>(`/api/templates?${params}`)
-        .then((d) => {
+      fetch(`/api/templates?${params}`, { signal: controller.signal })
+        .then((res) => res.json())
+        .then((d: { templates: Template[]; total: number; totalPages: number }) => {
           setTemplates(d.templates);
           setTmplTotal(d.total);
           setTmplTotalPages(d.totalPages);
         })
         .catch(() => undefined);
     }, 300);
-    return () => clearTimeout(handle);
+    return () => {
+      clearTimeout(handle);
+      controller.abort();
+    };
   }, [cat, search, tmplPage, showFeaturedOnly]);
 
   const friendlyError = (e: unknown) => {
@@ -441,6 +451,8 @@ export function Workbench() {
     if (msg === "verify-email-required") return "Verify your email first to start generating.";
     if (msg === "insufficient-credits") return "Insufficient credits — top up first";
     if (msg.startsWith("queue-full")) return "Too many jobs in flight (max 5) — wait for one to finish";
+    if (msg === "Unauthorized" || msg.includes("401")) return "Session expired — please sign in again";
+    if (msg.includes("Failed to fetch") || msg.includes("NetworkError")) return "Network error — please retry";
     return msg || "Something went wrong";
   };
 
@@ -506,9 +518,14 @@ export function Workbench() {
         pending.map((j) =>
           api<{ job: JobStatus }>(`/api/jobs/${j.id}`)
             .then((r) => r.job)
-            .catch((e: unknown) =>
-              e instanceof Error && e.message.includes("job-not-found") ? ({ id: j.id, gone: true } as const) : null,
-            ),
+            .catch((e: unknown) => {
+              const msg = e instanceof Error ? e.message : "";
+              // Session expired — stop polling this job, let the user re-auth
+              if (msg.includes("Unauthorized") || msg.includes("401")) return null;
+              // Job vanished (e.g. admin cleanup) — stop tracking it
+              if (msg.includes("job-not-found")) return ({ id: j.id, gone: true } as const);
+              return null;
+            }),
         ),
       );
       setJobs((prev) =>
@@ -550,27 +567,33 @@ export function Workbench() {
   }, [jobs, t, refreshMe, refreshGallery, refreshLedger, refreshOrders]);
 
   const generate = async () => {
+    if (submitting) return;
     if (!prompt.trim()) return setToast(t.writePrompt);
     if (me && !me.emailVerified) return setToast(t.verifyFirst);
     if (me && me.credits < costCredits) return setToast(t.insufficient);
     setAssistantOut("");
+    setSubmitting("create");
     try {
       const data = await api<{ jobId: string }>("/api/generate", {
         method: "POST",
-        body: JSON.stringify({ prompt: prompt.trim(), model, quality, count }),
+        body: JSON.stringify({ prompt: prompt.trim(), model, quality, count, idempotencyKey: crypto.randomUUID() }),
       });
       await trackJob(data.jobId);
     } catch (e) {
       setToast(friendlyError(e));
+    } finally {
+      setSubmitting(null);
     }
   };
 
   const generateEdit = async () => {
+    if (submitting) return;
     if (!editPrompt.trim()) return setToast(t.writePrompt);
     if (!editImage) return setToast(t.clickUpload);
     if (me && !me.emailVerified) return setToast(t.verifyFirst);
     const editCost = estimateModelCost(editModel, 1, quality);
     if (me && me.credits < editCost.credits) return setToast(t.insufficient);
+    setSubmitting("edit");
     try {
       const data = await api<{ jobId: string }>("/api/edit", {
         method: "POST",
@@ -579,29 +602,34 @@ export function Workbench() {
           model: editModel,
           quality,
           image: editImage,
+          idempotencyKey: crypto.randomUUID(),
         }),
       });
       await trackJob(data.jobId);
     } catch (e) {
       setToast(friendlyError(e));
+    } finally {
+      setSubmitting(null);
     }
   };
 
   const generateVideo = async () => {
-    if (!videoPrompt.trim()) return setToast("Write a video prompt");
+    if (submitting) return;
+    if (!videoPrompt.trim()) return setToast(t.writePrompt);
     if (me && !me.emailVerified) return setToast(t.verifyFirst);
     // Pure i2v models need a first frame; seedance-style models take one optionally
     if (getModel(videoModel)?.requiresImageInput && !videoImage) return setToast(t.clickUpload);
     const vCost = estimateModelCost(videoModel, 1, "standard", videoDuration);
     if (me && me.credits < vCost.credits) return setToast(t.insufficient);
+    setSubmitting("video");
     try {
       const data = await api<{ jobId: string }>("/api/video", {
         method: "POST",
-        // image must be omitted (not null) when unset — zod .optional() rejects null
         body: JSON.stringify({
           prompt: videoPrompt.trim(),
           model: videoModel,
           duration: videoDuration,
+          idempotencyKey: crypto.randomUUID(),
           ...(videoImage ? { image: videoImage } : {}),
         }),
       });
@@ -609,6 +637,8 @@ export function Workbench() {
       setToast("Video generation started — this may take 1-3 minutes");
     } catch (e) {
       setToast(friendlyError(e));
+    } finally {
+      setSubmitting(null);
     }
   };
 
@@ -911,8 +941,8 @@ export function Workbench() {
                   )}
                 </div>
 
-                <button className="generate" onClick={generate}>
-                  {t.generate}
+                <button className="generate" disabled={submitting === "create"} onClick={generate}>
+                  {submitting === "create" ? t.generating : t.generate}
                 </button>
               </div>
 
@@ -1022,8 +1052,8 @@ export function Workbench() {
                   </span>
                 </div>
 
-                <button className="generate" disabled={!editImage} onClick={generateEdit}>
-                  {t.editImage}
+                <button className="generate" disabled={!editImage || submitting === "edit"} onClick={generateEdit}>
+                  {submitting === "edit" ? t.generating : t.editImage}
                 </button>
               </div>
 
@@ -1077,7 +1107,14 @@ export function Workbench() {
                   <div className="field-label" style={{ marginBottom: 8 }}>{t.model}</div>
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                     {VIDEO_MODEL_OPTIONS.map((m) => (
-                      <button key={m.value} className={`chip${videoModel === m.value ? " on" : ""}`} onClick={() => setVideoModel(m.value)}>
+                      <button key={m.value} className={`chip${videoModel === m.value ? " on" : ""}`} onClick={() => {
+                        setVideoModel(m.value);
+                        // Clamp duration to the new model's valid range
+                        const r = getModel(m.value)?.durationSecRange;
+                        if (r) setVideoDuration((d) => Math.max(r.min, Math.min(r.max, d)));
+                        // Clear uploaded reference image if the new model doesn't use one
+                        if (!getModel(m.value)?.supportsImageInput) setVideoImage(null);
+                      }}>
                         {m.label}
                       </button>
                     ))}
@@ -1133,8 +1170,8 @@ export function Workbench() {
                   )}
                 </div>
 
-                <button className="generate" onClick={generateVideo}>
-                  {t.genVideo}
+                <button className="generate" disabled={submitting === "video"} onClick={generateVideo}>
+                  {submitting === "video" ? t.genVideoing : t.genVideo}
                 </button>
               </div>
 
