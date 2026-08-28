@@ -34,8 +34,8 @@ test("security headers are set on HTML responses", async ({ request }) => {
 test("landing language toggle switches to Chinese", async ({ page }) => {
   await page.goto("/");
   await page.locator("button", { hasText: "中文" }).click();
-  await expect(page.locator("h1.serif")).toContainText("双模型");
-  await expect(page.locator("nav.nav-links a", { hasText: "价格" })).toBeVisible();
+  await expect(page.locator(".hero-copy h1")).toContainText("一个提示词");
+  await expect(page.locator(".land-links a", { hasText: "定价" })).toBeVisible();
 });
 
 test("landing FAQ and branded 404 render", async ({ page }) => {

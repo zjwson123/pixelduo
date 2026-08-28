@@ -819,7 +819,8 @@ export function Workbench() {
     );
 
   return (
-    <div>
+    /* Studio locks the Graphite dark theme — long creation sessions, content-first */
+    <div data-theme="dark">
       <header className="topbar">
         <Link className="logo" href="/">
           <span className="logo-mark"><i></i><i></i></span>

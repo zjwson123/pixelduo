@@ -1,199 +1,120 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 
 type Locale = "en" | "zh";
 
-const DICT = {
-  en: {
-    models: "Models",
-    features: "Features",
-    pricing: "Pricing",
-    signIn: "Sign in",
-    joinBeta: "Join the beta",
-    eyebrow: "Dual-engine AI image studio · Beta",
-    heroTitle1: "Two models.",
-    heroTitle2: "One prompt.",
-    heroTitle3: "Your call.",
-    heroSub:
-      "PixelDuo runs GPT Image 2 and Seedream 5 side by side — compare in one click, and see exactly what each image costs before you press generate.",
-    startFree: "Start creating — free",
-    seeModels: "See the models",
-    trustFree: "Free beta, no credit card required",
-    trustCost: "Transparent per-image cost",
-    trustAssistant: "AI prompt assistant included",
-    latency: "Latency",
-    costPerImage: "Cost / image",
-    compareNote: "Same prompt. Two engines. Choose by quality, speed, or price — you see it all up front.",
-    powerKicker: "The power of two",
-    powerTitle: "One studio, two world-class engines.",
-    powerSub:
-      "Head-to-head quality without the lock-in. GPT Image 2 for fine details and typography, Seedream 5 for speed and big canvases.",
-    gptDesc: "The finishing studio — text rendering, fine detail, and consistent quality for final assets.",
-    gpt1: "Typography and non-Latin text that actually renders",
-    gpt2: "Flexible sizes and multi-round editing",
-    gpt3: "No platform watermark",
-    seedDesc: "The fast lane — big canvases in seconds, ideal for drafts, batches, and exploration.",
-    seed1: "Native 2K / 3K output for print and big screens",
-    seed2: "Reference-image support",
-    seed3: "AI-generated label included (transparent compliance)",
-    duoTitle: "Not sure which engine? Generate both.",
-    duoSub: "One prompt, two outputs, side by side — you pick the winner. Both images are charged separately and clearly.",
-    tryCompare: "Try the compare",
-    trustKicker: "Built around trust",
-    trustTitle: "No black boxes. No surprise bills.",
-    trustSub:
-      "Every charge is visible before it happens, every model is priced by its real cost, and the AI helps you write better prompts for free.",
-    featCost: "Transparent cost preview",
-    featCostSub:
-      "See exactly how many credits — and dollars — an image will use before you generate. Adjust model, quality, or size to match your budget.",
-    featAssistant: "AI prompt assistant",
-    featAssistantSub:
-      "Type a half-formed thought and get a production-ready prompt — expanded, translated, and styled. Powered by DeepSeek, free on every plan.",
-    featTemplates: "Template library",
-    featTemplatesSub:
-      "E-commerce, portraits, posters, 3D icons — ready-made prompts with the exact model and parameters attached. One click to reuse.",
-    featCredits: "Credits + subscription, your way",
-    featCreditsSub:
-      "Credit packs valid for 12 months, and monthly quotas that roll 30% of what you don't use into next month. Plans from free to studio.",
-    pricingKicker: "Fair pricing, no black box · 明码标价",
-    pricingTitle: "Plans that respect your wallet.",
-    pricingSub: "1 credit = $0.01. Rollover 30% of unused monthly credits. Beta is free while we polish.",
-    free: "Free",
-    starter: "Starter",
-    pro: "Pro",
-    studio: "Studio",
-    perMonth: "/ month",
-    free1: "30 credits on signup",
-    free2: "2 credits daily check-in",
-    free3: "Watermarked previews",
-    startFreeBtn: "Start free",
-    starter1: "800 credits / month",
-    starter2: "≈ 100–130 images",
-    starter3: "No platform watermark",
-    pro1: "2,000 credits / month",
-    pro2: "≈ 250–330 images",
-    pro3: "30% quota rollover",
-    studio1: "5,000 credits / month",
-    studio2: "Team & privacy mode",
-    studio3: "API trial quota",
-    comingAtLaunch: "Coming at launch",
-    mostPopular: "Most popular",
-    ctaTitle: "Ready to see what you can make?",
-    ctaSub: "Beta is free. Create an account and start generating in minutes.",
-    openWorkbench: "Open the workbench →",
-    faqKicker: "Questions, answered",
-    faqTitle: "Frequently asked questions",
-    faq1q: "How is billing calculated?",
-    faq1a: "1 credit = $0.01. You always see the exact credit (and dollar) cost before generating — adjust model, quality, or size to fit your budget.",
-    faq2q: "How long do credits last?",
-    faq2a: "Purchased credit packs are valid for 12 months. Monthly subscription quotas roll 30% of unused credits into the next month (one month only).",
-    faq3q: "What is the refund policy?",
-    faq3a: "Unused credit balances may be refunded within a 14-day cooling-off period; images already generated are not refundable. See our Terms for details.",
-    faq4q: "How does content safety work?",
-    faq4a: "PixelDuo is strictly SFW. Prompts are filtered before generation and every image passes an AI safety review — violations are blocked, refunded, and deleted automatically.",
-    faq5q: "Is there an API?",
-    faq5a: "Yes — POST /api/v1/images/generations with an API key from your account page. Billed per image from your credits, with per-key rate limits.",
-    faq6q: "Who owns my images?",
-    faq6a: "You do. Images you generate are stored privately by default and only you can access them (unless you share them yourself).",
-    tagline: "Two models. One prompt. Your call.",
-    terms: "Terms",
-    privacy: "Privacy",
-    footerNote: "© 2026 PixelDuo. Beta product — details may change.",
-  },
+// Showcase imagery: real outputs from the PixelDuo case gallery (public/showcase)
+const IMG = (n: number) => `/showcase/case${n}.jpg`;
+
+const T = {
   zh: {
-    models: "模型",
-    features: "功能",
-    pricing: "价格",
-    signIn: "登录",
-    joinBeta: "加入 Beta",
-    eyebrow: "双引擎 AI 图像工作室 · Beta",
-    heroTitle1: "双模型。",
-    heroTitle2: "一条提示词。",
-    heroTitle3: "你说了算。",
-    heroSub: "PixelDuo 并排运行 GPT Image 2 与 Seedream 5——一键对比，生成前就能看到每张图的确切成本。",
-    startFree: "免费开始创作",
-    seeModels: "看看这两个模型",
-    trustFree: "免费 Beta，无需信用卡",
-    trustCost: "单图成本透明可见",
-    trustAssistant: "内置 AI 提示词助手",
-    latency: "延迟",
-    costPerImage: "单图成本",
-    compareNote: "同一提示词，双引擎出图。按质量、速度或价格选择——一切成本都在生成前透明展示。",
-    powerKicker: "双引擎之力",
-    powerTitle: "一个工作室，两个世界级引擎。",
-    powerSub: "正面比较，无需锁定单一模型。GPT Image 2 擅长精细细节与文字，Seedream 5 擅长速度与大画幅。",
-    gptDesc: "精修工作室——文字渲染、细腻细节，以及成品级一致质量。",
-    gpt1: "能正确渲染的文字与非拉丁文本",
-    gpt2: "灵活尺寸与多轮编辑",
-    gpt3: "无平台水印",
-    seedDesc: "快车道——数秒出大画幅，适合草图、批量与探索。",
-    seed1: "原生 2K / 3K 输出，适合印刷与大屏",
-    seed2: "支持参考图",
-    seed3: "自带 AI 生成标识（合规透明）",
-    duoTitle: "拿不准选哪个引擎？两个都生成。",
-    duoSub: "一条提示词、两张输出并排展示——你选赢家。两张图分开、清晰地计费。",
-    tryCompare: "试试对比",
-    trustKicker: "围绕信任而建",
-    trustTitle: "没有黑箱，没有意外账单。",
-    trustSub: "每一笔费用在发生前都可见，每个模型按真实成本定价，AI 免费帮你写出更好的提示词。",
-    featCost: "透明成本预览",
-    featCostSub: "生成前就看到一张图会用掉多少积分与多少钱。按预算调整模型、质量或尺寸。",
-    featAssistant: "AI 提示词助手",
-    featAssistantSub: "输入一句模糊想法，得到可直接上手的提示词——扩写、翻译、风格化。由 DeepSeek 驱动，所有套餐免费。",
-    featTemplates: "模板库",
-    featTemplatesSub: "电商、人像、海报、3D 图标——预制提示词并绑定精确模型与参数，一键复用。",
-    featCredits: "积分 + 订阅，随你组合",
-    featCreditsSub: "充值积分 12 个月有效，月配额未用完部分 30% 结转至下月。套餐从免费到工作室版。",
-    pricingKicker: "公平定价，没有黑箱 · Fair pricing",
-    pricingTitle: "对钱包友好的套餐。",
-    pricingSub: "1 积分 = $0.01。未用完的月配额结转 30%。Beta 阶段免费打磨。",
-    free: "免费",
-    starter: "入门",
-    pro: "专业",
-    studio: "工作室",
-    perMonth: "/ 月",
-    free1: "注册送 30 积分",
-    free2: "每日签到 +2 积分",
-    free3: "带水印预览",
-    startFreeBtn: "免费开始",
-    starter1: "800 积分 / 月",
-    starter2: "约 100–130 张图",
-    starter3: "无平台水印",
-    pro1: "2,000 积分 / 月",
-    pro2: "约 250–330 张图",
-    pro3: "30% 配额结转",
-    studio1: "5,000 积分 / 月",
-    studio2: "团队与隐私模式",
-    studio3: "API 试用配额",
-    comingAtLaunch: "上线时开放",
-    mostPopular: "最受欢迎",
-    ctaTitle: "准备好看看你能创作什么了吗？",
-    ctaSub: "Beta 免费。创建账号，几分钟内开始生成。",
-    openWorkbench: "打开工作台 →",
-    faqKicker: "常见问题",
-    faqTitle: "你可能会问",
-    faq1q: "计费怎么算？",
-    faq1a: "1 积分 = $0.01。生成前永远能看到确切的积分与金额成本——按预算调整模型、质量或尺寸即可。",
-    faq2q: "积分有效期多久？",
-    faq2a: "充值积分包 12 个月有效。订阅月配额未用完部分按 30% 结转至下月（仅下月有效）。",
-    faq3q: "退款政策是什么？",
-    faq3a: "14 天冷静期内，未使用的积分余额可申请退款；已生成的图片不可退款。详见条款。",
-    faq4q: "内容安全怎么保证？",
-    faq4a: "PixelDuo 严格 SFW。提示词在生成前过滤，每张图还会经过 AI 安全审核——违规内容自动拦截、退款并删除。",
-    faq5q: "有 API 吗？",
-    faq5a: "有——在账户页创建 API Key 后调用 POST /api/v1/images/generations。按积分计费，每个 Key 独立限流。",
-    faq6q: "图片归谁所有？",
-    faq6a: "归你。生成的图片默认私有存储，只有你能访问（除非你主动分享）。",
-    tagline: "双模型。一条提示词。你说了算。",
-    terms: "条款",
-    privacy: "隐私",
-    footerNote: "© 2026 PixelDuo。Beta 产品——细节可能变化。",
+    navHow: "工作方式", navGallery: "作品", navPricing: "定价",
+    signIn: "登录", start: "免费创作", lang: "EN",
+    heroA: "一个提示词，", heroB: "两种回答", heroC: "。",
+    heroSub: "PixelDuo 让 GPT Image 与 Seedream 同题竞技：拖动分割线逐像素对比，生成前看清每一分的去向，作品归属完全属于你。",
+    cta1: "免费开始创作", cta2: "了解工作方式",
+    m1: "双引擎", m1s: "旗舰模型", m2: "$0.04", m2s: "最低单张", m3: "100% 你", m3s: "作品归属",
+    compareHint: "拖动分割线对比两个引擎的输出",
+    tagL: "GPT Image 2", tagR: "Seedream 5",
+    strip: "由 PixelDuo 出品的一小部分",
+    how: "三步，从想法到成片",
+    how1t: "写下意图", how1p: "中文或英文都行。提示词助手会把它扩写成导演级的画面描述。",
+    how2t: "双引擎同题竞技", how2p: "同一提示词同时交给两个旗舰模型，拖动分割线逐像素对比，留下更好的那张。",
+    how3t: "明码标价", how3p: "生成前精确到积分的报价，失败自动全额退款，账本里每一笔都看得见。",
+    pricing: "定价透明到积分", pricingSub: "1 credit = $0.01。免费档永久免费，付费档随时可退。",
+    perMonth: "/月",
+    ctaT: "下一次生成，两个答案。", ctaS: "免费注册，30 credits 立即到账。",
+    faq: "常见问题",
+    faqs: [
+      ["计费怎么算？", "1 积分 = $0.01。生成前永远能看到确切的积分与金额成本——按预算调整模型、质量或尺寸即可。"],
+      ["积分有效期多久？", "充值积分包 12 个月有效。订阅月配额未用完部分按 30% 结转至下月（仅下月有效）。"],
+      ["退款政策是什么？", "14 天冷静期内，未使用的积分余额可申请退款；已生成的图片不可退款。详见条款。"],
+      ["内容安全怎么保证？", "PixelDuo 严格 SFW。提示词在生成前过滤，每张图还会经过 AI 安全审核——违规内容自动拦截、退款并删除。"],
+    ],
+    terms: "条款", privacy: "隐私",
+    footer: "PixelDuo · 保留作品全部权益",
+    choose: "选择",
+  },
+  en: {
+    navHow: "How it works", navGallery: "Gallery", navPricing: "Pricing",
+    signIn: "Sign in", start: "Start free", lang: "中文",
+    heroA: "One prompt,", heroB: "two answers", heroC: ".",
+    heroSub: "PixelDuo puts GPT Image and Seedream head to head: drag the divider to compare pixel by pixel, see exact cost before you generate, and keep full ownership of every image.",
+    cta1: "Start creating free", cta2: "See how it works",
+    m1: "Dual", m1s: "Flagship engines", m2: "$0.04", m2s: "From per image", m3: "100% yours", m3s: "Ownership",
+    compareHint: "Drag the divider to compare both engines",
+    tagL: "GPT Image 2", tagR: "Seedream 5",
+    strip: "A small sample, made on PixelDuo",
+    how: "Three steps from idea to image",
+    how1t: "Describe the intent", how1p: "Chinese or English. The prompt assistant expands it into a director-grade scene description.",
+    how2t: "Two engines, one race", how2p: "The same prompt runs on both flagship models. Drag the divider, compare pixel by pixel, keep the better one.",
+    how3t: "Priced before you click", how3p: "Exact credit quote upfront, automatic full refund on failure, and a ledger where every movement is visible.",
+    pricing: "Pricing, down to the credit", pricingSub: "1 credit = $0.01. Free tier stays free, paid plans cancel anytime.",
+    perMonth: "/mo",
+    ctaT: "Your next generation, two answers.", ctaS: "Sign up free, 30 credits land instantly.",
+    faq: "Questions, answered",
+    faqs: [
+      ["How is billing calculated?", "1 credit = $0.01. You always see the exact credit (and dollar) cost before generating — adjust model, quality, or size to fit your budget."],
+      ["How long do credits last?", "Purchased credit packs are valid for 12 months. Monthly quotas roll 30% of unused credits into the next month."],
+      ["What is the refund policy?", "Unused credit balances may be refunded within a 14-day cooling-off period; images already generated are not refundable. See our Terms for details."],
+      ["How does content safety work?", "PixelDuo is strictly SFW. Prompts are filtered before generation and every image passes an AI safety review — violations are blocked, refunded, and deleted automatically."],
+    ],
+    terms: "Terms", privacy: "Privacy",
+    footer: "PixelDuo · You keep full ownership",
+    choose: "Choose",
   },
 } as const;
 
-type Dict = { [K in keyof typeof DICT.en]: string };
+const HOW_IMG = [6, 338, 402];
+const MARQUEE = [1, 338, 373, 390, 355, 383, 166, 396, 225, 402];
+
+function CompareSlider({ tagL, tagR, hint }: { tagL: string; tagR: string; hint: string }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [split, setSplit] = useState(50);
+  const dragging = useRef(false);
+
+  useEffect(() => {
+    const move = (clientX: number) => {
+      const el = ref.current;
+      if (!el || !dragging.current) return;
+      const r = el.getBoundingClientRect();
+      setSplit(Math.min(96, Math.max(4, ((clientX - r.left) / r.width) * 100)));
+    };
+    const up = () => { dragging.current = false; };
+    const pm = (e: PointerEvent) => move(e.clientX);
+    const tm = (e: TouchEvent) => move(e.touches[0].clientX);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointermove", pm);
+    window.addEventListener("touchmove", tm, { passive: true });
+    return () => {
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointermove", pm);
+      window.removeEventListener("touchmove", tm);
+    };
+  }, []);
+
+  return (
+    <div
+      ref={ref}
+      className="compare"
+      style={{ "--split": `${split}%` } as React.CSSProperties}
+      onPointerDown={(e) => { dragging.current = true; const r = ref.current!.getBoundingClientRect(); setSplit(Math.min(96, Math.max(4, ((e.clientX - r.left) / r.width) * 100))); }}
+      onTouchStart={(e) => { dragging.current = true; const r = ref.current!.getBoundingClientRect(); setSplit(Math.min(96, Math.max(4, ((e.touches[0].clientX - r.left) / r.width) * 100))); }}
+      role="slider" aria-label={hint} aria-valuenow={Math.round(split)} aria-valuemin={0} aria-valuemax={100}
+    >
+      <img src={IMG(1)} alt={tagL} draggable={false} />
+      <img className="compare-right" src={IMG(225)} alt={tagR} draggable={false} />
+      <span className="compare-tag compare-tag-l">{tagL}</span>
+      <span className="compare-tag compare-tag-r">{tagR}</span>
+      <div className="compare-divider" aria-hidden="true"></div>
+      <div className="compare-knob" aria-hidden="true">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M8 7l-4 4 4 4M16 7l4 4-4 4M4 11h16" /></svg>
+      </div>
+    </div>
+  );
+}
 
 export default function Landing() {
   const [locale, setLocale] = useState<Locale>("en");
@@ -201,249 +122,144 @@ export default function Landing() {
     const saved = localStorage.getItem("pd-lang");
     if (saved === "zh" || saved === "en") setLocale(saved);
   }, []);
-  const t: Dict = DICT[locale];
   const switchLocale = (l: Locale) => {
     setLocale(l);
     localStorage.setItem("pd-lang", l);
   };
+  const t = T[locale];
+  const zh = locale === "zh";
+
+  const plans = zh
+    ? [
+        { name: "Free", price: "$0", per: "", feat: ["30 credits 新人礼", "每日签到 +2", "图像与视频生成", "带水印输出"], hot: false },
+        { name: "Starter", price: "$9", per: "/月", feat: ["800 credits / 月", "输出无水印", "视频生成", "优先生成队列"], hot: false },
+        { name: "Pro", price: "$19", per: "/月", feat: ["2,000 credits / 月", "输出无水印", "30% 额度结转", "批量生成"], hot: true },
+        { name: "Studio", price: "$39", per: "/月", feat: ["5,000 credits / 月", "团队与隐私模式", "API 试用额度", "优先支持"], hot: false },
+      ]
+    : [
+        { name: "Free", price: "$0", per: "", feat: ["30 credits on signup", "Daily check-in +2", "Image & video generation", "Watermarked outputs"], hot: false },
+        { name: "Starter", price: "$9", per: "/mo", feat: ["800 credits / mo", "No watermark", "Video generation", "Priority queue"], hot: false },
+        { name: "Pro", price: "$19", per: "/mo", feat: ["2,000 credits / mo", "No watermark", "30% rollover", "Batch generation"], hot: true },
+        { name: "Studio", price: "$39", per: "/mo", feat: ["5,000 credits / mo", "Team & privacy mode", "API trial quota", "Priority support"], hot: false },
+      ];
 
   return (
-    <div className="landing">
-      <header className="nav">
-        <div className="nav-inner">
-          <Link className="logo" href="/">
-            <span className="logo-mark"><i></i><i></i></span>
-            PixelDuo
-          </Link>
-          <nav className="nav-links">
-            <a href="#models">{t.models}</a>
-            <a href="#features">{t.features}</a>
-            <a href="#pricing">{t.pricing}</a>
-          </nav>
-          <div className="nav-cta">
-            <button className="btn btn-ghost" onClick={() => switchLocale(locale === "en" ? "zh" : "en")}>
-              {locale === "en" ? "中文" : "EN"}
-            </button>
-            <Link className="btn btn-ghost" href="/login">{t.signIn}</Link>
-            <Link className="btn btn-dark" href="/register" style={{ marginLeft: 10 }}>{t.joinBeta}</Link>
-          </div>
+    <div className="landing" lang={zh ? "zh" : "en"}>
+      <header className="land-nav">
+        <Link className="logo" href="/">
+          <span className="logo-mark"><i></i><i></i></span>
+          PixelDuo
+        </Link>
+        <nav className="land-links">
+          <a href="#how">{t.navHow}</a>
+          <a href="#gallery">{t.navGallery}</a>
+          <a href="#pricing">{t.navPricing}</a>
+        </nav>
+        <div className="land-cta">
+          <button className="land-lang" onClick={() => switchLocale(zh ? "en" : "zh")}>{t.lang}</button>
+          <Link className="btn btn-ghost" href="/login">{t.signIn}</Link>
+          <Link className="btn btn-primary" href="/register">{t.start}</Link>
         </div>
       </header>
 
-      <main>
-        <section>
-          <div className="wrap hero-grid">
-            <div>
-              <span className="eyebrow"><i></i>{t.eyebrow}</span>
-              <h1 className="serif">{t.heroTitle1}<br />{t.heroTitle2} <em>{t.heroTitle3}</em></h1>
-              <p className="hero-sub">{t.heroSub}</p>
-              <div className="hero-cta">
-                <Link className="btn btn-dark" href="/register">{t.startFree}</Link>
-                <a className="btn btn-ghost" href="#models">{t.seeModels}</a>
-              </div>
-              <div className="hero-trust">
-                <span>✅ <b>{t.trustFree}</b></span>
-                <span>💡 <b>{t.trustCost}</b></span>
-                <span>🧠 <b>{t.trustAssistant}</b></span>
-              </div>
-            </div>
-            <div>
-              <div className="compare-card">
-                <div className="compare-imgs">
-                  <figure className="compare-item">
-                    <span className="model-tag tag-gpt"><i></i>GPT Image 2</span>
-                    <img src="/templates/gpt_medium_1024.png" alt="GPT Image 2 output" width={1024} height={1024} loading="lazy" />
-                  </figure>
-                  <figure className="compare-item">
-                    <span className="model-tag tag-seed"><i></i>Seedream 5</span>
-                    <img src="/templates/seedream_1920.png" alt="Seedream 5 output" width={1920} height={1920} loading="lazy" />
-                  </figure>
-                </div>
-                <div className="vs">vs</div>
-                <div className="compare-specs">
-                  <div className="spec">{t.latency}<b>35s · medium</b></div>
-                  <div className="spec">{t.latency}<b>15s · 1920²</b></div>
-                  <div className="spec">{t.costPerImage}<b>$0.053</b></div>
-                  <div className="spec">{t.costPerImage}<b>¥0.30</b></div>
-                </div>
-                <p className="compare-note">{t.compareNote}</p>
-              </div>
-            </div>
+      <section className="hero">
+        <div className="hero-copy">
+          <h1>
+            {t.heroA}<br /><em>{t.heroB}{t.heroC}</em>
+          </h1>
+          <p className="hero-sub">{t.heroSub}</p>
+          <div className="hero-cta">
+            <Link className="btn btn-primary" href="/register">{t.cta1}</Link>
+            <a className="btn btn-ghost" href="#how">{t.cta2}</a>
           </div>
-        </section>
-
-        <section id="models">
-          <div className="wrap">
-            <div className="sec-head">
-              <div className="sec-kicker">{t.powerKicker}</div>
-              <h2 className="serif">{t.powerTitle}</h2>
-              <p>{t.powerSub}</p>
-            </div>
-            <div className="models-grid">
-              <div className="model-card">
-                <h3 style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                  <span className="model-dot" style={{ width: 12, height: 12, borderRadius: 4, background: "var(--indigo)" }}></span>
-                  GPT Image 2
-                </h3>
-                <p className="model-desc">{t.gptDesc}</p>
-                <div className="model-stats">
-                  <span className="stat-chip">Medium 1024²<b>$0.053 / img</b></span>
-                  <span className="stat-chip">High 1024²<b>$0.211 / img</b></span>
-                  <span className="stat-chip">{t.latency}<b>35 – 148s</b></span>
-                </div>
-                <ul className="model-list">
-                  <li>{t.gpt1}</li>
-                  <li>{t.gpt2}</li>
-                  <li>{t.gpt3}</li>
-                </ul>
-              </div>
-              <div className="model-card">
-                <h3 style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                  <span className="model-dot" style={{ width: 12, height: 12, borderRadius: 4, background: "var(--orange)" }}></span>
-                  Seedream 5
-                </h3>
-                <p className="model-desc">{t.seedDesc}</p>
-                <div className="model-stats">
-                  <span className="stat-chip">1920²<b>≈ $0.035 / img</b></span>
-                  <span className="stat-chip">Up to 3K<b>3072 × 3072</b></span>
-                  <span className="stat-chip">{t.latency}<b>≈ 15s</b></span>
-                </div>
-                <ul className="model-list">
-                  <li>{t.seed1}</li>
-                  <li>{t.seed2}</li>
-                  <li>{t.seed3}</li>
-                </ul>
-              </div>
-            </div>
-            <div className="duo-banner">
-              <div>
-                <h4>{t.duoTitle}</h4>
-                <p>{t.duoSub}</p>
-              </div>
-              <Link className="btn btn-dark" href="/register" style={{ marginLeft: "auto" }}>{t.tryCompare}</Link>
-            </div>
+          <div className="hero-meta">
+            <div><b>{t.m1}</b>{t.m1s}</div>
+            <div><b>{t.m2}</b>{t.m2s}</div>
+            <div><b>{t.m3}</b>{t.m3s}</div>
           </div>
-        </section>
-
-        <section id="features" style={{ background: "var(--surface)", borderTop: "1px solid var(--line)", borderBottom: "1px solid var(--line)" }}>
-          <div className="wrap">
-            <div className="sec-head">
-              <div className="sec-kicker">{t.trustKicker}</div>
-              <h2 className="serif">{t.trustTitle}</h2>
-              <p>{t.trustSub}</p>
-            </div>
-            <div className="feat-grid">
-              <div className="feat-card">
-                <h3>{t.featCost}</h3>
-                <p>{t.featCostSub}</p>
-              </div>
-              <div className="feat-card">
-                <h3>{t.featAssistant}</h3>
-                <p>{t.featAssistantSub}</p>
-              </div>
-              <div className="feat-card">
-                <h3>{t.featTemplates}</h3>
-                <p>{t.featTemplatesSub}</p>
-              </div>
-              <div className="feat-card">
-                <h3>{t.featCredits}</h3>
-                <p>{t.featCreditsSub}</p>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <section className="pricing-band" id="pricing">
-          <div className="wrap">
-            <div className="sec-head">
-              <div className="sec-kicker">{t.pricingKicker}</div>
-              <h2 className="serif">{t.pricingTitle}</h2>
-              <p>{t.pricingSub}</p>
-            </div>
-            <div className="plan-grid">
-              <div className="plan">
-                <h3>{t.free}</h3>
-                <div className="price">$0<small>{t.perMonth}</small></div>
-                <ul>
-                  <li>{t.free1}</li>
-                  <li>{t.free2}</li>
-                  <li>{t.free3}</li>
-                </ul>
-                <Link className="btn btn-ghost" href="/register">{t.startFreeBtn}</Link>
-              </div>
-              <div className="plan">
-                <h3>{t.starter}</h3>
-                <div className="price">$9<small>{t.perMonth}</small></div>
-                <ul>
-                  <li>{t.starter1}</li>
-                  <li>{t.starter2}</li>
-                  <li>{t.starter3}</li>
-                </ul>
-                <Link className="btn btn-ghost" href="/register">{t.comingAtLaunch}</Link>
-              </div>
-              <div className="plan featured">
-                <span className="badge">{t.mostPopular}</span>
-                <h3>{t.pro}</h3>
-                <div className="price">$19<small>{t.perMonth}</small></div>
-                <ul>
-                  <li>{t.pro1}</li>
-                  <li>{t.pro2}</li>
-                  <li>{t.pro3}</li>
-                </ul>
-                <Link className="btn btn-dark" href="/register">{t.comingAtLaunch}</Link>
-              </div>
-              <div className="plan">
-                <h3>{t.studio}</h3>
-                <div className="price">$39<small>{t.perMonth}</small></div>
-                <ul>
-                  <li>{t.studio1}</li>
-                  <li>{t.studio2}</li>
-                  <li>{t.studio3}</li>
-                </ul>
-                <Link className="btn btn-ghost" href="/register">{t.comingAtLaunch}</Link>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <section className="cta-band">
-          <div className="wrap">
-            <h2 className="serif">{t.ctaTitle}</h2>
-            <p>{t.ctaSub}</p>
-            <Link className="btn btn-dark" href="/register">{t.openWorkbench}</Link>
-          </div>
-        </section>
-
-        <section id="faq" style={{ background: "var(--surface)", borderTop: "1px solid var(--line)" }}>
-          <div className="wrap" style={{ maxWidth: 820 }}>
-            <div className="sec-head">
-              <div className="sec-kicker">{t.faqKicker}</div>
-              <h2 className="serif">{t.faqTitle}</h2>
-            </div>
-            <div style={{ display: "grid", gap: 12 }}>
-              {[1, 2, 3, 4, 5, 6].map((n) => (
-                <details key={n} style={{ background: "#fff", border: "1px solid var(--line)", borderRadius: 12, padding: "14px 16px" }}>
-                  <summary style={{ fontWeight: 700, cursor: "pointer" }}>
-                    {t[`faq${n}q` as keyof Dict]}
-                  </summary>
-                  <p style={{ margin: "10px 0 0", color: "#5c6273" }}>{t[`faq${n}a` as keyof Dict]}</p>
-                </details>
-              ))}
-            </div>
-          </div>
-        </section>
-      </main>
-
-      <footer>
-        <div className="wrap foot-inner">
-          <span className="logo"><span className="logo-mark"><i></i><i></i></span> PixelDuo</span>
-          <span className="muted">pixelduo.ai · {t.tagline}</span>
-          <span className="muted">
-            <Link className="link" href="/terms" style={{ marginRight: 14 }}>{t.terms}</Link>
-            <Link className="link" href="/privacy">{t.privacy}</Link>
-          </span>
-          <span className="muted" style={{ marginLeft: "auto" }}>{t.footerNote}</span>
         </div>
+        <CompareSlider tagL={t.tagL} tagR={t.tagR} hint={t.compareHint} />
+      </section>
+
+      <section className="strip-sec" id="gallery">
+        <h2 className="strip-title">{t.strip}</h2>
+        <div className="marquee-mask">
+          <div className="marquee">
+            {[...MARQUEE, ...MARQUEE].map((n, i) => (
+              <figure key={i} className="mq-item">
+                <img src={IMG(n)} alt={`PixelDuo showcase ${i + 1}`} loading="lazy" />
+              </figure>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <section className="how" id="how">
+        <h2>{t.how}</h2>
+        <div className="how-grid">
+          <div className="how-cell">
+            <span className="how-n">01</span>
+            <div className="how-txt"><h3>{t.how1t}</h3><p>{t.how1p}</p></div>
+            <img src={IMG(HOW_IMG[0])} alt="" loading="lazy" />
+          </div>
+          <div className="how-cell">
+            <span className="how-n">02</span>
+            <div className="how-txt"><h3>{t.how2t}</h3><p>{t.how2p}</p></div>
+            <img src={IMG(HOW_IMG[1])} alt="" loading="lazy" />
+          </div>
+          <div className="how-cell">
+            <span className="how-n">03</span>
+            <div className="how-txt"><h3>{t.how3t}</h3><p>{t.how3p}</p></div>
+            <img src={IMG(HOW_IMG[2])} alt="" loading="lazy" />
+          </div>
+        </div>
+      </section>
+
+      <section className="land-faq" id="faq">
+        <h2>{t.faq}</h2>
+        <div className="faq-list">
+          {t.faqs.map(([q, a]) => (
+            <details key={q}>
+              <summary>{q}</summary>
+              <p>{a}</p>
+            </details>
+          ))}
+        </div>
+      </section>
+
+      <section className="land-pricing" id="pricing">
+        <h2>{t.pricing}</h2>
+        <p className="land-pricing-sub">{t.pricingSub}</p>
+        <div className="price-grid">
+          {plans.map((p) => (
+            <div key={p.name} className={"price-card" + (p.hot ? " hot" : "")}>
+              <span className="plan-name">{p.name}</span>
+              <span className="plan-amt">{p.price}<small>{p.per}</small></span>
+              <ul>
+                {p.feat.map((f) => <li key={f}>{f}</li>)}
+              </ul>
+              <Link className={"btn " + (p.hot ? "btn-primary" : "btn-ghost")} href="/register">{t.choose}</Link>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="land-cta-band-wrap">
+        <div className="land-cta-band">
+          <div>
+            <h2>{t.ctaT}</h2>
+            <p>{t.ctaS}</p>
+          </div>
+          <Link className="btn btn-primary land-cta-btn" href="/register">{t.start}</Link>
+        </div>
+      </section>
+
+      <footer className="land-footer">
+        {t.footer}
+        <span className="foot-links">
+          <Link href="/terms">{t.terms}</Link>
+          <Link href="/privacy">{t.privacy}</Link>
+        </span>
       </footer>
     </div>
   );
