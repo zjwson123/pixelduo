@@ -35,15 +35,23 @@ function sniffContentType(buf: Uint8Array): string {
   return "application/octet-stream";
 }
 
-// Authenticated, ownership-scoped image serving.
+// Authenticated, ownership-scoped image/video serving.
+// Template images (from the Explore gallery) are shared across all users —
+// any logged-in user can fetch them by key, but the key must exist in the
+// Template table so arbitrary file enumeration is impossible.
 export async function GET(req: Request, { params }: { params: { key: string[] } }) {
   const key = params.key.join("/");
   const session = await getServerSession(authOptions);
   const uid = (session?.user as { id?: string } | undefined)?.id;
   if (!uid) return new NextResponse("unauthorized", { status: 401 });
 
+  // 1. User-owned generated image/video
   const image = await prisma.image.findFirst({ where: { userId: uid, url: key } });
-  if (!image) return new NextResponse("not found", { status: 404 });
+  // 2. Shared template image (Explore gallery) — any logged-in user
+  if (!image) {
+    const template = await prisma.template.findFirst({ where: { img: key }, select: { id: true } });
+    if (!template) return new NextResponse("not found", { status: 404 });
+  }
 
   const buf = await getStorage().get(key);
   if (!buf) return new NextResponse("not found", { status: 404 });

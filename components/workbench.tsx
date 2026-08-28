@@ -692,6 +692,23 @@ export function Workbench() {
     setToast("Template applied");
   };
 
+  const isVideoModel = (model: string) => getModel(model)?.mediaType === "video" || model === "seedance" || model === "wan-t2v" || model === "wan-i2v";
+
+  // Render a media element (image or video) for a gallery/recent item
+  const renderMedia = (url: string, model: string, prompt: string, onZoom?: () => void) => {
+    if (isVideoModel(model)) {
+      return <video src={url} controls style={{ width: "100%", borderRadius: 8 }} />;
+    }
+    return (
+      <img
+        src={url}
+        alt={prompt}
+        style={{ cursor: "zoom-in" }}
+        onClick={onZoom ?? (() => setLightbox(url))}
+      />
+    );
+  };
+
   const checkin = async () => {
     try {
       const data = await api<{ claimed: boolean; credits: number }>("/api/checkin", { method: "POST" });
@@ -974,7 +991,7 @@ export function Workbench() {
                       <div className="results-grid">
                         {gallery.slice(0, 8).map((g) => (
                           <div key={g.id} className="result-card">
-                            <img src={g.url} alt={g.prompt} style={{ cursor: "zoom-in" }} onClick={() => setLightbox(g.url)} />
+                            {renderMedia(g.url, g.model, g.prompt)}
                             {me?.plan === "free" && <div className="wm-badge">PixelDuo · AI 生成</div>}
                             <div className="result-actions">
                               <a className="result-btn" href={`${g.url}?download=1`} download aria-label={t.download} title={t.download}>↓</a>
@@ -1312,7 +1329,7 @@ export function Workbench() {
               <div className="gallery-grid">
                 {gallery.map((g) => (
                   <div key={g.id} className="card gal-card">
-                    <img src={g.url} alt={g.prompt} style={{ cursor: "zoom-in" }} onClick={() => setLightbox(g.url)} />
+                    {renderMedia(g.url, g.model, g.prompt)}
                     <div className="gal-body">
                       <div className="prompt">{g.prompt}</div>
                       <div className="gal-meta">

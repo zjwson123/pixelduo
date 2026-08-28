@@ -1,6 +1,7 @@
 import { requireUserId, ok, fail, enforceRateLimit } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@prisma/client";
+import { serveUserUrl } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
@@ -41,7 +42,7 @@ export async function GET(req: Request) {
   ]);
 
   return ok({
-    templates,
+    templates: templates.map((t) => ({ ...t, img: serveUserUrl(t.img) })),
     total,
     page,
     pageSize,
