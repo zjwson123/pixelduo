@@ -11,11 +11,12 @@ const schema = z.object({
 
 // Admin credit adjustment: positive = compensation grant (never expires,
 // consumed first), negative = clawback (FIFO, free/admin grants first).
-export async function POST(req: Request, { params }: { params: { id: string } }) {
+export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
   try {
     await requireAdmin();
     const body = schema.parse(await req.json());
-    const user = await prisma.user.findUnique({ where: { id: params.id }, select: { id: true } });
+    const user = await prisma.user.findUnique({ where: { id: id }, select: { id: true } });
     if (!user) return fail(new Error("user-not-found"));
     await prisma.$transaction(async (tx) => {
       if (body.delta > 0) await adminGrantTx(tx, user.id, body.delta, body.note);

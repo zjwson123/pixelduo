@@ -5,15 +5,16 @@ import { prisma } from "@/lib/prisma";
 
 const schema = z.object({ role: z.enum(["user", "admin"]) });
 
-export async function POST(req: Request, { params }: { params: { id: string } }) {
+export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
   try {
     const adminId = await requireAdmin();
     const body = schema.parse(await req.json());
-    if (params.id === adminId && body.role !== "admin") {
+    if (id === adminId && body.role !== "admin") {
       return fail(new Error("cannot-demote-self"));
     }
     const updated = await prisma.user.update({
-      where: { id: params.id },
+      where: { id: id },
       data: { role: body.role },
       select: { id: true, role: true },
     });

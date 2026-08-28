@@ -5,10 +5,11 @@ import { getStorage } from "@/lib/storage";
 
 // Remove a generated image (moderation / ToS removal). Delivered content is
 // not refunded — credit refunds are handled separately via user credits.
-export async function DELETE(_req: Request, { params }: { params: { id: string } }) {
+export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
   try {
     await requireAdmin();
-    const image = await prisma.image.findUnique({ where: { id: params.id } });
+    const image = await prisma.image.findUnique({ where: { id: id } });
     if (!image) return fail(new Error("image-not-found"));
     await getStorage().delete(image.url).catch(() => undefined);
     await prisma.image.delete({ where: { id: image.id } });

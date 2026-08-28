@@ -2,10 +2,11 @@ import { requireUserId, ok, fail } from "@/lib/api";
 import { getJobForUser } from "@/lib/queue";
 import { serveUserUrl } from "@/lib/store";
 
-export async function GET(_req: Request, { params }: { params: { id: string } }) {
+export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
   try {
     const userId = await requireUserId();
-    const job = await getJobForUser(userId, params.id);
+    const job = await getJobForUser(userId, id);
     if (!job) return fail(new Error("job-not-found"));
     let images: string[];
     try {

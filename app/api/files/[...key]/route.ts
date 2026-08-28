@@ -39,8 +39,9 @@ function sniffContentType(buf: Uint8Array): string {
 // Template images (from the Explore gallery) are shared across all users —
 // any logged-in user can fetch them by key, but the key must exist in the
 // Template table so arbitrary file enumeration is impossible.
-export async function GET(req: Request, { params }: { params: { key: string[] } }) {
-  const key = params.key.join("/");
+export async function GET(req: Request, { params }: { params: Promise<{ key: string[] }> }) {
+  const { key: keyParts } = await params;
+  const key = keyParts.join("/");
   const session = await getServerSession(authOptions);
   const uid = (session?.user as { id?: string } | undefined)?.id;
   if (!uid) return new NextResponse("unauthorized", { status: 401 });

@@ -7,11 +7,12 @@ import { serveUrl } from "@/lib/store";
 export const dynamic = "force-dynamic";
 
 // Poll a generation job's status and (when done) its image URLs.
-export async function GET(req: Request, { params }: { params: { id: string } }) {
+export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
   try {
     const auth = await authenticateApiKey(req);
     if (!auth) return new NextResponse(JSON.stringify({ ok: false, error: "unauthorized" }), { status: 401 });
-    const job = await prisma.job.findFirst({ where: { id: params.id, userId: auth.userId } });
+    const job = await prisma.job.findFirst({ where: { id: id, userId: auth.userId } });
     if (!job) return new NextResponse(JSON.stringify({ ok: false, error: "job-not-found" }), { status: 404 });
     let images: string[];
     try {
