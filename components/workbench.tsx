@@ -1018,7 +1018,7 @@ export function Workbench() {
                             </div>
                             <div className="result-meta">
                               <ModelPill model={g.model} />
-                              <span style={{ marginLeft: "auto" }}>{g.credits} {t.credits}</span>
+                              <span style={{ marginLeft: "auto", whiteSpace: "nowrap" }}>{g.credits} {t.credits}</span>
                             </div>
                           </div>
                         ))}
@@ -1355,10 +1355,12 @@ export function Workbench() {
                       <div className="prompt">{g.prompt}</div>
                       <div className="gal-meta">
                         <ModelPill model={g.model} />
-                        <span>{g.credits} {t.credits}</span>
+                        <span className="gal-credits">{g.credits} {t.credits}</span>
                         <span className="spacer"></span>
                         <a className="dl-link" href={`${g.url}?download=1`} download>{t.download}</a>
-                        <span>{new Date(g.createdAt).toLocaleString()}</span>
+                      </div>
+                      <div className="gal-time" title={new Date(g.createdAt).toLocaleString()}>
+                        {new Date(g.createdAt).toLocaleString(undefined, { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}
                       </div>
                     </div>
                   </div>
