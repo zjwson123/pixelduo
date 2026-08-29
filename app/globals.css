@@ -633,5 +633,17 @@ table.ledger .status-refunded { background: rgba(235, 87, 87, .12); color: #eb57
   font-size: 13px; font-weight: 700; box-shadow: 0 2px 8px rgba(0,0,0,.2);
 }
 
+/* Explore search input */
+.search-input {
+  flex: 1; min-width: 200px; padding: 9px 13px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--surface-2); color: var(--ink);
+  font-size: 13.5px; outline: none;
+  transition: border-color .18s cubic-bezier(.16,1,.3,1), box-shadow .18s ease;
+}
+.search-input::placeholder { color: var(--ink-3); }
+.search-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.search-input::-webkit-search-cancel-button { filter: invert(var(--cancel-invert, 0)); }
+[data-theme="dark"] .search-input::-webkit-search-cancel-button { filter: invert(1); }
+
 /* Theme toggle button */
-.theme-btn { width: 34px; padding: 0; justify-content: center; }
+.theme-btn { width: 38px; height: 34px; padding: 0; justify-content: center; }

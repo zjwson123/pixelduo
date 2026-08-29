@@ -436,7 +436,7 @@ export function Workbench() {
   // Search is debounced 300ms; stale responses are cancelled via AbortController
   // so fast typing doesn't overwrite newer results with older data.
   useEffect(() => {
-    const params = new URLSearchParams({ pageSize: "30", page: String(tmplPage) });
+    const params = new URLSearchParams({ pageSize: "24", page: String(tmplPage) });
     if (cat !== "全部") params.set("cat", cat);
     if (search.trim()) params.set("q", search.trim());
     if (showFeaturedOnly) params.set("featured", "1");
@@ -854,9 +854,9 @@ export function Workbench() {
           <button className="btn btn-ghost btn-sm" onClick={() => switchLocale(locale === "en" ? "zh" : "en")}>{locale === "en" ? "中文" : "EN"}</button>
           <button className="btn btn-ghost btn-sm theme-btn" onClick={switchTheme} aria-label="切换主题" title={theme === "dark" ? "Switch to light" : "Switch to dark"}>
             {theme === "dark" ? (
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><circle cx="12" cy="12" r="4.5" /><path d="M12 2.5v2.5M12 19v2.5M2.5 12H5M19 12h2.5M5.3 5.3l1.8 1.8M16.9 16.9l1.8 1.8M18.7 5.3l-1.8 1.8M7.1 16.9l-1.8 1.8" /></svg>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><circle cx="12" cy="12" r="4.5" /><path d="M12 2.5v2.5M12 19v2.5M2.5 12H5M19 12h2.5M5.3 5.3l1.8 1.8M16.9 16.9l1.8 1.8M18.7 5.3l-1.8 1.8M7.1 16.9l-1.8 1.8" /></svg>
             ) : (
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M20 13.5A8.5 8.5 0 1 1 10.5 4a6.8 6.8 0 0 0 9.5 9.5z" /></svg>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M20 13.5A8.5 8.5 0 1 1 10.5 4a6.8 6.8 0 0 0 9.5 9.5z" /></svg>
             )}
           </button>
           <Link className="btn btn-ghost btn-sm" href="/account/security">Security</Link>
@@ -1248,10 +1248,10 @@ export function Workbench() {
             <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap", alignItems: "center" }}>
               <input
                 type="search"
+                className="search-input"
                 placeholder={locale === "zh" ? "搜索标题或提示词…" : "Search title or prompt…"}
                 value={search}
                 onChange={(e) => { setSearch(e.target.value); setTmplPage(1); }}
-                style={{ flex: 1, minWidth: 200, padding: "8px 12px", borderRadius: 8, border: "1px solid var(--ink-4)", fontSize: 13.5 }}
               />
               <button
                 className={`chip${showFeaturedOnly ? " on" : ""}`}
