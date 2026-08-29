@@ -315,6 +315,17 @@ export function Workbench() {
     const saved = localStorage.getItem("pd-lang");
     if (saved === "zh" || saved === "en") setLocale(saved);
   }, []);
+  // Studio theme: Graphite dark by default; light available for long-day comfort
+  const [theme, setTheme] = useState<"dark" | "light">("dark");
+  useEffect(() => {
+    const saved = localStorage.getItem("pd-theme");
+    if (saved === "light" || saved === "dark") setTheme(saved);
+  }, []);
+  const switchTheme = () => {
+    const next = theme === "dark" ? "light" : "dark";
+    setTheme(next);
+    localStorage.setItem("pd-theme", next);
+  };
   const t = LOCALE_STRINGS[locale];
   const LEDGER_LABELS = t.ledgerLabels;
   const switchLocale = (l: Locale) => {
@@ -820,7 +831,8 @@ export function Workbench() {
 
   return (
     /* Studio locks the Graphite dark theme — long creation sessions, content-first */
-    <div data-theme="dark">
+    <div data-theme={theme}>
+      <style>{`[data-theme="light"] .topbar { background: rgba(255,255,255,.86); }`}</style>
       <header className="topbar">
         <Link className="logo" href="/">
           <span className="logo-mark"><i></i><i></i></span>
@@ -840,6 +852,13 @@ export function Workbench() {
           </button>
           <button className="btn btn-ghost btn-sm" onClick={() => setTab("pricing")}>{t.topUp}</button>
           <button className="btn btn-ghost btn-sm" onClick={() => switchLocale(locale === "en" ? "zh" : "en")}>{locale === "en" ? "中文" : "EN"}</button>
+          <button className="btn btn-ghost btn-sm theme-btn" onClick={switchTheme} aria-label="切换主题" title={theme === "dark" ? "Switch to light" : "Switch to dark"}>
+            {theme === "dark" ? (
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><circle cx="12" cy="12" r="4.5" /><path d="M12 2.5v2.5M12 19v2.5M2.5 12H5M19 12h2.5M5.3 5.3l1.8 1.8M16.9 16.9l1.8 1.8M18.7 5.3l-1.8 1.8M7.1 16.9l-1.8 1.8" /></svg>
+            ) : (
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M20 13.5A8.5 8.5 0 1 1 10.5 4a6.8 6.8 0 0 0 9.5 9.5z" /></svg>
+            )}
+          </button>
           <Link className="btn btn-ghost btn-sm" href="/account/security">Security</Link>
           <Link className="btn btn-ghost btn-sm" href="/account/api">API Keys</Link>
           {me?.role === "admin" && <Link className="btn btn-ghost btn-sm" href="/admin">Admin</Link>}
@@ -1263,24 +1282,25 @@ export function Workbench() {
                   />
                   {tm.featured && <div className="feat-badge">★</div>}
                   <div className="tmpl-body">
-                    <h3>{tm.title}</h3>
-                    <p>{tm.prompt}</p>
-                    <div className="tmpl-foot">
-                      <ModelPill model={tm.model} />
-                      <span>{tm.credits} {t.credits}</span>
+                    <div className="tmpl-title-row">
+                      <h3>{tm.title}</h3>
                       {tm.sourceUrl && (
                         <a
+                          className="tmpl-source"
                           href={tm.sourceUrl}
                           target="_blank"
                           rel="noopener noreferrer"
+                          title={locale === "zh" ? "查看来源（致谢原作）" : "View source (attribution)"}
                           onClick={(e) => e.stopPropagation()}
-                          style={{ fontSize: 11, color: "var(--ink-3)" }}
-                        >
-                          ↗ {locale === "zh" ? "来源" : "source"}
-                        </a>
+                        >↗</a>
                       )}
+                    </div>
+                    <p>{tm.prompt}</p>
+                    <div className="tmpl-foot">
+                      <ModelPill model={tm.model} />
+                      <span className="tmpl-credits">{tm.credits} {t.credits}</span>
                       <span className="spacer"></span>
-                      <span style={{ color: "var(--indigo)", fontWeight: 700 }}>Use →</span>
+                      <span className="tmpl-use">Use →</span>
                     </div>
                   </div>
                 </div>
