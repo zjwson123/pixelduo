@@ -788,10 +788,35 @@ export function Workbench() {
     </div>
   );
 
+  // Translate raw provider errors into user-facing copy (bilingual)
+  const humanizeJobError = (raw: string | null): string => {
+    const msg = raw ?? "";
+    if (/safety system|content (policy|moderation)/i.test(msg)) {
+      return locale === "zh"
+        ? "提示词被上游安全系统拦截。常见触发：真实人物姓名/品牌、敏感场景描写。换一种表述通常就能通过。"
+        : "The prompt was rejected by the upstream safety system. Common triggers: real person names, brands, sensitive scenes. Rephrasing usually works.";
+    }
+    if (/flagged.*moderation|image-flagged/i.test(msg)) {
+      return locale === "zh" ? "生成结果未通过安全审核，已自动删除并退款。" : "The result failed safety review and was deleted. Credits refunded.";
+    }
+    if (/access ?denied|403/i.test(msg)) {
+      return locale === "zh" ? "该模型暂时不可用（权限受限），请稍后再试或换一个模型。" : "This model is temporarily unavailable (restricted). Try later or pick another model.";
+    }
+    if (/timeout|aborted/i.test(msg)) {
+      return locale === "zh" ? "生成超时。高峰期偶发，重试通常可以成功。" : "Generation timed out. Happens at peak times — retrying usually works.";
+    }
+    if (/queue-full/i.test(msg)) return locale === "zh" ? "进行中的任务已达上限（5 个），等一个完成再试。" : "Too many jobs in flight (max 5). Wait for one to finish.";
+    // Fallback: first 120 chars of raw message
+    return msg.slice(0, 120) || (locale === "zh" ? "未知错误" : "Unknown error");
+  };
+
   const renderFailed = (j: JobStatus) => (
     <div key={j.id} className="empty" style={{ marginBottom: 14 }}>
       <span className="serif">{j.mediaType === "video" ? t.videoFailed : t.genFailed}</span>
-      <span>{j.prompt.slice(0, 90)} — {j.error ?? "Unknown error"} · {t.charged} {j.costCredits} {t.credits} refunded.</span>
+      <span>{humanizeJobError(j.error)}</span>
+      <span style={{ marginTop: 6, fontSize: 12.5, color: "var(--ink-3)" }}>
+        {j.costCredits} {t.credits} {locale === "zh" ? "已全额退款" : "fully refunded"}
+      </span>
     </div>
   );
 

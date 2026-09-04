@@ -24,6 +24,7 @@ export function isPermanentProviderError(msg: string): boolean {
     /invalid.?api.?key/i.test(msg) ||
     /model .*is offline/i.test(msg) ||
     /model not exist/i.test(msg) ||
+    /safety system|content (policy|moderation)|flagged.*moderation/i.test(msg) ||
     /unknown-model|model-not-supported|not-a-video-model|model-disabled/i.test(msg)
   );
 }
