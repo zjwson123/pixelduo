@@ -116,8 +116,15 @@ export async function rateLimit(key: string, limit: number, windowMs: number): P
   return getLimiter().hit(key, limit, windowMs);
 }
 
+// Behind the trusted reverse proxy (Caddy appends the real client IP), the
+// LAST X-Forwarded-For entry is the client address as seen by the edge; the
+// first entries originate from the client and are freely spoofable. Taking
+// the last entry keeps per-IP limits honest even when a client injects XFF.
 export function clientIp(req: Request): string {
   const fwd = req.headers.get("x-forwarded-for");
-  if (fwd) return fwd.split(",")[0].trim();
+  if (fwd) {
+    const parts = fwd.split(",").map((s) => s.trim()).filter(Boolean);
+    if (parts.length > 0) return parts[parts.length - 1];
+  }
   return req.headers.get("x-real-ip") ?? "unknown";
 }

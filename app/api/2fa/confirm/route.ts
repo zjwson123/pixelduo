@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { requireVerifiedUser, ok, fail, enforceRateLimit } from "@/lib/api";
+import { requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { verifyTotp, generateBackupCodes, hashBackupCode } from "@/lib/twofa";
 
@@ -13,6 +13,8 @@ export async function POST(req: Request) {
     const userId = await requireVerifiedUser();
     const limited = await enforceRateLimit(req, "2fa-confirm", 5, 60_000);
     if (limited) return limited;
+    const userLimited = await enforceUserRateLimit(userId, "2fa-confirm", 5, 60_000);
+    if (userLimited) return fail(userLimited);
     const body = schema.parse(await req.json());
     const user = await prisma.user.findUniqueOrThrow({
       where: { id: userId },

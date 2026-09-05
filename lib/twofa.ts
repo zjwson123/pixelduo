@@ -73,7 +73,16 @@ export async function replaceBackupCodes(userId: string, codes: string[]): Promi
 const encoder = new TextEncoder();
 
 function secretKey(): Uint8Array {
-  return encoder.encode(process.env.NEXTAUTH_SECRET ?? "pixelduo-dev-secret-change-me");
+  const secret = process.env.NEXTAUTH_SECRET;
+  if (!secret) {
+    // A fixed fallback secret in production would let anyone forge pre-auth
+    // tickets and complete the 2FA login step. Dev keeps it for convenience.
+    if (process.env.NODE_ENV === "production") {
+      throw new Error("NEXTAUTH_SECRET must be set in production");
+    }
+    return encoder.encode("pixelduo-dev-secret-change-me");
+  }
+  return encoder.encode(secret);
 }
 
 let redis: Redis | null = null;
@@ -92,15 +101,29 @@ function getRedis(): Redis | null {
   return redis;
 }
 
+// Process-local fallback so a Redis outage fails closed (per-instance) instead
+// of letting a valid 5-minute ticket be replayed to mint unlimited sessions.
+const seenJtis = new Map<string, number>();
+
 // Returns true when the jti was freshly reserved (single-use enforcement).
 async function reserveJti(jti: string, ttlSec: number): Promise<boolean> {
+  const now = Date.now();
+  for (const [k, exp] of seenJtis) {
+    if (exp <= now) seenJtis.delete(k);
+  }
   const c = getRedis();
-  if (!c) return true; // no Redis → expiry-only protection
+  if (!c) {
+    if (seenJtis.has(jti)) return false;
+    seenJtis.set(jti, now + ttlSec * 1000);
+    return true;
+  }
   try {
     await connecting;
     const res = await c.set(`2fa:jti:${jti}`, "1", "EX", ttlSec, "NX");
     return res === "OK";
   } catch {
+    if (seenJtis.has(jti)) return false;
+    seenJtis.set(jti, now + ttlSec * 1000);
     return true;
   }
 }
@@ -133,4 +156,5 @@ export async function verifyPreAuthToken(token: string, email: string): Promise<
 export function _resetTwoFaForTests() {
   redis = null;
   connecting = null;
+  seenJtis.clear();
 }

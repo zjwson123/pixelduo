@@ -1,6 +1,6 @@
 import bcrypt from "bcryptjs";
 import { z } from "zod";
-import { requireVerifiedUser, ok, fail } from "@/lib/api";
+import { requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { verifyTotp } from "@/lib/twofa";
 
@@ -11,9 +11,14 @@ const schema = z.object({
 
 // Disabling requires the account password + a live TOTP code (backup codes
 // intentionally not accepted so a stolen code can't disable 2FA).
+// Rate-limited per IP and per account: 6-digit TOTP has only ~1M combinations.
 export async function POST(req: Request) {
   try {
     const userId = await requireVerifiedUser();
+    const limited = await enforceRateLimit(req, "2fa-disable", 5, 60_000);
+    if (limited) return limited;
+    const userLimited = await enforceUserRateLimit(userId, "2fa-disable", 5, 60_000);
+    if (userLimited) return fail(userLimited);
     const body = schema.parse(await req.json());
     const user = await prisma.user.findUniqueOrThrow({
       where: { id: userId },

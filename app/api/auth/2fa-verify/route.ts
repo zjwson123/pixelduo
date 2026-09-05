@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { sessionUser, ApiError, ok, fail, enforceRateLimit } from "@/lib/api";
+import { sessionUser, ApiError, ok, fail, enforceRateLimit, enforceUserRateLimit } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { verifyTotp, useBackupCode, createPreAuthToken } from "@/lib/twofa";
 
@@ -19,6 +19,8 @@ export async function POST(req: Request) {
     if (limited) return limited;
     const su = await sessionUser();
     if (!su.totpPending) return fail(new ApiError(403, "2fa-required"));
+    const userLimited = await enforceUserRateLimit(su.id, "2fa-verify", 5, 60_000);
+    if (userLimited) return fail(userLimited);
     const body = schema.parse(await req.json());
     const user = await prisma.user.findUnique({
       where: { id: su.id },

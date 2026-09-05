@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { getLimiterName, checkRedis } from "@/lib/rate-limit";
+import { checkRedis } from "@/lib/rate-limit";
 import { getStorage } from "@/lib/storage";
 
 export const dynamic = "force-dynamic";
@@ -31,19 +31,19 @@ export async function GET() {
       ),
     ]);
     const ok = dbOk && redisOk && storageOk;
+    // Public body: reachability + queue liveness only. Backend internals
+    // (limiter implementation, uptime) are deliberately not exposed.
     return NextResponse.json({
       ok,
       service: "pixelduo",
       db: dbOk ? "up" : "down",
       redis: !process.env.REDIS_URL ? "unconfigured" : redisOk ? "up" : "down",
       storage: storageOk ? "up" : "down",
-      rateLimiter: getLimiterName(),
       queue: {
         queued: queue[0],
         running: queue[1],
         lastHeartbeat: queue[2]?.heartbeatAt ?? null,
       },
-      uptimeSec: Math.round(process.uptime()),
       time: new Date().toISOString(),
     });
   } catch (e) {

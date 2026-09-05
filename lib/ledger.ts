@@ -210,13 +210,20 @@ export async function fulfillOrder(
   tx?: Prisma.TransactionClient,
 ) {
   const run = async (client: Prisma.TransactionClient) => {
-    const order = await client.order.findUnique({ where: { id: orderId } });
-    if (!order) throw new Error("order-not-found");
-    if (order.status === "paid") return { alreadyPaid: true };
-    await client.order.update({
-      where: { id: orderId },
+    // Atomic claim: only the first fulfillment of a pending order wins, so two
+    // distinct signed events for the same order (or a retry racing the
+    // original) can never both pass the status check and grant credits twice.
+    // Claiming strictly from "pending" also blocks re-fulfillment after a
+    // refund flips the order to "refunded".
+    const claim = await client.order.updateMany({
+      where: { id: orderId, status: "pending" },
       data: { status: "paid", paidAt: new Date() },
     });
+    if (claim.count === 0) {
+      const order = await client.order.findUnique({ where: { id: orderId }, select: { id: true } });
+      if (!order) throw new Error("order-not-found");
+      return { alreadyPaid: true };
+    }
     if (kind === "plan" && planId) {
       const user = await client.user.findUnique({ where: { id: userId } });
       if (!user) throw new Error("user-not-found");

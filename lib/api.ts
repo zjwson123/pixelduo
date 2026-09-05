@@ -104,3 +104,15 @@ export async function enforceRateLimit(
   }
   return null;
 }
+
+// Per-account limit complementing the per-IP one: an attacker distributing
+// TOTP guesses across IPs must not dilute the limit for a single account.
+export async function enforceUserRateLimit(
+  userId: string,
+  scope: string,
+  limit: number,
+  windowMs: number,
+): Promise<ApiError | null> {
+  const r = await rateLimit(`u:${scope}:${userId}`, limit, windowMs);
+  return r.ok ? null : new ApiError(429, "rate-limited");
+}

@@ -1,6 +1,5 @@
-import { getServerSession } from "next-auth";
+import { requireUserId, ApiError } from "@/lib/api";
 import { NextResponse } from "next/server";
-import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { getStorage } from "@/lib/storage";
 
@@ -42,9 +41,15 @@ function sniffContentType(buf: Uint8Array): string {
 export async function GET(req: Request, { params }: { params: Promise<{ key: string[] }> }) {
   const { key: keyParts } = await params;
   const key = keyParts.join("/");
-  const session = await getServerSession(authOptions);
-  const uid = (session?.user as { id?: string } | undefined)?.id;
-  if (!uid) return new NextResponse("unauthorized", { status: 401 });
+  // requireUserId (not raw getServerSession) so a partial 2FA session or a
+  // stale JWT revoked via sessionVersion can't read files.
+  let uid: string;
+  try {
+    uid = await requireUserId();
+  } catch (e) {
+    if (e instanceof ApiError) return new NextResponse(e.message, { status: e.status });
+    throw e;
+  }
 
   // 1. User-owned generated image/video
   const image = await prisma.image.findFirst({ where: { userId: uid, url: key } });

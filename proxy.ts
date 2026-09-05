@@ -18,10 +18,11 @@ function hit(key: string, limit: number, windowMs: number): number | null {
 }
 
 export function proxy(req: NextRequest) {
-  const ip =
-    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
-    req.headers.get("x-real-ip") ??
-    "unknown";
+  // Last XFF entry = client IP appended by the trusted edge proxy; earlier
+  // entries are client-spoofable (see lib/rate-limit.ts clientIp).
+  const fwd = req.headers.get("x-forwarded-for");
+  const parts = fwd?.split(",").map((s) => s.trim()).filter(Boolean) ?? [];
+  const ip = parts[parts.length - 1] ?? req.headers.get("x-real-ip") ?? "unknown";
   const path = req.nextUrl.pathname;
   const isAuth = path.startsWith("/api/auth");
   // Auth is a coarse first line; per-account lockout (login-guard) is the

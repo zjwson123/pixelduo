@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { requireUserId, ok, fail, enforceRateLimit } from "@/lib/api";
+import { requireVerifiedUser, ok, fail, enforceRateLimit } from "@/lib/api";
 import { improvePrompt, ASSISTANT_MODELS } from "@/lib/assistant";
 
 const schema = z.object({
@@ -9,7 +9,9 @@ const schema = z.object({
 });
 export async function POST(req: Request) {
   try {
-    await requireUserId();
+    // Provider LLM calls cost real money — same verified-account gate as the
+    // generation routes (unverified accounts can't burn provider cost).
+    await requireVerifiedUser();
     const limited = await enforceRateLimit(req, "assistant", 30, 60_000);
     if (limited) return limited;
     const body = schema.parse(await req.json());
