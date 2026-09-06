@@ -17,6 +17,10 @@ interface AuthUser {
   totpPending?: boolean;
 }
 
+// Constant-work compare target for unknown emails: without it, "no such user"
+// returns faster than "wrong password", leaking account existence by timing.
+const DUMMY_HASH = bcrypt.hashSync(randomBytes(16).toString("hex"), 10);
+
 export const authOptions: NextAuthOptions = {
   session: { strategy: "jwt" },
   pages: { signIn: "/login" },
@@ -28,7 +32,10 @@ export const authOptions: NextAuthOptions = {
         if (!credentials?.email || !credentials?.password) return null;
         const email = credentials.email.toLowerCase().trim();
         const user = await prisma.user.findUnique({ where: { email } });
-        if (!user) return null;
+        if (!user) {
+          await bcrypt.compare(credentials.password, DUMMY_HASH);
+          return null;
+        }
         if (await isLoginBlocked(email)) return null;
         const ok = await bcrypt.compare(credentials.password, user.passwordHash);
         if (!ok) {

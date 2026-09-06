@@ -6,7 +6,8 @@ export async function GET(req: Request) {
   try {
     await requireAdmin();
     const url = new URL(req.url);
-    const page = Math.max(1, Number(url.searchParams.get("page") ?? 1));
+    // NaN-guard: garbage ?page= must fall back to 1, not produce skip: NaN.
+    const page = Math.max(1, Math.floor(Number(url.searchParams.get("page") ?? 1)) || 1);
     const take = 50;
     const [orders, total] = await Promise.all([
       prisma.order.findMany({

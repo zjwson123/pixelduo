@@ -105,8 +105,15 @@ async function hostIsPublic(hostname: string): Promise<boolean> {
   return true;
 }
 
-export async function saveRemoteImage(rawUrl: string): Promise<string> {
-  // SSRF guard: only allow http/https URLs pointing to public hosts.
+export interface FetchPublicOptions {
+  timeoutMs: number;
+  maxBytes: number;
+}
+
+// Hardened download of a provider-returned URL, shared by the image and video
+// paths: validates scheme and every DNS-resolved address, follows redirects
+// manually so each hop is re-validated, and caps the response size.
+export async function fetchPublicBuffer(rawUrl: string, opts: FetchPublicOptions): Promise<Buffer> {
   let parsed: URL;
   try {
     parsed = new URL(rawUrl);
@@ -116,12 +123,9 @@ export async function saveRemoteImage(rawUrl: string): Promise<string> {
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     throw new Error("invalid-url-scheme");
   }
-  // Timeout after 30s so a slow/hanging provider cannot stall the worker.
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 30_000);
+  const timer = setTimeout(() => controller.abort(), opts.timeoutMs);
   try {
-    // Follow redirects manually so every hop is re-validated — a 302 from the
-    // provider to an internal address must not be followed.
     let url = parsed;
     for (let hop = 0; hop < 6; hop++) {
       if (!(await hostIsPublic(url.hostname))) throw new Error("blocked-internal-url");
@@ -139,16 +143,21 @@ export async function saveRemoteImage(rawUrl: string): Promise<string> {
       }
       if (!res.ok) throw new Error(`download failed: ${res.status}`);
       const buf = Buffer.from(await res.arrayBuffer());
-      // Cap at 25 MB to avoid unbounded memory consumption.
-      if (buf.length > 25 * 1024 * 1024) throw new Error("image-too-large");
-      const key = newStorageKey("png");
-      await getStorage().put(key, buf, "image/png");
-      return key;
+      if (buf.length > opts.maxBytes) throw new Error("download-too-large");
+      return buf;
     }
     throw new Error("too-many-redirects");
   } finally {
     clearTimeout(timer);
   }
+}
+
+export async function saveRemoteImage(rawUrl: string): Promise<string> {
+  // 25 MB cap so a huge provider response cannot exhaust memory.
+  const buf = await fetchPublicBuffer(rawUrl, { timeoutMs: 30_000, maxBytes: 25 * 1024 * 1024 });
+  const key = newStorageKey("png");
+  await getStorage().put(key, buf, "image/png");
+  return key;
 }
 
 export function serveUrl(key: string): Promise<string> {

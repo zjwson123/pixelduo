@@ -3,7 +3,7 @@
 //            doubao-seedance, wan2.7-t2v/i2v [video, async task-based]
 
 import { getModelVerseKey, getArkKey, getArkBaseUrl, getAliyunKey, getAliyunBaseUrl } from "../keys";
-import { saveBase64Image, saveRemoteImage } from "../store";
+import { saveBase64Image, saveRemoteImage, fetchPublicBuffer } from "../store";
 import { getModel, type ModelInfo } from "../model-registry";
 import type { Quality } from "../cost";
 
@@ -453,20 +453,9 @@ async function pollWanVideoTask(taskId: string): Promise<VideoTaskStatus> {
   }
 }
 
-// Download a video from a URL and store it
-function isPublicHttpUrl(rawUrl: string): boolean {
-  try {
-    const parsed = new URL(rawUrl);
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
-    const h = parsed.hostname.toLowerCase();
-    if (h === "localhost" || h === "" || h.startsWith("127.") || h.startsWith("10.") ||
-        h.startsWith("192.168.") || h.startsWith("169.254.") || h.endsWith(".local") ||
-        h.endsWith(".internal") || /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(h) ||
-        h === "::1" || h.startsWith("fe80:") || h.startsWith("0.0.0.0")) return false;
-    return true;
-  } catch { return false; }
-}
-
+// Download a video from a provider-returned URL and store it. The SSRF guard
+// (scheme, IP-literal + DNS validation per hop, manual redirects, size cap)
+// lives in fetchPublicBuffer — identical hardening to saveRemoteImage.
 export async function saveRemoteVideo(url: string): Promise<string> {
   // Mock provider URLs (e2e/CI) — store a stub instead of fetching.
   if (url.startsWith("mock://")) {
@@ -475,20 +464,9 @@ export async function saveRemoteVideo(url: string): Promise<string> {
     await getStorage().put(key, Buffer.from("mock-video"), "video/mp4");
     return key;
   }
-  // SSRF guard: only download from public http(s) URLs returned by the provider.
-  if (!isPublicHttpUrl(url)) throw new Error("blocked-internal-url");
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 120_000);
-  try {
-    const res = await fetch(url, { signal: controller.signal });
-    if (!res.ok) throw new Error(`video download failed: ${res.status}`);
-    const buf = Buffer.from(await res.arrayBuffer());
-    if (buf.length > 100 * 1024 * 1024) throw new Error("video-too-large");
-    const { getStorage, newStorageKey } = await import("../storage");
-    const key = newStorageKey("mp4");
-    await getStorage().put(key, buf, "video/mp4");
-    return key;
-  } finally {
-    clearTimeout(timer);
-  }
+  const buf = await fetchPublicBuffer(url, { timeoutMs: 120_000, maxBytes: 100 * 1024 * 1024 });
+  const { getStorage, newStorageKey } = await import("../storage");
+  const key = newStorageKey("mp4");
+  await getStorage().put(key, buf, "video/mp4");
+  return key;
 }

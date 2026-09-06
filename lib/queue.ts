@@ -48,13 +48,21 @@ async function enforceInflightCap(tx: Prisma.TransactionClient, userId: string) 
   }
 }
 
+// Client-supplied keys are namespaced by owner before use: Job.idempotencyKey
+// is globally unique, so an un-namespaced key would let user B retrieve user
+// A's job (id/status/cost) by submitting A's key.
+function scopedIdempotencyKey(userId: string, key?: string): string | null {
+  return key ? `${userId}:${key}` : null;
+}
+
 // Legacy: create generation job (backward compat with old API)
 export async function createGenerationJob(input: CreateJobInput) {
   const cost = estimateGenerationCost(input.model, input.quality, input.count);
+  const idemKey = scopedIdempotencyKey(input.userId, input.idempotencyKey);
   return prisma.$transaction(async (tx) => {
     await enforceInflightCap(tx, input.userId);
-    if (input.idempotencyKey) {
-      const existing = await tx.job.findUnique({ where: { idempotencyKey: input.idempotencyKey } });
+    if (idemKey) {
+      const existing = await tx.job.findUnique({ where: { idempotencyKey: idemKey } });
       if (existing) return { job: existing, created: false };
     }
     const job = await tx.job.create({
@@ -67,7 +75,7 @@ export async function createGenerationJob(input: CreateJobInput) {
         prompt: input.prompt,
         costCredits: cost.totalCredits,
         images: "[]",
-        idempotencyKey: input.idempotencyKey ?? null,
+        idempotencyKey: idemKey,
         maxAttempts: input.maxAttempts ?? 3,
       },
     });
@@ -90,10 +98,11 @@ export async function createGenerationJob(input: CreateJobInput) {
 // New: create media job (supports all models including video and edit)
 export async function createMediaJob(input: CreateMediaJobInput) {
   const cost = estimateModelCost(input.model, input.count, input.quality, input.durationSec ?? 5);
+  const idemKey = scopedIdempotencyKey(input.userId, input.idempotencyKey);
   return prisma.$transaction(async (tx) => {
     await enforceInflightCap(tx, input.userId);
-    if (input.idempotencyKey) {
-      const existing = await tx.job.findUnique({ where: { idempotencyKey: input.idempotencyKey } });
+    if (idemKey) {
+      const existing = await tx.job.findUnique({ where: { idempotencyKey: idemKey } });
       if (existing) return { job: existing, created: false };
     }
     const job = await tx.job.create({
@@ -106,7 +115,7 @@ export async function createMediaJob(input: CreateMediaJobInput) {
         prompt: input.prompt,
         costCredits: cost.credits,
         images: "[]",
-        idempotencyKey: input.idempotencyKey ?? null,
+        idempotencyKey: idemKey,
         maxAttempts: input.maxAttempts ?? 3,
         durationSec: input.durationSec,
         refImageKey: input.refImageKey,

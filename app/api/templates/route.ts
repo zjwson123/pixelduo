@@ -18,8 +18,9 @@ export async function GET(req: Request) {
   const cat = url.searchParams.get("cat"); // category label (Chinese short)
   const q = url.searchParams.get("q"); // free-text search on title + prompt
   const featured = url.searchParams.get("featured") === "1";
-  const page = Math.max(1, parseInt(url.searchParams.get("page") ?? "1", 10));
-  const pageSize = Math.min(60, Math.max(1, parseInt(url.searchParams.get("pageSize") ?? "30", 10)));
+  // `|| 1` NaN-guard: garbage ?page= must fall back to 1, not skip: NaN.
+  const page = Math.max(1, parseInt(url.searchParams.get("page") ?? "1", 10) || 1);
+  const pageSize = Math.min(60, Math.max(1, parseInt(url.searchParams.get("pageSize") ?? "30", 10) || 1));
 
   const where: Prisma.TemplateWhereInput = {};
   if (cat && cat !== "全部") where.cat = cat;

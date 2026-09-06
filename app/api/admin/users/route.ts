@@ -7,7 +7,8 @@ export async function GET(req: Request) {
     await requireAdmin();
     const url = new URL(req.url);
     const q = (url.searchParams.get("q") ?? "").trim().toLowerCase();
-    const page = Math.max(1, Number(url.searchParams.get("page") ?? 1));
+    // NaN-guard: garbage ?page= must fall back to 1, not produce skip: NaN.
+    const page = Math.max(1, Math.floor(Number(url.searchParams.get("page") ?? 1)) || 1);
     const take = 20;
     const where = q
       ? { OR: [{ email: { contains: q, mode: "insensitive" as const } }, { name: { contains: q, mode: "insensitive" as const } }] }

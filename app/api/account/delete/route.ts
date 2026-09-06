@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { requireUserId, ok, fail } from "@/lib/api";
+import { requireUserId, ok, fail, enforceRateLimit, enforceUserRateLimit } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { getStorage } from "@/lib/storage";
 import { verifyTotp, useBackupCode } from "@/lib/twofa";
@@ -20,6 +20,12 @@ const schema = z
 export async function POST(req: Request) {
   try {
     const userId = await requireUserId();
+    // Re-auth brute force (password + TOTP/backup-code guesses) gets the same
+    // per-IP + per-account limits as the dedicated 2FA endpoints.
+    const limited = await enforceRateLimit(req, "account-delete", 5, 60_000);
+    if (limited) return limited;
+    const userLimited = await enforceUserRateLimit(userId, "account-delete", 5, 60_000);
+    if (userLimited) return fail(userLimited);
     const body = schema.parse(await req.json());
     const user = await prisma.user.findUniqueOrThrow({
       where: { id: userId },

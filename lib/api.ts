@@ -48,37 +48,49 @@ export function ok(data: unknown, init?: ResponseInit) {
   return NextResponse.json({ ok: true, ...(data as object) }, init);
 }
 
-export function fail(error: unknown) {
-  if (error instanceof ApiError) {
-    return NextResponse.json({ ok: false, error: error.message }, { status: error.status });
-  }
-  const msg = error instanceof Error ? error.message : "internal-error";
-  // Expected business errors are not incidents; capture only unexpected 500s.
-  const expected =
+// HTTP status for an expected business error, classified from its message.
+// Returns null for unexpected errors — those are masked as a generic 500.
+function expectedStatus(msg: string): number | null {
+  if (
     msg.startsWith("invalid-") ||
     msg.startsWith("blocked:") ||
-    msg.startsWith("queue-full:") ||
     msg.startsWith("unknown-model:") ||
     msg.startsWith("model-disabled:") ||
     msg.startsWith("not-a-video-model:") ||
     msg.startsWith("video-timeout:") ||
-    msg.startsWith("image-flagged:") ||
-    msg.includes("insufficient") ||
-    msg.includes("already") ||
-    msg.includes("not-found") ||
-    msg.includes("verify-email-required") ||
-    msg.includes("2fa-required") ||
-    msg.includes("2fa-not-enabled") ||
-    msg.includes("admin-required") ||
-    msg.includes("invalid-password") ||
-    msg.includes("rate-limited") ||
-    msg.includes("unauthorized");
-  if (!expected) {
+    msg.startsWith("image-flagged:")
+  ) {
+    return 400;
+  }
+  if (msg.startsWith("queue-full:") || msg.includes("rate-limited")) return 429;
+  if (msg.includes("unauthorized")) return 401;
+  if (msg.includes("2fa-required") || msg.includes("admin-required") || msg.includes("verify-email-required")) {
+    return 403;
+  }
+  if (msg.includes("2fa-not-enabled") || msg.includes("invalid-password") || msg.includes("invalid-code")) return 400;
+  if (msg.includes("not-found")) return 404;
+  if (msg.includes("already")) return 409;
+  if (msg.includes("insufficient")) return 400;
+  return null;
+}
+
+export function fail(error: unknown) {
+  if (error instanceof ApiError) {
+    return NextResponse.json({ ok: false, error: error.message }, { status: error.status });
+  }
+  // A malformed JSON body is a client error, not an incident.
+  if (error instanceof SyntaxError) {
+    return NextResponse.json({ ok: false, error: "invalid-json" }, { status: 400 });
+  }
+  const msg = error instanceof Error ? error.message : "internal-error";
+  // Expected business errors are not incidents; capture only unexpected 500s.
+  const status = expectedStatus(msg);
+  if (status === null) {
     captureError(error, { error: msg });
     // Do not leak internal error details to API clients.
     return NextResponse.json({ ok: false, error: "internal-error" }, { status: 500 });
   }
-  return NextResponse.json({ ok: false, error: msg }, { status: 500 });
+  return NextResponse.json({ ok: false, error: msg }, { status });
 }
 
 // Route-level limit keyed by IP + scope. Returns 429 response when exceeded.
