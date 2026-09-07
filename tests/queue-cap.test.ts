@@ -63,4 +63,34 @@ describe("per-user in-flight job cap", () => {
       data: { status: "failed", attempts: 3, finishedAt: new Date() },
     });
   });
+
+  it("concurrent submissions cannot exceed the cap (per-user advisory lock)", async () => {
+    const mk = (prompt: string) =>
+      createMediaJob({
+        userId,
+        model: "seedream",
+        mediaType: "image",
+        quality: "standard",
+        count: 1,
+        prompt,
+      });
+    // Ten parallel submissions from an empty queue: count-then-create alone
+    // lets more than MAX through; the advisory lock must serialize them.
+    const results = await Promise.allSettled(
+      Array.from({ length: 10 }, (_, i) => mk(`cap race ${i}`)),
+    );
+    const created = results.filter((r) => r.status === "fulfilled");
+    const rejected = results.filter((r) => r.status === "rejected");
+    expect(created).toHaveLength(MAX_INFLIGHT_JOBS);
+    expect(rejected).toHaveLength(10 - MAX_INFLIGHT_JOBS);
+    for (const r of rejected) {
+      const reason = (r as PromiseRejectedResult).reason;
+      expect(reason).toBeInstanceOf(Error);
+      expect((reason as Error).message).toMatch(/queue-full/);
+    }
+    await prisma.job.updateMany({
+      where: { userId, status: { in: ["queued", "running", "polling"] } },
+      data: { status: "failed", attempts: 3, finishedAt: new Date() },
+    });
+  });
 });

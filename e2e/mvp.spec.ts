@@ -106,5 +106,5 @@ test("health endpoint reports ok", async ({ request }) => {
   expect(body.db).toBe("up");
   expect(body.redis).toBe("up");
   expect(body.storage).toBe("up");
-  expect(typeof body.queue.queued).toBe("number");
+  expect(typeof body.queue.active).toBe("boolean");
 });

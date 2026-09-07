@@ -96,9 +96,16 @@ export const authOptions: NextAuthOptions = {
     // OAuth: find-or-create the local account (providers verify the email).
     // Users with 2FA enabled must keep using password login — otherwise OAuth
     // would silently bypass the second factor.
-    async signIn({ user, account }) {
+    async signIn({ user, account, profile }) {
       if (account?.type !== "oauth") return true;
-      const dbUser = await ensureOAuthUser(user.email ?? "", user.name ?? "");
+      // Forward the provider's own email_verified claim so an explicitly
+      // unverified address can never auto-verify a local account.
+      const claim = (profile as { email_verified?: unknown } | undefined)?.email_verified;
+      const dbUser = await ensureOAuthUser(
+        user.email ?? "",
+        user.name ?? "",
+        typeof claim === "boolean" ? claim : null,
+      );
       if (!dbUser) return false;
       if (dbUser.totpEnabled) return false;
       return true;
@@ -139,9 +146,15 @@ export const authOptions: NextAuthOptions = {
 export async function ensureOAuthUser(
   email: string,
   name: string,
+  providerEmailVerified?: boolean | null,
 ): Promise<{ id: string; totpEnabled: boolean } | null> {
   const e = email.toLowerCase().trim();
   if (!e) return null;
+  // A provider that explicitly reports the address as unverified must not be
+  // allowed to claim (and auto-verify) a pending local registration — that is
+  // an account-takeover path. Claim absent (null) keeps prior behavior: the
+  // configured providers (Google/GitHub) only hand out verified primaries.
+  if (providerEmailVerified === false) return null;
   let user = await prisma.user.findUnique({ where: { email: e } });
   if (!user) {
     user = await prisma.user.create({

@@ -28,4 +28,17 @@ describe("OAuth account provisioning", () => {
   it("rejects missing emails", async () => {
     expect(await ensureOAuthUser("", "No Email")).toBeNull();
   });
+
+  it("rejects a provider-reported unverified email without creating an account", async () => {
+    const email = `oauth-unv-${Date.now()}@test.dev`;
+    expect(await ensureOAuthUser(email, "Unverified Claim", false)).toBeNull();
+    expect(await prisma.user.findUnique({ where: { email } })).toBeNull();
+  });
+
+  it("accepts an explicitly verified provider email", async () => {
+    const email = `oauth-ver-${Date.now()}@test.dev`;
+    expect(await ensureOAuthUser(email, "Verified Claim", true)).not.toBeNull();
+    const db = await prisma.user.findUniqueOrThrow({ where: { email } });
+    expect(db.emailVerified).not.toBeNull();
+  });
 });

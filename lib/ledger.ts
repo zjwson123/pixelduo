@@ -47,11 +47,25 @@ export async function addCreditsTx(
   refId?: string | null,
   note?: string | null,
 ) {
-  const user = await tx.user.findUnique({ where: { id: userId } });
-  if (!user) throw new Error("user-not-found");
-  const balanceAfter = user.credits + delta;
+  // Atomic DB-side increment. A read-modify-write here loses updates whenever
+  // a grant (checkin/webhook/refund) races a concurrent spend that doesn't
+  // hold the grant locks — the last writer's absolute overwrite would erase
+  // the other's delta and break credits == SUM(remaining). update() returns
+  // the post-write row, which is the correct balanceAfter under concurrency.
+  let user: { credits: number };
+  try {
+    user = await tx.user.update({
+      where: { id: userId },
+      data: { credits: { increment: delta } },
+    });
+  } catch (e) {
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2025") {
+      throw new Error("user-not-found");
+    }
+    throw e;
+  }
+  const balanceAfter = user.credits;
   if (balanceAfter < 0) throw new Error("insufficient-credits");
-  await tx.user.update({ where: { id: userId }, data: { credits: balanceAfter } });
   return tx.ledgerEntry.create({
     data: { userId, type, creditsDelta: delta, balanceAfter, refType, refId, note },
   });

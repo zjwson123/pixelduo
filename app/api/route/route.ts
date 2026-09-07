@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { requireUserId, ok, fail, enforceRateLimit } from "@/lib/api";
+import { requireVerifiedUser, ok, fail, enforceRateLimit } from "@/lib/api";
 import { routePrompt } from "@/lib/router";
 
 const schema = z.object({
@@ -8,7 +8,9 @@ const schema = z.object({
 
 export async function POST(req: Request) {
   try {
-    await requireUserId();
+    // /api/assistant (the sibling LLM endpoint) requires a verified account —
+    // so must this one, or throwaway unverified accounts burn LLM spend.
+    await requireVerifiedUser();
     const limited = await enforceRateLimit(req, "route", 30, 60_000);
     if (limited) return limited;
     const body = schema.parse(await req.json());

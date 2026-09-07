@@ -24,9 +24,11 @@ const schema = z.object({
 export async function POST(req: Request) {
   try {
     const userId = await requireVerifiedUser();
-    const body = schema.parse(await req.json());
+    // Rate limit before parsing the body: req.json() buffers the whole
+    // request (base64 images make edit bodies the largest surface).
     const limited = await enforceRateLimit(req, "edit", 15, 60_000);
     if (limited) return limited;
+    const body = schema.parse(await req.json());
     const safety = checkPrompt(body.prompt);
     if (!safety.ok) return fail(new Error(`blocked:${safety.reason}`));
 

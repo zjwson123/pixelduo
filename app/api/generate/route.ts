@@ -17,9 +17,11 @@ const schema = z.object({
 export async function POST(req: Request) {
   try {
     const userId = await requireVerifiedUser();
-    const body = schema.parse(await req.json());
+    // Rate limit before parsing the body: req.json() buffers the whole
+    // request, so an unthrottled parse is a memory-exhaustion vector.
     const limited = await enforceRateLimit(req, "generate", 20, 60_000);
     if (limited) return limited;
+    const body = schema.parse(await req.json());
     const safety = checkPrompt(body.prompt);
     if (!safety.ok) return fail(new Error(`blocked:${safety.reason}`));
     const key = body.idempotencyKey || `${userId}:${randomUUID()}`;

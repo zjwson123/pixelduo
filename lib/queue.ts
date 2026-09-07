@@ -40,6 +40,11 @@ export interface JobImage {
 export const MAX_INFLIGHT_JOBS = 5;
 
 async function enforceInflightCap(tx: Prisma.TransactionClient, userId: string) {
+  // Serialize concurrent job creations per user: count-then-create alone is a
+  // TOCTOU — two parallel submissions can both pass the count check and exceed
+  // the cap. The transaction-scoped advisory lock is always taken before the
+  // grant locks below, so no lock-order cycle is possible.
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${userId}))`;
   const inflight = await tx.job.count({
     where: { userId, status: { in: ["queued", "running", "polling"] } },
   });
