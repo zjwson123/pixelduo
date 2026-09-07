@@ -82,6 +82,10 @@ jobs:
       NEXTAUTH_SECRET: ci-secret
       REDIS_URL: redis://localhost:6379
       MOCK_IMAGE_PROVIDER: "1"
+      # `next start` runs a production build, so the mock payment provider
+      # refuses to load without this opt-in (lib/payments/index.ts) and every
+      # checkout-driven e2e fails with internal-error. Mirrors ci-local.sh.
+      PAYMENT_ALLOW_MOCK: "1"
       EMAIL_VERIFY_AUTO: "1"
       MIDDLEWARE_AUTH_LIMIT: "1000"
       MIDDLEWARE_API_LIMIT: "10000"
