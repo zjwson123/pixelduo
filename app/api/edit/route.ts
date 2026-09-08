@@ -40,22 +40,36 @@ export async function POST(req: Request) {
       return match ? match[1] : img;
     });
 
-    // Store the primary reference image
+    // Store the primary reference image. The write happens BEFORE job creation
+    // (the job row must not reference a file that may not exist yet), so any
+    // path that doesn't hand the key to a job must delete it — otherwise a
+    // zero-credit account fills storage at the route rate limit for free.
     const refKey = newStorageKey("png");
-    await getStorage().put(refKey, Buffer.from(cleanedImages[0], "base64"), "image/png");
-
-    const key = body.idempotencyKey || `${userId}:edit:${randomUUID()}`;
-    const { job, created } = await createMediaJob({
-      userId,
-      model: body.model,
-      mediaType: "image",
-      quality: body.quality,
-      count: 1,
-      prompt: body.prompt.trim(),
-      idempotencyKey: key,
-      refImageKey: refKey,
-    });
-    return ok({ jobId: job.id, status: job.status, costCredits: job.costCredits, duplicate: !created });
+    const storage = getStorage();
+    let result: Awaited<ReturnType<typeof createMediaJob>>;
+    try {
+      await storage.put(refKey, Buffer.from(cleanedImages[0], "base64"), "image/png");
+      const key = body.idempotencyKey || `${userId}:edit:${randomUUID()}`;
+      result = await createMediaJob({
+        userId,
+        model: body.model,
+        mediaType: "image",
+        quality: body.quality,
+        count: 1,
+        prompt: body.prompt.trim(),
+        idempotencyKey: key,
+        refImageKey: refKey,
+      });
+    } catch (e) {
+      await storage.delete(refKey).catch(() => undefined);
+      throw e;
+    }
+    if (!result.created) {
+      // Idempotent replay returns the ORIGINAL job (with its own ref image);
+      // the fresh upload is an orphan — clean it up.
+      await storage.delete(refKey).catch(() => undefined);
+    }
+    return ok({ jobId: result.job.id, status: result.job.status, costCredits: result.job.costCredits, duplicate: !result.created });
   } catch (e) {
     if (e instanceof z.ZodError) return fail(new Error("invalid-input"));
     return fail(e);

@@ -15,6 +15,20 @@ import path from "path";
 import { PrismaClient } from "@prisma/client";
 import { getStorage, newStorageKey } from "../lib/storage";
 
+// Template sourceUrl is rendered as an href to every logged-in user: only
+// accept plain https URLs so a poisoned upstream repo can't store a
+// javascript:/data: link (stored XSS).
+function safeSourceUrl(u: unknown): string | null {
+  if (typeof u !== "string") return null;
+  try {
+    const parsed = new URL(u);
+    return parsed.protocol === "https:" ? parsed.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+
 const prisma = new PrismaClient();
 const RAW_BASE = "https://raw.githubusercontent.com/freestylefly/awesome-gpt-image-2/main/data/images";
 // Local clone path — if the repo is cloned nearby, read images from disk
@@ -137,7 +151,7 @@ async function main() {
           cat: CAT_ZH[c.category] ?? c.category,
           title: c.title,
           prompt: c.prompt,
-          sourceUrl: c.sourceUrl ?? null,
+          sourceUrl: safeSourceUrl(c.sourceUrl),
           tags: { styles: c.styles, scenes: c.scenes, category: c.category } as object,
           featured: c.featured,
           credits,
@@ -172,7 +186,7 @@ async function main() {
         quality,
         credits,
         img: imgKey,
-        sourceUrl: c.sourceUrl ?? null,
+        sourceUrl: safeSourceUrl(c.sourceUrl),
         tags: { styles: c.styles, scenes: c.scenes, category: c.category } as object,
         featured: c.featured,
       },
@@ -184,7 +198,7 @@ async function main() {
         quality,
         credits,
         img: imgKey,
-        sourceUrl: c.sourceUrl ?? null,
+        sourceUrl: safeSourceUrl(c.sourceUrl),
         tags: { styles: c.styles, scenes: c.scenes, category: c.category } as object,
         featured: c.featured,
       },

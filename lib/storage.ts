@@ -1,4 +1,5 @@
 import fs from "fs";
+import fsp from "fs/promises";
 import path from "path";
 import { randomUUID } from "crypto";
 import {
@@ -44,8 +45,10 @@ class LocalStorage implements StorageDriver {
   }
 
   async get(key: string): Promise<Buffer | null> {
+    // Async read: a synchronous readFileSync of a large video blocks the
+    // event loop for every concurrent request in the process.
     try {
-      return fs.readFileSync(this.p(key));
+      return await fsp.readFile(this.p(key));
     } catch {
       return null;
     }

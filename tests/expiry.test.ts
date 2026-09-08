@@ -99,6 +99,25 @@ describe("credit grants & expiry", () => {
     expect(entry?.balanceAfter).toBe(before - 500);
   });
 
+  it("expired credits are unspendable even before the sweep runs", async () => {
+    // The daily sweep is bookkeeping; spendability must end at expiresAt.
+    const before = await balance();
+    // Drain every unexpired grant first…
+    await prisma.$transaction((tx) =>
+      spendCreditsTx(tx, userId, before, "job", "j-drain", "drain unexpired"),
+    );
+    // …so the balance below comes ONLY from an expired grant.
+    const past = new Date(Date.now() - 1000);
+    await prisma.$transaction((tx) => grantCreditsTx(tx, userId, "PURCHASE", 777, past));
+    expect(await balance()).toBe(777);
+    await expect(
+      prisma.$transaction((tx) => spendCreditsTx(tx, userId, 1, "job", "j-exp", "expired spend")),
+    ).rejects.toThrow("insufficient-credits");
+    // Sweep the expired grant so the final assertions below see balance 0.
+    await runExpiry();
+    expect(await balance()).toBe(0);
+  });
+
   it("spend with insufficient credits fails atomically", async () => {
     const before = await balance();
     await expect(

@@ -35,6 +35,19 @@ describe("OAuth account provisioning", () => {
     expect(await prisma.user.findUnique({ where: { email } })).toBeNull();
   });
 
+  it("refuses to claim an unverified password-registered account (pre-hijacking)", async () => {
+    // Simulate POST /api/register with a victim address the attacker doesn't
+    // own (no verification ever completed): OAuth sign-in for that address
+    // must NOT link into — and auto-verify — that account.
+    const email = `oauth-prehijack-${Date.now()}@test.dev`;
+    await prisma.user.create({
+      data: { email, passwordHash: "attacker-hash", name: "Attacker Pre-Reg" },
+    });
+    expect(await ensureOAuthUser(email, "Victim OAuth")).toBeNull();
+    const db = await prisma.user.findUniqueOrThrow({ where: { email } });
+    expect(db.emailVerified).toBeNull(); // not auto-verified by the attempt
+  });
+
   it("accepts an explicitly verified provider email", async () => {
     const email = `oauth-ver-${Date.now()}@test.dev`;
     expect(await ensureOAuthUser(email, "Verified Claim", true)).not.toBeNull();

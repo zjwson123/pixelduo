@@ -10,11 +10,25 @@ function hit(key: string, limit: number, windowMs: number): number | null {
   const arr = (buckets.get(key) ?? []).filter((t) => now - t < windowMs);
   if (arr.length >= limit) {
     buckets.set(key, arr);
+    sweep(now);
     return Math.max(1, Math.ceil((arr[0] + windowMs - now) / 1000));
   }
   arr.push(now);
   buckets.set(key, arr);
+  sweep(now);
   return null;
+}
+
+// The map only shrinks on hit — an attacker spraying unique spoofed XFF
+// entries (when deployed without the trusted edge proxy) would otherwise
+// grow it without bound. Periodically drop empty/expired keys.
+let lastSweep = 0;
+function sweep(now: number) {
+  if (now - lastSweep < 60_000 || buckets.size < 10_000) return;
+  lastSweep = now;
+  for (const [k, ts] of buckets) {
+    if (!ts.length || now - ts[ts.length - 1] > 60_000) buckets.delete(k);
+  }
 }
 
 export function proxy(req: NextRequest) {

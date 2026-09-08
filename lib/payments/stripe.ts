@@ -14,6 +14,11 @@ export class StripeProvider implements PaymentProvider {
     if (!opts?.stripe && !key) {
       throw new Error("STRIPE_SECRET_KEY is required when PAYMENT_PROVIDER=stripe");
     }
+    // A test-mode key in production would let test-card payments (4242…)
+    // fulfill real credits through genuinely signed webhooks — fail closed.
+    if (process.env.NODE_ENV === "production" && !opts?.stripe && key && !key.startsWith("sk_live_")) {
+      throw new Error("STRIPE_SECRET_KEY must be a live-mode key (sk_live_…) when NODE_ENV=production");
+    }
     this.webhookSecret = opts?.webhookSecret ?? process.env.STRIPE_WEBHOOK_SECRET ?? "";
     this.stripe = opts?.stripe ?? new Stripe(key as string);
   }
@@ -49,13 +54,23 @@ export class StripeProvider implements PaymentProvider {
       const obj = event.data.object as Stripe.Checkout.Session & {
         metadata?: Record<string, string>;
         payment_intent?: string;
+        // charge.refunded object shape
+        amount_refunded?: number;
+        amount?: number;
       };
       let orderId = obj?.client_reference_id ?? obj?.metadata?.orderId;
       let type: "paid" | "refunded" | null = null;
+      let fullRefund: boolean | undefined;
       if (event.type === "checkout.session.completed" && obj?.payment_status === "paid") type = "paid";
       if (event.type === "charge.refunded") {
         type = "refunded";
         orderId = orderId ?? obj?.metadata?.orderId;
+        // amount_refunded is cumulative; equal (or beyond) the charge amount
+        // means the payment is now fully refunded.
+        fullRefund =
+          typeof obj.amount_refunded === "number" && typeof obj.amount === "number"
+            ? obj.amount_refunded >= obj.amount
+            : true;
       }
       if (!type) return null;
       return {
@@ -63,6 +78,7 @@ export class StripeProvider implements PaymentProvider {
         eventId: event.id,
         type,
         orderId,
+        fullRefund,
         // Refund webhooks reference the payment intent, not our session id —
         // store the PI id so refunds can resolve the order via providerOrderId.
         providerOrderId: typeof obj?.payment_intent === "string" ? obj.payment_intent : undefined,

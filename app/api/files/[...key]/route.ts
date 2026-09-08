@@ -1,4 +1,5 @@
 import { requireUserId, ApiError } from "@/lib/api";
+import { authenticateApiKey } from "@/lib/apikey";
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getStorage } from "@/lib/storage";
@@ -42,13 +43,19 @@ export async function GET(req: Request, { params }: { params: Promise<{ key: str
   const { key: keyParts } = await params;
   const key = keyParts.join("/");
   // requireUserId (not raw getServerSession) so a partial 2FA session or a
-  // stale JWT revoked via sessionVersion can't read files.
+  // stale JWT revoked via sessionVersion can't read files. Bearer API keys
+  // authenticate too — v1 API responses under the local storage driver hand
+  // out /api/files URLs, which machine clients (no cookies) otherwise can't
+  // fetch; ownership scoping below applies identically to either credential.
   let uid: string;
   try {
     uid = await requireUserId();
   } catch (e) {
-    if (e instanceof ApiError) return new NextResponse(e.message, { status: e.status });
-    throw e;
+    if (!(e instanceof ApiError)) throw e;
+    const apiKey = await authenticateApiKey(req);
+    if (!apiKey) return new NextResponse(e.message, { status: e.status });
+    if (!apiKey.emailVerified) return new NextResponse("email not verified", { status: 403 });
+    uid = apiKey.userId;
   }
 
   // 1. User-owned generated image/video

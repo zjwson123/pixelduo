@@ -3,9 +3,41 @@ import { lookup as dnsLookup } from "dns/promises";
 import { getStorage, newStorageKey } from "./storage";
 
 export async function saveBase64Image(base64: string, ext = "png"): Promise<string> {
+  // Reject before decoding: a hostile provider response must not allocate a
+  // decoded buffer before any cap exists. 40 MB of base64 ≈ 30 MB decoded —
+  // comfortably above any real image, below memory-exhaustion territory.
+  if (base64.length > 40 * 1024 * 1024) throw new Error("image-too-large");
   const key = newStorageKey(ext);
   await getStorage().put(key, Buffer.from(base64, "base64"), `image/${ext}`);
   return key;
+}
+
+// Read a response body, aborting the moment the running total exceeds
+// maxBytes. Buffering via res.arrayBuffer()/res.text() would download the
+// complete body first — the cap would only fire after the heap spike it is
+// meant to prevent.
+export async function readBodyCapped(res: Response, maxBytes: number): Promise<Buffer> {
+  const declared = Number(res.headers.get("content-length") ?? NaN);
+  if (Number.isFinite(declared) && declared > maxBytes) throw new Error("download-too-large");
+  if (!res.body) {
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length > maxBytes) throw new Error("download-too-large");
+    return buf;
+  }
+  const reader = res.body.getReader();
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      throw new Error("download-too-large");
+    }
+    chunks.push(Buffer.from(value));
+  }
+  return Buffer.concat(chunks);
 }
 
 // ---- SSRF guard ----------------------------------------------------------
@@ -82,7 +114,10 @@ function ipv6Private(host: string): boolean {
   return false;
 }
 
-async function hostIsPublic(hostname: string): Promise<boolean> {
+// Canonical SSRF host check (shared by fetchPublicBuffer and any other
+// outbound fetch of a configurable URL): hostname string checks, inet_aton
+// literal decoding, IPv6 forms, and full DNS resolution.
+export async function hostIsPublic(hostname: string): Promise<boolean> {
   const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
   if (!host) return false;
   if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal")) {
@@ -142,9 +177,7 @@ export async function fetchPublicBuffer(rawUrl: string, opts: FetchPublicOptions
         continue;
       }
       if (!res.ok) throw new Error(`download failed: ${res.status}`);
-      const buf = Buffer.from(await res.arrayBuffer());
-      if (buf.length > opts.maxBytes) throw new Error("download-too-large");
-      return buf;
+      return await readBodyCapped(res, opts.maxBytes);
     }
     throw new Error("too-many-redirects");
   } finally {

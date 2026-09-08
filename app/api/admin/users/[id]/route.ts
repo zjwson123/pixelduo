@@ -9,9 +9,16 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
   try {
     const adminId = await requireAdmin();
     if (id === adminId) return fail(new Error("cannot-delete-self"));
+    // Generated outputs AND user-uploaded reference images (Job.refImageKey)
+    // — mirrors the self-service erasure route.
     const images = await prisma.image.findMany({ where: { userId: id }, select: { url: true } });
+    const jobs = await prisma.job.findMany({ where: { userId: id }, select: { refImageKey: true } });
+    const refKeys = jobs.map((j) => j.refImageKey).filter((k): k is string => Boolean(k));
     const storage = getStorage();
-    await Promise.allSettled(images.map((i) => storage.delete(i.url)));
+    await Promise.allSettled([
+      ...images.map((i) => storage.delete(i.url)),
+      ...refKeys.map((k) => storage.delete(k)),
+    ]);
     await prisma.$transaction([
       prisma.backupCode.deleteMany({ where: { userId: id } }),
       prisma.verificationToken.deleteMany({ where: { userId: id } }),

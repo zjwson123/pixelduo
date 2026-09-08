@@ -116,7 +116,9 @@ export async function cycleUsage(userId: string, cycleStart: Date): Promise<Cycl
 }
 
 // Spend credits FIFO: free sources first, then earliest expiry (null last).
-// Rows are locked FOR UPDATE so concurrent spends cannot overspend.
+// Rows are locked FOR UPDATE so concurrent spends cannot overspend. Expired
+// grants are excluded here too — the daily sweep is the bookkeeping pass, but
+// spendability must end at expiresAt itself, not up to a day later.
 export async function spendCreditsTx(
   tx: Prisma.TransactionClient,
   userId: string,
@@ -129,6 +131,7 @@ export async function spendCreditsTx(
   const rows = await tx.$queryRaw<Array<{ id: string; remaining: number }>>(
     Prisma.sql`SELECT id, remaining FROM "CreditGrant"
       WHERE "userId" = ${userId} AND remaining > 0
+        AND ("expiresAt" IS NULL OR "expiresAt" > now())
       ORDER BY CASE WHEN source IN ('SIGNUP_BONUS', 'CHECKIN') THEN 0 ELSE 1 END,
                "expiresAt" ASC NULLS LAST, "createdAt" ASC
       FOR UPDATE`,
@@ -284,22 +287,27 @@ export async function fulfillOrder(
 
 // Revoke the credits granted by a specific order when the payment is refunded.
 // Only the unspent remainder is revoked; credits already consumed by jobs stay
-// spent (a refund can't undo usage). The invariant
-// User.credits == SUM(CreditGrant.remaining) guarantees the balance can cover it.
+// spent (a refund can't undo usage). Grants are locked FOR UPDATE (same as
+// spendCreditsTx) so a revoke racing a spend sums the post-spend remaining —
+// an unlocked read would deduct a stale, larger amount from user credits and
+// break credits == SUM(remaining) downward. Callers must have flipped the
+// order to "refunded" via a status CAS first, so two distinct refund events
+// cannot both reach this code.
 export async function revokeOrderCreditsTx(
   tx: Prisma.TransactionClient,
   order: { id: string; userId: string },
 ): Promise<number> {
-  const grants = await tx.creditGrant.findMany({
-    where: { refId: order.id, remaining: { gt: 0 } },
-    select: { id: true, remaining: true },
-  });
+  const grants = await tx.$queryRaw<Array<{ id: string; remaining: number }>>(
+    Prisma.sql`SELECT id, remaining FROM "CreditGrant"
+      WHERE "refId" = ${order.id} AND remaining > 0
+      FOR UPDATE`,
+  );
   if (grants.length === 0) return 0;
-  const revoked = grants.reduce((acc, g) => acc + g.remaining, 0);
-  await tx.creditGrant.updateMany({
-    where: { id: { in: grants.map((g) => g.id) } },
-    data: { remaining: 0 },
-  });
+  let revoked = 0;
+  for (const g of grants) {
+    await tx.creditGrant.update({ where: { id: g.id }, data: { remaining: 0 } });
+    revoked += g.remaining;
+  }
   await addCreditsTx(tx, order.userId, "REVOKE", -revoked, "order", order.id, "credits revoked on payment refund");
   return revoked;
 }

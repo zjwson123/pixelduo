@@ -7,7 +7,7 @@ import { sendVerificationEmail } from "@/lib/mail";
 export async function POST(req: Request) {
   try {
     const userId = await requireUserId();
-    const limited = await enforceRateLimit(req, "verify", 5, 15 * 60_000);
+    const limited = await enforceRateLimit(req, "verify-resend", 5, 15 * 60_000);
     if (limited) return limited;
     const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
     if (user.emailVerified) return ok({ alreadyVerified: true });

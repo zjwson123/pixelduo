@@ -167,7 +167,14 @@ export async function ensureOAuthUser(
     });
     await signupBonus(user.id);
   } else if (!user.emailVerified) {
-    await prisma.user.update({ where: { id: user.id }, data: { emailVerified: new Date() } });
+    // Pre-hijacking guard: an unverified local account was created by a plain
+    // password registration that never proved the address (POST /api/register
+    // requires no ownership). Anyone can pre-register an address they don't
+    // own — auto-linking the OAuth identity into it would verify it AND leave
+    // the attacker's password working on the victim's account. The real owner
+    // must first verify via the emailed link (or sign in with the password
+    // and verify from there); OAuth sign-in is refused until then.
+    return null;
   }
   return { id: user.id, totpEnabled: user.totpEnabled };
 }

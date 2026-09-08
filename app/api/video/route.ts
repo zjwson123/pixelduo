@@ -43,8 +43,33 @@ export async function POST(req: Request) {
     let refImageKey: string | undefined;
     if (body.image) {
       const cleaned = body.image.match(/^data:image\/[a-z]+;base64,(.+)$/)?.[1] ?? body.image;
+      // Same orphan-guard as /api/edit: the upload precedes job creation, so
+      // every path that doesn't attach the key to a job must delete it.
+      const storage = getStorage();
       refImageKey = newStorageKey("png");
-      await getStorage().put(refImageKey, Buffer.from(cleaned, "base64"), "image/png");
+      let result: Awaited<ReturnType<typeof createMediaJob>>;
+      try {
+        await storage.put(refImageKey, Buffer.from(cleaned, "base64"), "image/png");
+        const key = body.idempotencyKey || `${userId}:video:${randomUUID()}`;
+        result = await createMediaJob({
+          userId,
+          model: body.model,
+          mediaType: "video",
+          quality: "standard",
+          count: 1,
+          prompt: body.prompt.trim(),
+          idempotencyKey: key,
+          durationSec: body.duration,
+          refImageKey,
+        });
+      } catch (e) {
+        await storage.delete(refImageKey).catch(() => undefined);
+        throw e;
+      }
+      if (!result.created) {
+        await storage.delete(refImageKey).catch(() => undefined);
+      }
+      return ok({ jobId: result.job.id, status: result.job.status, costCredits: result.job.costCredits, duplicate: !result.created });
     }
 
     const key = body.idempotencyKey || `${userId}:video:${randomUUID()}`;
@@ -57,7 +82,6 @@ export async function POST(req: Request) {
       prompt: body.prompt.trim(),
       idempotencyKey: key,
       durationSec: body.duration,
-      refImageKey,
     });
     return ok({ jobId: job.id, status: job.status, costCredits: job.costCredits, duplicate: !created });
   } catch (e) {

@@ -202,8 +202,11 @@ export async function failJob(jobId: string, error: string, opts?: { terminal?: 
 
     if (!opts?.terminal && nextAttempts < job.maxAttempts) {
       // Retry with exponential backoff; the pre-auth hold stays in place.
-      await tx.job.update({
-        where: { id: jobId },
+      // The status predicate is the compare-and-set: if another actor
+      // (competing failJob/completeJob/claim) already moved the job, this
+      // write matches nothing and the transition is abandoned.
+      await tx.job.updateMany({
+        where: { id: jobId, status: job.status },
         data: {
           status: "queued",
           attempts: nextAttempts,
@@ -215,9 +218,11 @@ export async function failJob(jobId: string, error: string, opts?: { terminal?: 
       return;
     }
 
-    // Terminal failure = DLQ; refund the held credits
-    await tx.job.update({
-      where: { id: jobId },
+    // Terminal failure = DLQ; refund the held credits. CAS from the observed
+    // status: two concurrent recovery sweeps (or a sweep racing a completion)
+    // must not both pass — the refund would run twice, or run after delivery.
+    const claim = await tx.job.updateMany({
+      where: { id: jobId, status: job.status },
       data: {
         status: "failed",
         attempts: nextAttempts,
@@ -226,7 +231,7 @@ export async function failJob(jobId: string, error: string, opts?: { terminal?: 
         heartbeatAt: null,
       },
     });
-    if (wasActive) {
+    if (claim.count === 1 && wasActive) {
       const consumption = (job.consumption ?? null) as unknown as SpendConsumption[] | null;
       await refundCreditsTx(
         tx,
@@ -268,10 +273,14 @@ export async function completeJob(jobId: string, images: JobImage[]) {
   return prisma.$transaction(async (tx) => {
     const job = await tx.job.findUnique({ where: { id: jobId } });
     if (!job || (job.status !== "running" && job.status !== "polling")) throw new Error("job-not-runnable");
-    await tx.job.update({
-      where: { id: jobId },
+    // CAS to "done" from the observed status: a concurrent failJob (e.g. a
+    // recovery sweep reaping the same job) must not end up overwritten after
+    // it already refunded — exactly one terminal transition delivers images.
+    const claim = await tx.job.updateMany({
+      where: { id: jobId, status: job.status },
       data: { status: "done", images: JSON.stringify(images.map((i) => i.url)), error: null, finishedAt: new Date() },
     });
+    if (claim.count !== 1) throw new Error("job-not-runnable");
     for (const img of images) {
       await tx.image.create({
         data: {

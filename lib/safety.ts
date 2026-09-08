@@ -1,5 +1,6 @@
 import { getStorage } from "./storage";
 import { getVisionConfig } from "./keys";
+import { hostIsPublic } from "./store";
 
 const BLOCKED: Array<{ re: RegExp; reason: string }> = [
   { re: /\b(sex|nude|naked|porn|erotic|nsfw|explicit)\b/i, reason: "adult-content" },
@@ -106,24 +107,25 @@ async function moderateWithVision(dataUrl: string): Promise<ImageAudit> {
 // 2. IMAGE_MODERATION=1 — vision-model moderation via the cc-proxy gateway
 //    (default gpt-5.4), reading the generated image from the storage driver.
 // Without any of these the audit is skipped (checked: false).
-function isSafeEndpointUrl(rawUrl: string): boolean {
+async function isSafeEndpointUrl(rawUrl: string): Promise<boolean> {
+  // Same canonical SSRF guard as fetchPublicBuffer (store.ts): hostname
+  // literal decoding + full DNS resolution. The previous string-prefix
+  // blocklist missed decimal/hex IPv4 forms and rebinding hostnames, and the
+  // fetch followed redirects without re-validation.
   try {
     const parsed = new URL(rawUrl);
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
-    const h = parsed.hostname.toLowerCase();
-    if (h === "localhost" || h === "" || h.startsWith("127.") || h.startsWith("10.") ||
-        h.startsWith("192.168.") || h.startsWith("169.254.") || h.endsWith(".local") ||
-        h.endsWith(".internal") || /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(h) ||
-        h === "::1" || h.startsWith("fe80:") || h.startsWith("0.0.0.0")) return false;
-    return true;
-  } catch { return false; }
+    return await hostIsPublic(parsed.hostname);
+  } catch {
+    return false;
+  }
 }
 
 export async function analyzeImage(url: string): Promise<ImageAudit> {
   const endpoint = process.env.IMAGE_NSFW_ENDPOINT;
   if (endpoint) {
     // SSRF guard: only allow public http(s) endpoints for the external detector.
-    if (!isSafeEndpointUrl(endpoint)) return { checked: false };
+    if (!(await isSafeEndpointUrl(endpoint))) return { checked: false };
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 30_000);
@@ -134,6 +136,7 @@ export async function analyzeImage(url: string): Promise<ImageAudit> {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ url }),
           signal: controller.signal,
+          redirect: "manual", // a detector endpoint has no business redirecting
         });
       } finally {
         clearTimeout(timer);

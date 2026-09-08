@@ -21,6 +21,10 @@ export interface PaymentWebhookEvent {
   // transaction id) used to resolve the order when the provider doesn't echo
   // our orderId (e.g. refund webhooks).
   providerOrderId?: string;
+  // For "refunded": true only when the ENTIRE payment was refunded. Partial
+  // refunds notify but leave granted credits untouched (revoking everything
+  // over a $0.01 partial refund would be wildly disproportionate).
+  fullRefund?: boolean;
   raw: unknown;
 }
 

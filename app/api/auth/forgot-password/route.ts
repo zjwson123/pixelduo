@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ok, fail, enforceRateLimit } from "@/lib/api";
+import { ok, fail, enforceRateLimit, enforceUserRateLimit } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { createToken } from "@/lib/tokens";
 import { sendResetPasswordEmail } from "@/lib/mail";
@@ -16,8 +16,13 @@ export async function POST(req: Request) {
     const email = body.email.toLowerCase().trim();
     const user = await prisma.user.findUnique({ where: { email } });
     if (user) {
-      const token = await createToken(email, "reset-password", user.id);
-      await sendResetPasswordEmail(email, token);
+      // Per-account cap on top of the per-IP one: an attacker rotating IPs
+      // must not be able to mail-bomb one address at 5×N per 15 min.
+      const userLimited = await enforceUserRateLimit(user.id, "forgot-account", 5, 15 * 60_000);
+      if (!userLimited) {
+        const token = await createToken(email, "reset-password", user.id);
+        await sendResetPasswordEmail(email, token);
+      }
     }
     return ok({ sent: true });
   } catch (e) {

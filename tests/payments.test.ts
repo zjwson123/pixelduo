@@ -1,7 +1,8 @@
 import { createHmac } from "crypto";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import Stripe from "stripe";
 import { Paddle, Environment } from "@paddle/paddle-node-sdk";
+import { getPaymentProvider, _resetPaymentProviderForTests } from "../lib/payments";
 import { MockProvider } from "../lib/payments/mock";
 import { StripeProvider } from "../lib/payments/stripe";
 import { PaddleProvider } from "../lib/payments/paddle";
@@ -88,6 +89,50 @@ describe("StripeProvider", () => {
     expect(await p.verifyWebhook(other, okHeaders)).toBeNull();
 
     expect(await p.verifyWebhook(payload, new Headers())).toBeNull();
+  });
+
+  it("marks charge.refunded as full only when the whole charge is refunded", async () => {
+    const p = new StripeProvider({ webhookSecret: WEBHOOK_SECRET });
+    const full = stripeEvent("charge.refunded", { amount_refunded: 1999, amount: 1999, payment_intent: "pi_1" });
+    const fullHeaders = new Headers({ "stripe-signature": stripeSignature(full, WEBHOOK_SECRET) });
+    const fullEvt = await p.verifyWebhook(full, fullHeaders);
+    expect(fullEvt?.type).toBe("refunded");
+    expect(fullEvt?.fullRefund).toBe(true);
+
+    const partial = stripeEvent("charge.refunded", { amount_refunded: 1, amount: 1999, payment_intent: "pi_1" });
+    const partialHeaders = new Headers({ "stripe-signature": stripeSignature(partial, WEBHOOK_SECRET) });
+    const partialEvt = await p.verifyWebhook(partial, partialHeaders);
+    expect(partialEvt?.type).toBe("refunded");
+    expect(partialEvt?.fullRefund).toBe(false);
+  });
+});
+
+describe("payment provider resolution", () => {
+  const envWas = process.env.NODE_ENV;
+  afterEach(() => {
+    (process.env as Record<string, string>).NODE_ENV = envWas;
+    delete process.env.PAYMENT_PROVIDER;
+    delete process.env.PAYMENT_ALLOW_MOCK;
+    _resetPaymentProviderForTests();
+  });
+
+  it("fails closed on an unrecognized PAYMENT_PROVIDER value", async () => {
+    process.env.PAYMENT_PROVIDER = "Stripe"; // typo/case variant used to fall through to MockProvider
+    _resetPaymentProviderForTests();
+    expect(() => getPaymentProvider()).toThrow(/unknown PAYMENT_PROVIDER/);
+  });
+
+  it("still honors the explicit production mock opt-in (CI)", async () => {
+    (process.env as Record<string, string>).NODE_ENV = "production";
+    process.env.PAYMENT_ALLOW_MOCK = "1";
+    _resetPaymentProviderForTests();
+    expect(getPaymentProvider().name).toBe("mock");
+  });
+
+  it("refuses mock in production without the opt-in", async () => {
+    (process.env as Record<string, string>).NODE_ENV = "production";
+    _resetPaymentProviderForTests();
+    expect(() => getPaymentProvider()).toThrow(/not allowed in production/);
   });
 });
 
@@ -205,8 +250,15 @@ describe("PaddleProvider", () => {
     const bad = new Headers({ "paddle-signature": paddleSignature(payload, "wrong_secret") });
     expect(await p.verifyWebhook(payload, bad)).toBeNull();
 
-    const stale = new Headers({
+    // In-repo verification uses a 5-minute tolerance (Stripe parity) instead
+    // of the SDK's 5s window, so delayed deliveries/retries still verify.
+    const slightlyOld = new Headers({
       "paddle-signature": paddleSignature(payload, PADDLE_SECRET, Math.floor(Date.now() / 1000) - 60),
+    });
+    expect(await p.verifyWebhook(payload, slightlyOld)).not.toBeNull();
+
+    const stale = new Headers({
+      "paddle-signature": paddleSignature(payload, PADDLE_SECRET, Math.floor(Date.now() / 1000) - 15 * 60),
     });
     expect(await p.verifyWebhook(payload, stale)).toBeNull();
 
@@ -216,4 +268,5 @@ describe("PaddleProvider", () => {
 
     expect(await p.verifyWebhook(payload, new Headers())).toBeNull();
   });
+
 });

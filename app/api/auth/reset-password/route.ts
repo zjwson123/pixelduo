@@ -19,11 +19,17 @@ export async function POST(req: Request) {
     const user = await prisma.user.findUnique({ where: { email: result.email } });
     if (!user) return fail(new Error("invalid-token"));
     const passwordHash = await bcrypt.hash(body.password, 10);
-    // Bump sessionVersion so all previously issued JWTs are rejected.
-    await prisma.user.update({
-      where: { id: user.id },
-      data: { passwordHash, sessionVersion: { increment: 1 } },
-    });
+    // Bump sessionVersion so all previously issued JWTs are rejected, and
+    // revoke API keys too: a password reset means the account may be
+    // compromised, and any key minted by an attacker keeps working otherwise
+    // (authenticateApiKey never consults sessionVersion).
+    await prisma.$transaction([
+      prisma.user.update({
+        where: { id: user.id },
+        data: { passwordHash, sessionVersion: { increment: 1 } },
+      }),
+      prisma.apiKey.updateMany({ where: { userId: user.id, revokedAt: null }, data: { revokedAt: new Date() } }),
+    ]);
     return ok({ reset: true });
   } catch (e) {
     if (e instanceof z.ZodError) return fail(new Error("invalid-input"));

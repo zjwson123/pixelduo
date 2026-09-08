@@ -102,6 +102,10 @@ async function processImageJob(job: {
       console.log(`[worker ${workerId}] job ${job.id}: safety audit passed (${audits.map((a) => a.provider).join(",")})`);
     }
     await completeJob(job.id, rows);
+    // The reference upload has served its purpose — remove it so user files
+    // don't accumulate for the life of the account (they are also swept by
+    // the account-deletion routes for any job that never reached here).
+    if (job.refImageKey) await getStorage().delete(job.refImageKey).catch(() => undefined);
     console.log(`[worker ${workerId}] job ${job.id} done (${rows.length} images)`);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -177,6 +181,7 @@ async function processVideoJob(job: {
         prompt: job.prompt,
       }];
       await completeJob(job.id, rows);
+      if (job.refImageKey) await getStorage().delete(job.refImageKey).catch(() => undefined);
       console.log(`[worker ${workerId}] job ${job.id} done (video: ${videoKey})`);
     } else if (status.status === "succeeded") {
       // Succeeded but no URL — nothing to deliver; refund rather than poll forever.

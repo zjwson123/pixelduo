@@ -743,8 +743,11 @@ export function Workbench() {
     }
   };
 
+  const [checkoutBusy, setCheckoutBusy] = useState(false);
+
   const confirmCheckout = async () => {
-    if (!checkout) return;
+    if (!checkout || checkoutBusy) return;
+    setCheckoutBusy(true);
     try {
       const data = await api<{ status: string; mock?: boolean; checkoutUrl?: string }>("/api/checkout", {
         method: "POST",
@@ -761,6 +764,8 @@ export function Workbench() {
       refreshOrders();
     } catch (e) {
       setToast(e instanceof Error ? e.message : "Checkout failed");
+    } finally {
+      setCheckoutBusy(false);
     }
   };
 
@@ -1309,7 +1314,7 @@ export function Workbench() {
                   <div className="tmpl-body">
                     <div className="tmpl-title-row">
                       <h3>{tm.title}</h3>
-                      {tm.sourceUrl && (
+                      {tm.sourceUrl && /^https:\/\//.test(tm.sourceUrl) && (
                         <a
                           className="tmpl-source"
                           href={tm.sourceUrl}
@@ -1538,8 +1543,8 @@ export function Workbench() {
               <div className="beta-note">
                 <b>{t.betaNote}</b>
               </div>
-              <button className="btn btn-dark" style={{ width: "100%" }} onClick={confirmCheckout}>
-                ✓ {t.confirm} {method} · ${checkout.price.toFixed(2)}
+              <button className="btn btn-dark" style={{ width: "100%" }} onClick={confirmCheckout} disabled={checkoutBusy}>
+                ✓ {checkoutBusy ? "…" : `${t.confirm} ${method}`} · ${checkout.price.toFixed(2)}
               </button>
             </div>
           </div>

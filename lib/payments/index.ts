@@ -20,6 +20,13 @@ function resolvePaymentProviderName(): string {
     }
     return "mock";
   }
+  // Fail closed on any unrecognized value: defaulting a typo ("Stripe",
+  // "stripe ", "alipay") to the unsigned MockProvider would silently enable
+  // free checkout fulfillment and unsigned webhooks — the exact failure the
+  // production gate above exists to prevent.
+  if (name !== "stripe" && name !== "paddle") {
+    throw new Error(`unknown PAYMENT_PROVIDER '${name}' — use 'stripe', 'paddle' or 'mock'`);
+  }
   return name;
 }
 

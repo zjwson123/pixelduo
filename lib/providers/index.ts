@@ -3,7 +3,7 @@
 //            doubao-seedance, wan2.7-t2v/i2v [video, async task-based]
 
 import { getModelVerseKey, getArkKey, getArkBaseUrl, getAliyunKey, getAliyunBaseUrl } from "../keys";
-import { saveBase64Image, saveRemoteImage, fetchPublicBuffer } from "../store";
+import { saveBase64Image, saveRemoteImage, fetchPublicBuffer, readBodyCapped } from "../store";
 import { getModel, type ModelInfo } from "../model-registry";
 import type { Quality } from "../cost";
 
@@ -21,6 +21,20 @@ export interface ProviderVideoResult {
 export interface VideoTaskResult {
   taskId: string;
   model: string;
+}
+
+// Cap on any single provider response body. Image endpoints legitimately
+// return b64_json payloads (~4-34 MB); anything larger is a hostile or
+// malfunctioning provider and must be cut off mid-stream, not buffered.
+const MAX_PROVIDER_RESPONSE_BYTES = 40 * 1024 * 1024;
+
+async function readTextCapped(res: Response, maxBytes = MAX_PROVIDER_RESPONSE_BYTES): Promise<string> {
+  const buf = await readBodyCapped(res, maxBytes);
+  return buf.toString("utf8");
+}
+
+async function readJsonCapped(res: Response, maxBytes = MAX_PROVIDER_RESPONSE_BYTES): Promise<Record<string, unknown>> {
+  return JSON.parse(await readTextCapped(res, maxBytes)) as Record<string, unknown>;
 }
 
 // === Image generation ===
@@ -51,8 +65,8 @@ async function callWithKeys(
       } finally {
         clearTimeout(timer);
       }
-      if (res.ok) return (await res.json()) as Record<string, unknown>;
-      const text = await res.text();
+      if (res.ok) return await readJsonCapped(res);
+      const text = await readTextCapped(res, 64 * 1024);
       const err = new Error(`${res.status}: ${text.slice(0, 240)}`);
       if (res.status === 401 || res.status === 403) {
         lastErr = err;
@@ -112,8 +126,8 @@ export async function editWithGpt(prompt: string, imageBase64: string, quality: 
       body: fd,
       signal: controller.signal,
     });
-    if (!res.ok) throw new Error(`${res.status}: ${(await res.text()).slice(0, 240)}`);
-    const data = (await res.json()) as Record<string, unknown>;
+    if (!res.ok) throw new Error(`${res.status}: ${(await readTextCapped(res, 64 * 1024)).slice(0, 240)}`);
+    const data = await readJsonCapped(res);
     const items = (data.data as Array<Record<string, unknown>> | undefined) ?? [];
     const b64 = items[0]?.b64_json as string | undefined;
     if (!b64) throw new Error("gpt-image-2 edit returned no b64_json");
@@ -348,7 +362,7 @@ async function createWanVideoTask(
       }),
       signal: controller.signal,
     });
-    const data = (await res.json()) as { output?: { task_id?: string }; code?: string; message?: string };
+    const data = (await readJsonCapped(res, 1024 * 1024)) as { output?: { task_id?: string }; code?: string; message?: string };
     if (!res.ok || !data.output?.task_id) {
       throw new Error(`wan video task creation failed: ${data.code ?? res.status} ${data.message ?? ""}`);
     }
@@ -404,7 +418,7 @@ async function pollSeedanceTask(taskId: string): Promise<VideoTaskStatus> {
       { headers: { Authorization: `Bearer ${key}` }, signal: controller.signal },
     );
     if (!res.ok) return { status: "unknown", error: `poll failed: ${res.status}` };
-    const data = (await res.json()) as {
+    const data = (await readJsonCapped(res, 1024 * 1024)) as {
       status?: string;
       content?: { video_url?: string | Array<{ url?: string }> };
       error?: { message?: string };
@@ -435,7 +449,7 @@ async function pollWanVideoTask(taskId: string): Promise<VideoTaskStatus> {
       { headers: { Authorization: `Bearer ${key}` }, signal: controller.signal },
     );
     if (!res.ok) return { status: "unknown", error: `poll failed: ${res.status}` };
-    const data = (await res.json()) as {
+    const data = (await readJsonCapped(res, 1024 * 1024)) as {
       output?: { task_status?: string; video_url?: string };
       request_id?: string;
     };

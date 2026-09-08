@@ -38,9 +38,17 @@ export async function POST(req: Request) {
         : await useBackupCode(userId, body.backupCode!);
       if (!ok2) return fail(new Error("invalid-code"));
     }
+    // Generated outputs AND user-uploaded reference images (Job.refImageKey —
+    // for i2v/edit workflows these can be personal photos, the most sensitive
+    // files we hold) must both be erased for a true GDPR/PIPL delete.
     const images = await prisma.image.findMany({ where: { userId }, select: { url: true } });
+    const jobs = await prisma.job.findMany({ where: { userId }, select: { refImageKey: true } });
+    const refKeys = jobs.map((j) => j.refImageKey).filter((k): k is string => Boolean(k));
     const storage = getStorage();
-    await Promise.allSettled(images.map((i) => storage.delete(i.url)));
+    await Promise.allSettled([
+      ...images.map((i) => storage.delete(i.url)),
+      ...refKeys.map((k) => storage.delete(k)),
+    ]);
     await prisma.$transaction([
       prisma.backupCode.deleteMany({ where: { userId } }),
       prisma.verificationToken.deleteMany({ where: { userId } }),
