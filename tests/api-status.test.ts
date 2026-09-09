@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ApiError, fail } from "../lib/api";
+import { ApiError, fail, readBodyCapped } from "../lib/api";
 
 // Expected business errors must map to their proper 4xx status instead of a
 // blanket 500, while unexpected errors stay masked as a generic 500.
@@ -42,5 +42,25 @@ describe("fail() error classification", () => {
     const { status, body } = await statusOf(new SyntaxError("Unexpected token < in JSON"));
     expect(status).toBe(400);
     expect(body.error).toBe("invalid-json");
+  });
+});
+
+describe("readBodyCap", () => {
+  const fakeReq = (contentLength: string | null, text: string): Request =>
+    ({ headers: new Headers(contentLength ? { "content-length": contentLength } : {}), text: async () => text }) as unknown as Request;
+
+  it("rejects on the declared content-length before buffering", async () => {
+    const r = await readBodyCapped(fakeReq("999999999", "x"), 64 * 1024);
+    expect("tooLarge" in r).toBe(true);
+  });
+
+  it("rejects a lying/absent content-length after reading", async () => {
+    const lying = await readBodyCapped(fakeReq(null, "x".repeat(100)), 64);
+    expect("tooLarge" in lying).toBe(true);
+  });
+
+  it("returns the raw body for parsing when within the cap", async () => {
+    const ok = await readBodyCapped(fakeReq("2", "{}"), 64 * 1024);
+    expect("raw" in ok && ok.raw).toBe("{}");
   });
 });

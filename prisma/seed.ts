@@ -186,6 +186,17 @@ async function main() {
       "History & Classical Themes": "历史古风", "Documents & Publishing": "文档出版",
       "Other Use Cases": "其他应用",
     };
+    // Same https-only gate as scripts/import-cases.ts: sourceUrl renders as a
+    // href to every logged-in user.
+    const safeSourceUrl = (u: string | undefined): string | null => {
+      if (typeof u !== "string") return null;
+      try {
+        const parsed = new URL(u);
+        return parsed.protocol === "https:" ? parsed.toString() : null;
+      } catch {
+        return null;
+      }
+    };
     for (const c of ciCases.cases) {
       await prisma.template.upsert({
         where: { id: String(c.id) },
@@ -193,7 +204,7 @@ async function main() {
           id: String(c.id), cat: CAT_ZH[c.category] ?? c.category,
           title: c.title, prompt: c.prompt, model: "gpt", quality: "medium",
           credits: 8, img: "/templates/gpt_medium_1024.png",
-          sourceUrl: c.sourceUrl ?? null,
+          sourceUrl: safeSourceUrl(c.sourceUrl),
           tags: { styles: c.styles, scenes: c.scenes, category: c.category } as object,
           featured: c.featured,
         },

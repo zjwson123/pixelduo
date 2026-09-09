@@ -12,6 +12,12 @@ export interface ProviderImage {
   model: string; // model id from registry
 }
 
+// Fired after each individual image is safely persisted to storage, so the
+// worker can checkpoint progress — a retry (transient provider failure on
+// image 4 of 4) then regenerates only the missing images instead of re-billing
+// the whole batch.
+export type ImageProgress = (img: ProviderImage) => Promise<void>;
+
 export interface ProviderVideoResult {
   key: string; // storage key for the downloaded video
   model: string;
@@ -82,7 +88,12 @@ async function callWithKeys(
 
 // === GPT Image 2 (ModelVerse) ===
 
-export async function generateWithGpt(prompt: string, quality: Quality, count: number): Promise<ProviderImage[]> {
+export async function generateWithGpt(
+  prompt: string,
+  quality: Quality,
+  count: number,
+  onImage?: ImageProgress,
+): Promise<ProviderImage[]> {
   const keys = [getModelVerseKey()].filter((k): k is string => Boolean(k));
   if (!keys.length) throw new Error("modelverse key missing — set MODELVERSE_IMAGE_API_KEY or ensure ~/.cc-proxy/config.json has modelverse gateway");
   const out: ProviderImage[] = [];
@@ -95,7 +106,9 @@ export async function generateWithGpt(prompt: string, quality: Quality, count: n
     const items = (data.data as Array<Record<string, unknown>> | undefined) ?? [];
     const b64 = items[0]?.b64_json as string | undefined;
     if (!b64) throw new Error("gpt-image-2 returned no b64_json");
-    out.push({ key: await saveBase64Image(b64), model: "gpt" });
+    const img = { key: await saveBase64Image(b64), model: "gpt" };
+    out.push(img);
+    if (onImage) await onImage(img);
   }
   return out;
 }
@@ -142,7 +155,13 @@ export async function editWithGpt(prompt: string, imageBase64: string, quality: 
 // `watermark` toggles Ark's baked-in "AI生成" mark: free plans keep it,
 // paid plans get clean files. Passed explicitly so provider default
 // changes can't flip the behavior.
-export async function generateWithSeedream(prompt: string, count: number, imageBase64?: string, watermark = true): Promise<ProviderImage[]> {
+export async function generateWithSeedream(
+  prompt: string,
+  count: number,
+  imageBase64?: string,
+  watermark = true,
+  onImage?: ImageProgress,
+): Promise<ProviderImage[]> {
   const keys = [getArkKey()].filter((k): k is string => Boolean(k));
   if (!keys.length) throw new Error("ark key missing — set ARK_IMAGE_API_KEY or ensure ~/.cc-proxy/config.json has ark gateway");
   const out: ProviderImage[] = [];
@@ -162,7 +181,9 @@ export async function generateWithSeedream(prompt: string, count: number, imageB
     const items = (data.data as Array<Record<string, unknown>> | undefined) ?? [];
     const b64 = items[0]?.b64_json as string | undefined;
     if (!b64) throw new Error("seedream returned no b64_json");
-    out.push({ key: await saveBase64Image(b64), model: "seedream" });
+    const img = { key: await saveBase64Image(b64), model: "seedream" };
+    out.push(img);
+    if (onImage) await onImage(img);
   }
   return out;
 }
@@ -175,6 +196,7 @@ export async function generateWithWanImage(
   count: number,
   imageBase64List?: string[],
   watermark?: boolean,
+  onImage?: ImageProgress,
 ): Promise<ProviderImage[]> {
   const keys = [getAliyunKey()].filter((k): k is string => Boolean(k));
   if (!keys.length) throw new Error("aliyun key missing — set ALIYUN_API_KEY or ensure ~/.cc-proxy/config.json has aliyun gateway");
@@ -203,8 +225,12 @@ export async function generateWithWanImage(
     for (const item of contentItems) {
       if (item.image) {
         // Download the image from the temporary URL and store it
-        const key = await saveRemoteImage(item.image);
-        out.push({ key, model: modelId === "wan2.7-image-pro" ? "wan-image-pro" : "wan-image" });
+        const img = {
+          key: await saveRemoteImage(item.image),
+          model: modelId === "wan2.7-image-pro" ? "wan-image-pro" : "wan-image",
+        };
+        out.push(img);
+        if (onImage) await onImage(img);
       }
     }
   }
@@ -222,6 +248,7 @@ export async function generateImages(input: {
   imageBase64?: string; // for image editing (reference image)
   imageBase64List?: string[]; // for multi-image reference (wan2.7-image-pro)
   watermark?: boolean; // free plans keep provider/baked marks, paid get clean files
+  onImage?: ImageProgress; // checkpoint after each persisted image
 }): Promise<ProviderImage[]> {
   // Mock mode for tests / demos
   if (process.env.MOCK_IMAGE_PROVIDER === "1") {
@@ -229,12 +256,17 @@ export async function generateImages(input: {
     const out: ProviderImage[] = [];
     const list = [input.model];
     for (let i = 0; i < input.count; i++) {
-      for (const m of list) out.push({ key: await saveBase64Image(tinyPng), model: m });
+      for (const m of list) {
+        const img = { key: await saveBase64Image(tinyPng), model: m };
+        out.push(img);
+        if (input.onImage) await input.onImage(img);
+      }
     }
     return out;
   }
 
-  // Legacy "both" mode: generate with gpt + seedream in parallel
+  // Legacy "both" mode: generate with gpt + seedream in parallel. No per-image
+  // checkpointing — the two lanes would race on the caller's persisted array.
   if (input.model === "both") {
     const [gpt, seed] = await Promise.all([
       generateWithGpt(input.prompt, input.quality, input.count),
@@ -248,13 +280,13 @@ export async function generateImages(input: {
       if (input.imageBase64) {
         return editWithGpt(input.prompt, input.imageBase64, input.quality);
       }
-      return generateWithGpt(input.prompt, input.quality, input.count);
+      return generateWithGpt(input.prompt, input.quality, input.count, input.onImage);
     case "seedream":
-      return generateWithSeedream(input.prompt, input.count, input.imageBase64, input.watermark ?? true);
+      return generateWithSeedream(input.prompt, input.count, input.imageBase64, input.watermark ?? true, input.onImage);
     case "wan-image":
-      return generateWithWanImage(input.prompt, "wan2.7-image", input.count, input.imageBase64List, input.watermark);
+      return generateWithWanImage(input.prompt, "wan2.7-image", input.count, input.imageBase64List, input.watermark, input.onImage);
     case "wan-image-pro":
-      return generateWithWanImage(input.prompt, "wan2.7-image-pro", input.count, input.imageBase64List, input.watermark);
+      return generateWithWanImage(input.prompt, "wan2.7-image-pro", input.count, input.imageBase64List, input.watermark, input.onImage);
     default: {
       // Check registry for new models
       const model = getModel(input.model);
@@ -262,13 +294,13 @@ export async function generateImages(input: {
       if (model.mediaType === "image") {
         // Route by gateway
         if (model.gateway === "aliyun") {
-          return generateWithWanImage(input.prompt, model.modelId as "wan2.7-image" | "wan2.7-image-pro", input.count, input.imageBase64List, input.watermark);
+          return generateWithWanImage(input.prompt, model.modelId as "wan2.7-image" | "wan2.7-image-pro", input.count, input.imageBase64List, input.watermark, input.onImage);
         }
         if (model.gateway === "modelverse") {
-          return generateWithGpt(input.prompt, input.quality, input.count);
+          return generateWithGpt(input.prompt, input.quality, input.count, input.onImage);
         }
         if (model.gateway === "ark") {
-          return generateWithSeedream(input.prompt, input.count, input.imageBase64, input.watermark ?? true);
+          return generateWithSeedream(input.prompt, input.count, input.imageBase64, input.watermark ?? true, input.onImage);
         }
       }
       throw new Error(`model-not-supported-for-image-gen:${input.model}`);

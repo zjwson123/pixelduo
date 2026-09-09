@@ -1,10 +1,9 @@
 import { z } from "zod";
-import { requireVerifiedUser, ok, fail } from "@/lib/api";
+import { requireVerifiedUser, ok, fail, enforceRateLimit, readBodyCapped } from "@/lib/api";
 import { checkPrompt } from "@/lib/safety";
 import { createGenerationJob, createMediaJob } from "@/lib/queue";
 import { enabledImageModelIds, modelEnum } from "@/lib/model-registry";
 import { randomUUID } from "crypto";
-import { enforceRateLimit } from "@/lib/api";
 
 const schema = z.object({
   prompt: z.string().min(3).max(2000),
@@ -14,6 +13,9 @@ const schema = z.object({
   idempotencyKey: z.string().max(128).optional(),
 });
 
+// Text-only body — anything beyond a few KB is abuse.
+const GENERATE_MAX_BYTES = 64 * 1024;
+
 export async function POST(req: Request) {
   try {
     const userId = await requireVerifiedUser();
@@ -21,7 +23,9 @@ export async function POST(req: Request) {
     // request, so an unthrottled parse is a memory-exhaustion vector.
     const limited = await enforceRateLimit(req, "generate", 20, 60_000);
     if (limited) return limited;
-    const body = schema.parse(await req.json());
+    const bodyRaw = await readBodyCapped(req, GENERATE_MAX_BYTES);
+    if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
+    const body = schema.parse(JSON.parse(bodyRaw.raw));
     const safety = checkPrompt(body.prompt);
     if (!safety.ok) return fail(new Error(`blocked:${safety.reason}`));
     const key = body.idempotencyKey || `${userId}:${randomUUID()}`;

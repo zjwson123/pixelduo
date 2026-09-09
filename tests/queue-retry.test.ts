@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { prisma } from "../lib/prisma";
-import { createGenerationJob, failJob, recoverStuckJobs, claimNextJob } from "../lib/queue";
+import { createGenerationJob, createMediaJob, failJob, recoverStuckJobs, claimNextJob } from "../lib/queue";
 import { grantCreditsTx } from "../lib/ledger";
+import { getStorage } from "../lib/storage";
 
 let userId: string;
 
@@ -96,5 +97,34 @@ describe("worker retry / DLQ / recovery", () => {
     expect(after.status).toBe("failed");
     expect(after.attempts).toBe(1); // no retry queued
     expect((await prisma.user.findUniqueOrThrow({ where: { id: userId } })).credits).toBe(during + job.costCredits);
+  });
+
+  it("terminal failure reclaims the uploaded reference image; retries keep it", async () => {
+    const storage = getStorage();
+    const refKey = `img/test-ref-${Date.now()}.png`;
+    await storage.put(refKey, Buffer.from("fake-ref-image"));
+
+    const { job } = await createMediaJob({
+      userId,
+      model: "gpt",
+      mediaType: "image",
+      quality: "medium",
+      count: 1,
+      prompt: "ref job",
+      maxAttempts: 3,
+      refImageKey: refKey,
+    });
+    await prisma.job.update({ where: { id: job.id }, data: { status: "running" } });
+
+    // Non-terminal failure: the retry still needs the reference image.
+    await failJob(job.id, "transient");
+    expect(await storage.get(refKey)).not.toBeNull();
+
+    // Terminal failure: nothing can read it anymore — must be reclaimed, or
+    // credit-neutral terminally-failing loops fill storage permanently.
+    await failJob(job.id, "safety system rejection", { terminal: true });
+    const failed = await prisma.job.findUniqueOrThrow({ where: { id: job.id } });
+    expect(failed.status).toBe("failed");
+    expect(await storage.get(refKey)).toBeNull();
   });
 });

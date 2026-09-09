@@ -12,8 +12,9 @@ high 26 credits per image; Seedance 14 credits per second of video).
 
 ## Authentication
 
-Create an API key in the workbench (**API Keys** tab, `/account/api`). The raw
-key (`pd_live_…`) is shown exactly once — store it securely. Send it as a
+Create an API key in the workbench (**API Keys** tab, `/account/api`) — you'll
+confirm your account password (plus a 2FA code when enabled) to mint one. The
+raw key (`pd_live_…`) is shown exactly once — store it securely. Send it as a
 Bearer token:
 
 ```bash
@@ -37,6 +38,8 @@ curl -X POST https://pixelduo.ai/api/v1/images/generations \
 - `quality` default `medium` (ignored for seedream)
 - `n` 1–4 images (image models only)
 - `duration` 2–15 seconds, default 5 (video models only, billed per second)
+- Image-to-video models are web-app only: the public API has no image field,
+  so pure i2v models are rejected with `400 invalid-input` — use the workbench
 - Concurrency: jobs are queued asynchronously — submit freely while earlier
   jobs run. Each user may hold up to **5 in-flight jobs** (queued/running/
   polling); beyond that the API returns `400 queue-full`. Failed/rejected

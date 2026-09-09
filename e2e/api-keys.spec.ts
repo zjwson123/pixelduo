@@ -12,7 +12,8 @@ test("API keys: create, call generations with the key, revoke", async ({ page })
   await page.waitForURL("**/studio");
 
   await page.goto("/account/api");
-  await page.fill("input[placeholder*='Key name']", "e2e");
+  await page.fill("#key-name", "e2e");
+  await page.fill("#key-pw", password);
   await page.locator("button", { hasText: "Create key" }).click();
   const createdBox = page.locator(".api-key-banner");
   await expect(createdBox).toBeVisible();

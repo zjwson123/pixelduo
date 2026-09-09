@@ -313,15 +313,16 @@ export async function revokeOrderCreditsTx(
 }
 
 // Admin compensation: grant non-expiring credits (consumed first like free
-// credits) with an ADMIN ledger entry.
+// credits) with an ADMIN ledger entry attributed to the acting admin.
 export async function adminGrantTx(
   tx: Prisma.TransactionClient,
   userId: string,
   amount: number,
   note: string,
+  adminId: string,
 ): Promise<void> {
   if (amount <= 0) throw new Error("invalid-amount");
-  await grantCreditsTx(tx, userId, "ADMIN", amount, null, "admin", null, note);
+  await grantCreditsTx(tx, userId, "ADMIN", amount, null, "admin", adminId, note);
 }
 
 // Admin clawback: remove credits FIFO (free/admin grants first, then by
@@ -331,6 +332,7 @@ export async function adminClawbackTx(
   userId: string,
   amount: number,
   note: string,
+  adminId: string,
 ): Promise<void> {
   if (amount <= 0) throw new Error("invalid-amount");
   const rows = await tx.$queryRaw<Array<{ id: string; remaining: number }>>(
@@ -351,5 +353,5 @@ export async function adminClawbackTx(
     needed -= take;
   }
   if (needed > 0) throw new Error("insufficient-credits");
-  await addCreditsTx(tx, userId, "ADMIN", -amount, "admin", null, note);
+  await addCreditsTx(tx, userId, "ADMIN", -amount, "admin", adminId, note);
 }

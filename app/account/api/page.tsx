@@ -15,6 +15,9 @@ interface ApiKeyRow {
 export default function ApiKeysPage() {
   const [keys, setKeys] = useState<ApiKeyRow[]>([]);
   const [name, setName] = useState("");
+  const [password, setPassword] = useState("");
+  const [totpCode, setTotpCode] = useState("");
+  const [totpEnabled, setTotpEnabled] = useState(false);
   const [created, setCreated] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -24,6 +27,8 @@ export default function ApiKeysPage() {
       const res = await fetch("/api/account/keys");
       const data = await res.json();
       if (data.ok) setKeys(data.keys);
+      const me = await fetch("/api/me").then((r) => r.json());
+      if (me.ok) setTotpEnabled(Boolean(me.user.totpEnabled));
     } catch {
       // ignore
     }
@@ -41,12 +46,26 @@ export default function ApiKeysPage() {
       const res = await fetch("/api/account/keys", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: name || "default" }),
+        body: JSON.stringify({
+          name: name || "default",
+          password,
+          ...(totpEnabled && totpCode ? { token: totpCode.trim() } : {}),
+        }),
       });
       const data = await res.json();
-      if (!data.ok) throw new Error(data.error ?? "create failed");
+      if (!data.ok) {
+        throw new Error(
+          data.error === "invalid-password"
+            ? "Wrong password."
+            : data.error === "invalid-code"
+              ? "Invalid 2FA code."
+              : data.error ?? "create failed",
+        );
+      }
       setCreated(data.key);
       setName("");
+      setPassword("");
+      setTotpCode("");
       refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "create failed");
@@ -91,14 +110,43 @@ export default function ApiKeysPage() {
           </div>
         )}
 
-        <form onSubmit={create} style={{ display: "flex", gap: 8, marginTop: 14 }}>
-          <input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="Key name (e.g. production)"
-            style={{ flex: 1, padding: "10px 12px", borderRadius: 10, border: "1px solid rgba(0,0,0,0.15)" }}
-          />
-          <button type="submit" className="btn btn-dark" disabled={busy}>{busy ? "Creating…" : "Create key"}</button>
+        <form onSubmit={create} style={{ marginTop: 14 }}>
+          <div className="field">
+            <label htmlFor="key-name">Key name</label>
+            <input
+              id="key-name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="e.g. production"
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="key-pw">Password (required to mint a key)</label>
+            <input
+              id="key-pw"
+              type="password"
+              required
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="••••••••"
+              autoComplete="current-password"
+            />
+          </div>
+          {totpEnabled && (
+            <div className="field">
+              <label htmlFor="key-totp">6-digit 2FA code</label>
+              <input
+                id="key-totp"
+                value={totpCode}
+                onChange={(e) => setTotpCode(e.target.value)}
+                placeholder="••••••"
+                inputMode="numeric"
+              />
+            </div>
+          )}
+          <button type="submit" className="btn btn-dark" disabled={busy} style={{ marginTop: 6 }}>
+            {busy ? "Creating…" : "Create key"}
+          </button>
         </form>
 
         <table className="ledger" style={{ width: "100%", marginTop: 18 }}>

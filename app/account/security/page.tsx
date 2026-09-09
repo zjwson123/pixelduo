@@ -22,6 +22,8 @@ export default function SecurityPage() {
   const [code, setCode] = useState("");
   const [backupCodes, setBackupCodes] = useState<string[] | null>(null);
   const [password, setPassword] = useState("");
+  const [setupPassword, setSetupPassword] = useState("");
+  const [signedOut, setSignedOut] = useState(false);
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
   const [busy, setBusy] = useState(false);
@@ -44,13 +46,18 @@ export default function SecurityPage() {
     refresh();
   }, [refresh]);
 
-  const enable = async () => {
+  const enable = async (e: React.FormEvent) => {
+    e.preventDefault();
     setBusy(true);
     setError("");
     try {
-      const res = await fetch("/api/2fa/setup", { method: "POST" });
+      const res = await fetch("/api/2fa/setup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: setupPassword }),
+      });
       const data = await res.json();
-      if (!data.ok) throw new Error(data.error ?? "setup failed");
+      if (!data.ok) throw new Error(data.error === "invalid-password" ? "Wrong password." : data.error ?? "setup failed");
       if (data.alreadyEnabled) {
         setInfo("Two-factor authentication is already enabled.");
         refresh();
@@ -70,18 +77,29 @@ export default function SecurityPage() {
     const res = await fetch("/api/2fa/confirm", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token: code }),
+      body: JSON.stringify({ token: code, password: setupPassword }),
     });
     const data = await res.json();
     setBusy(false);
     if (!data.ok) {
-      setError(data.error === "invalid-code" ? "Invalid code — try again." : "Confirmation failed.");
+      setError(
+        data.error === "invalid-code"
+          ? "Invalid code — try again."
+          : data.error === "invalid-password"
+            ? "Wrong password — start over."
+            : "Confirmation failed.",
+      );
+      if (data.error === "invalid-password") {
+        setSetup(null);
+        setSetupPassword("");
+        setCode("");
+      }
       return;
     }
     setBackupCodes(data.backupCodes);
     setSetup(null);
     setCode("");
-    refresh();
+    setSignedOut(true); // enabling 2FA signed out every session (incl. this one)
   };
 
   const disable = async (e: React.FormEvent) => {
@@ -127,7 +145,15 @@ export default function SecurityPage() {
                 <code key={c} style={{ background: "rgba(0,0,0,0.05)", padding: "8px 10px", borderRadius: 8, fontFamily: "monospace" }}>{c}</code>
               ))}
             </div>
-            <button className="btn btn-dark btn-block" onClick={() => setBackupCodes(null)}>I saved them</button>
+            {signedOut && (
+              <p className="sub" style={{ color: "#e8590c" }}>
+                2FA is now active and all other sessions were signed out — including this one.
+                Sign in again with your password and a code from your authenticator.
+              </p>
+            )}
+            <Link className="btn btn-dark btn-block" href="/login" style={{ display: "block", textAlign: "center", padding: "10px 0", marginTop: 10 }}>
+              Go to sign-in
+            </Link>
           </div>
         ) : me?.totpEnabled && !setup ? (
           <form onSubmit={disable} style={{ marginTop: 14 }}>
@@ -158,9 +184,23 @@ export default function SecurityPage() {
             </button>
           </form>
         ) : (
-          <button className="btn btn-dark btn-block" onClick={enable} disabled={busy} style={{ marginTop: 14 }}>
-            {busy ? "Preparing…" : "Enable 2FA"}
-          </button>
+          <form onSubmit={enable} style={{ marginTop: 14 }}>
+            <div className="field">
+              <label htmlFor="setup-pw">Confirm your password to start</label>
+              <input
+                id="setup-pw"
+                type="password"
+                required
+                value={setupPassword}
+                onChange={(e) => setSetupPassword(e.target.value)}
+                placeholder="••••••••"
+                autoComplete="current-password"
+              />
+            </div>
+            <button type="submit" className="btn btn-dark btn-block" disabled={busy}>
+              {busy ? "Preparing…" : "Enable 2FA"}
+            </button>
+          </form>
         )}
 
         <div className="auth-foot">

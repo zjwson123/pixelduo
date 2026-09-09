@@ -32,12 +32,12 @@ describe("admin credit adjustments", () => {
       grantCreditsTx(tx, userId, "PURCHASE", 400, new Date(Date.now() + 365 * 24 * 3600 * 1000), "order", "o1", "pack"),
     );
 
-    await prisma.$transaction((tx) => adminGrantTx(tx, userId, 100, "compensation"));
+    await prisma.$transaction((tx) => adminGrantTx(tx, userId, 100, "compensation", "admin-test"));
     expect(await balance()).toBe(530);
     expect(await balance()).toBe(await sumRemaining());
 
     // Clawback 40 → free/admin pool (30 + 100) shrinks first; PURCHASE untouched.
-    await prisma.$transaction((tx) => adminClawbackTx(tx, userId, 40, "abuse deduction"));
+    await prisma.$transaction((tx) => adminClawbackTx(tx, userId, 40, "abuse deduction", "admin-test"));
     expect(await balance()).toBe(490);
     expect(await balance()).toBe(await sumRemaining());
     const purchase = await prisma.creditGrant.findFirstOrThrow({ where: { userId, source: "PURCHASE" } });
@@ -50,7 +50,7 @@ describe("admin credit adjustments", () => {
 
   it("rejects clawback beyond available balance", async () => {
     await expect(
-      prisma.$transaction((tx) => adminClawbackTx(tx, userId, 999_999, "too much")),
+      prisma.$transaction((tx) => adminClawbackTx(tx, userId, 999_999, "too much", "admin-test")),
     ).rejects.toThrow("insufficient-credits");
     expect(await balance()).toBe(await sumRemaining());
   });

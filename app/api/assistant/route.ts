@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit } from "@/lib/api";
+import { requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
 import { improvePrompt, ASSISTANT_MODELS } from "@/lib/assistant";
 
 const schema = z.object({
@@ -17,7 +17,10 @@ export async function POST(req: Request) {
     // IP rotation must not lift the cap on uncharged LLM spend.
     const userLimited = await enforceUserRateLimit(userId, "assistant", 30, 60_000);
     if (userLimited) return fail(userLimited);
-    const body = schema.parse(await req.json());
+    // Text-only body — anything beyond a few KB is abuse.
+    const bodyRaw = await readBodyCapped(req, 64 * 1024);
+    if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
+    const body = schema.parse(JSON.parse(bodyRaw.raw));
     const result = await improvePrompt(body.prompt, body.mode, body.model);
     return ok(result);
   } catch (e) {

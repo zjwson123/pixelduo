@@ -23,6 +23,7 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
       prisma.backupCode.deleteMany({ where: { userId: id } }),
       prisma.verificationToken.deleteMany({ where: { userId: id } }),
       prisma.creditReminder.deleteMany({ where: { userId: id } }),
+      prisma.apiKey.deleteMany({ where: { userId: id } }),
       prisma.user.delete({ where: { id: id } }),
     ]);
     return ok({ deleted: true });

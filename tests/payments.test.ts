@@ -105,6 +105,48 @@ describe("StripeProvider", () => {
     expect(partialEvt?.type).toBe("refunded");
     expect(partialEvt?.fullRefund).toBe(false);
   });
+
+  it("maps charge.dispute.created to a full refund resolved via the payment intent", async () => {
+    // Pay-then-chargeback must revoke the granted credits: the dispute object
+    // carries payment_intent (not our session id), so resolution goes through
+    // providerOrderId — which the paid event rewrote to the PI id.
+    const p = new StripeProvider({ webhookSecret: WEBHOOK_SECRET });
+    const payload = stripeEvent("charge.dispute.created", { payment_intent: "pi_dispute_1", amount: 1999 });
+    const headers = new Headers({ "stripe-signature": stripeSignature(payload, WEBHOOK_SECRET) });
+    const evt = await p.verifyWebhook(payload, headers);
+    expect(evt?.type).toBe("refunded");
+    expect(evt?.fullRefund).toBe(true);
+    expect(evt?.orderId).toBeUndefined();
+    expect(evt?.providerOrderId).toBe("pi_dispute_1");
+  });
+
+  it("maps checkout.session.async_payment_succeeded (delayed methods) to paid", async () => {
+    const p = new StripeProvider({ webhookSecret: WEBHOOK_SECRET });
+    const payload = stripeEvent("checkout.session.async_payment_succeeded", { payment_intent: "pi_async" });
+    const headers = new Headers({ "stripe-signature": stripeSignature(payload, WEBHOOK_SECRET) });
+    const evt = await p.verifyWebhook(payload, headers);
+    expect(evt?.type).toBe("paid");
+    // The unpaid completion (SEPA/Boleto before settlement) stays ignored.
+    const unpaid = stripeEvent("checkout.session.completed", { payment_status: "unpaid" });
+    const unpaidHeaders = new Headers({ "stripe-signature": stripeSignature(unpaid, WEBHOOK_SECRET) });
+    expect(await p.verifyWebhook(unpaid, unpaidHeaders)).toBeNull();
+  });
+
+  it("fails at construction when the webhook secret is missing in production", () => {
+    const envWas = process.env.NODE_ENV;
+    (process.env as Record<string, string>).NODE_ENV = "production";
+    const keyWas = process.env.STRIPE_SECRET_KEY;
+    const secretWas = process.env.STRIPE_WEBHOOK_SECRET;
+    process.env.STRIPE_SECRET_KEY = "sk_live_dummy"; // pass the live-key gate
+    delete process.env.STRIPE_WEBHOOK_SECRET;
+    try {
+      expect(() => new StripeProvider()).toThrow(/STRIPE_WEBHOOK_SECRET/);
+    } finally {
+      (process.env as Record<string, string>).NODE_ENV = envWas;
+      process.env.STRIPE_SECRET_KEY = keyWas ?? "sk_test_dummy";
+      if (secretWas) process.env.STRIPE_WEBHOOK_SECRET = secretWas;
+    }
+  });
 });
 
 describe("payment provider resolution", () => {
@@ -229,6 +271,67 @@ describe("PaddleProvider", () => {
     expect(evt?.type).toBe("refunded");
     expect(evt?.providerOrderId).toBe("txn_456");
     expect(evt?.orderId).toBeUndefined();
+  });
+
+  it("treats a partial refund adjustment as partial (amount below transaction total)", async () => {
+    const p = new PaddleProvider({
+      client: new Paddle("pdl_test_dummy", { environment: Environment.sandbox }),
+      webhookSecret: PADDLE_SECRET,
+    });
+    const base = {
+      action: "refund",
+      status: "approved",
+      transaction_id: "txn_456",
+      currency_code: "USD",
+      items: [],
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    const partial = paddleEvent("adjustment.created", {
+      ...base,
+      id: "adj_partial",
+      amount: "100", // $1 goodwill on a $19.99 pack
+      transaction: { id: "txn_456", totals: { total: "1999" } },
+    });
+    const partialHeaders = new Headers({ "paddle-signature": paddleSignature(partial, PADDLE_SECRET) });
+    const partialEvt = await p.verifyWebhook(partial, partialHeaders);
+    expect(partialEvt?.type).toBe("refunded");
+    expect(partialEvt?.fullRefund).toBe(false);
+
+    const full = paddleEvent("adjustment.created", {
+      ...base,
+      id: "adj_full",
+      amount: "1999",
+      transaction: { id: "txn_456", totals: { total: "1999" } },
+    });
+    const fullHeaders = new Headers({ "paddle-signature": paddleSignature(full, PADDLE_SECRET) });
+    const fullEvt = await p.verifyWebhook(full, fullHeaders);
+    expect(fullEvt?.fullRefund).toBe(true);
+
+    // Amounts absent → conservative whole-item refund (previous behavior).
+    const noAmounts = paddleEvent("adjustment.created", { ...base, id: "adj_none" });
+    const noHeaders = new Headers({ "paddle-signature": paddleSignature(noAmounts, PADDLE_SECRET) });
+    const noEvt = await p.verifyWebhook(noAmounts, noHeaders);
+    expect(noEvt?.fullRefund).toBe(true);
+  });
+
+  it("fails at construction when the webhook secret is missing in production", () => {
+    const envWas = process.env.NODE_ENV;
+    const envPaddleWas = process.env.PADDLE_ENVIRONMENT;
+    const apiKeyWas = process.env.PADDLE_API_KEY;
+    const keyWas = process.env.PADDLE_WEBHOOK_SECRET;
+    (process.env as Record<string, string>).NODE_ENV = "production";
+    process.env.PADDLE_API_KEY = "pdl_live_dummy"; // pass the key + env gates
+    process.env.PADDLE_ENVIRONMENT = "production";
+    delete process.env.PADDLE_WEBHOOK_SECRET;
+    try {
+      expect(() => new PaddleProvider()).toThrow(/PADDLE_WEBHOOK_SECRET/);
+    } finally {
+      (process.env as Record<string, string>).NODE_ENV = envWas;
+      if (envPaddleWas) process.env.PADDLE_ENVIRONMENT = envPaddleWas;
+      if (apiKeyWas) process.env.PADDLE_API_KEY = apiKeyWas;
+      if (keyWas) process.env.PADDLE_WEBHOOK_SECRET = keyWas;
+    }
   });
 
   it("rejects bad signatures, expired timestamps, and non-payment events", async () => {

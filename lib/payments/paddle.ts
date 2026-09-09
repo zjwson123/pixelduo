@@ -33,7 +33,11 @@ export class PaddleProvider implements PaymentProvider {
     ) {
       throw new Error("PADDLE_ENVIRONMENT must be 'production' when NODE_ENV=production");
     }
-    this.webhookSecret = opts?.webhookSecret ?? process.env.PADDLE_WEBHOOK_SECRET ?? "";
+    const secret = opts?.webhookSecret ?? process.env.PADDLE_WEBHOOK_SECRET;
+    if (process.env.NODE_ENV === "production" && !opts?.client && !secret) {
+      throw new Error("PADDLE_WEBHOOK_SECRET is required when PAYMENT_PROVIDER=paddle in production");
+    }
+    this.webhookSecret = secret ?? "";
     this.client =
       opts?.client ??
       new Paddle(key as string, {
@@ -110,12 +114,22 @@ export class PaddleProvider implements PaymentProvider {
       if (parsed.event_type === "adjustment.created") {
         if (data.status !== "approved") return null;
         if (data.action !== "refund" && data.action !== "chargeback") return null;
-        // Paddle adjustments are whole-item refunds; treat approved ones as full.
+        // Adjustments can be partial (a $1 goodwill refund on a $49.99 pack):
+        // only an amount at or beyond the transaction total counts as full —
+        // a partial one must not wipe the whole balance or consume the
+        // "paid" status a later genuine full refund needs.
+        let fullRefund = true;
+        const adjAmount = typeof data.amount === "string" || typeof data.amount === "number" ? Number(data.amount) : NaN;
+        const txTotal = (data.transaction as { totals?: { total?: string | number } } | undefined)?.totals?.total;
+        const totalNum = txTotal !== undefined ? Number(txTotal) : NaN;
+        if (Number.isFinite(adjAmount) && Number.isFinite(totalNum) && totalNum > 0) {
+          fullRefund = adjAmount >= totalNum;
+        }
         return {
           provider: this.name,
           eventId: parsed.event_id,
           type: "refunded",
-          fullRefund: true,
+          fullRefund,
           providerOrderId:
             typeof data.transaction_id === "string" ? data.transaction_id
             : typeof data.transactionId === "string" ? data.transactionId

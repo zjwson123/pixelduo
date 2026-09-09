@@ -41,6 +41,14 @@ export async function POST(req: Request) {
         : event.providerOrderId
           ? await tx.order.findFirst({ where: { providerOrderId: event.providerOrderId } })
           : null;
+      // A refund that resolves no order yet (paid event still retrying after a
+      // deploy window — refund resolution needs providerOrderId to have been
+      // rewritten to the PaymentIntent id) must NOT be acked: persisting the
+      // PaymentEvent now would dedupe every retry away and lose the revocation
+      // forever. Throw → 500 → the provider retries until the paid event lands.
+      if (event.type === "refunded" && !order) {
+        throw new Error("refund-webhook-order-unresolved");
+      }
       await tx.paymentEvent.create({
         data: {
           provider: event.provider,

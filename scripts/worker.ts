@@ -1,5 +1,5 @@
 import { claimNextJob, completeJob, failJob, heartbeat, recoverStuckJobs, setJobPolling, schedulePoll } from "../lib/queue";
-import { generateImages, createVideoTask, pollVideoTask, saveRemoteVideo } from "../lib/providers";
+import { generateImages, createVideoTask, pollVideoTask, saveRemoteVideo, type ProviderImage } from "../lib/providers";
 import { modelCost, videoCost } from "../lib/cost";
 import { analyzeImage } from "../lib/safety";
 import { getStorage } from "../lib/storage";
@@ -37,9 +37,36 @@ async function processImageJob(job: {
   prompt: string;
   userId: string;
   refImageKey: string | null;
+  images: string | null;
 }, workerId: string): Promise<boolean> {
   const hb = setInterval(() => heartbeat(job.id).catch(() => undefined), 20_000);
   try {
+    // Resume from a partial attempt: transient failures requeue the job with
+    // the images it already persisted (Job.images holds the checkpoint), so
+    // only the missing images are regenerated instead of re-billing the batch.
+    const saved: ProviderImage[] = [];
+    try {
+      const parsed = JSON.parse(job.images ?? "[]") as unknown;
+      if (Array.isArray(parsed)) {
+        for (const item of parsed) {
+          if (
+            typeof item === "object" && item !== null &&
+            typeof (item as ProviderImage).key === "string" &&
+            typeof (item as ProviderImage).model === "string"
+          ) {
+            saved.push(item as ProviderImage);
+          }
+        }
+      }
+    } catch {
+      // Unreadable checkpoint — start fresh rather than fail the job.
+    }
+    const expectedTotal = job.model === "both" ? job.count * 2 : job.count;
+    const remaining = Math.max(0, expectedTotal - saved.length);
+    if (saved.length > 0) {
+      console.log(`[worker ${workerId}] job ${job.id}: resuming with ${saved.length}/${expectedTotal} images already stored`);
+    }
+
     // Get reference image if this is an edit job
     let imageBase64: string | undefined;
     let imageBase64List: string[] | undefined;
@@ -59,15 +86,36 @@ async function processImageJob(job: {
     const user = await prisma.user.findUnique({ where: { id: job.userId } });
     const isFree = (user?.plan ?? "free") === "free";
 
-    const images = await generateImages({
-      model: job.model,
-      quality: job.quality as "low" | "medium" | "high",
-      count: job.count,
-      prompt: job.prompt,
-      imageBase64,
-      imageBase64List,
-      watermark: isFree,
-    });
+    // Checkpoint each newly persisted image so a later retry resumes here.
+    // Persisting the checkpoint must never fail the generation itself.
+    const persistProgress = async (img: ProviderImage) => {
+      saved.push(img);
+      await prisma.job
+        .update({ where: { id: job.id }, data: { images: JSON.stringify(saved) } })
+        .catch(() => undefined);
+    };
+
+    const generated =
+      remaining > 0
+        ? await generateImages({
+            model: job.model,
+            quality: job.quality as "low" | "medium" | "high",
+            count: remaining,
+            prompt: job.prompt,
+            imageBase64,
+            imageBase64List,
+            watermark: isFree,
+            onImage: persistProgress,
+          })
+        : [];
+    // Checkpointing models (gpt/seedream/wan/mock) already appended their new
+    // images to `saved` via onImage; non-checkpointing paths (both/edit)
+    // return everything here. Merge by storage key so nothing counts twice.
+    const seen = new Set(saved.map((i) => i.key));
+    const images = [...saved];
+    for (const img of generated) {
+      if (!seen.has(img.key)) images.push(img);
+    }
 
     const rows = images.map((img) => ({
       url: img.key,

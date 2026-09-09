@@ -19,7 +19,14 @@ export class StripeProvider implements PaymentProvider {
     if (process.env.NODE_ENV === "production" && !opts?.stripe && key && !key.startsWith("sk_live_")) {
       throw new Error("STRIPE_SECRET_KEY must be a live-mode key (sk_live_…) when NODE_ENV=production");
     }
-    this.webhookSecret = opts?.webhookSecret ?? process.env.STRIPE_WEBHOOK_SECRET ?? "";
+    // A missing webhook secret makes every verification fail (forgery-safe),
+    // but checkout would keep accepting real money whose orders can never
+    // fulfill — same fail-at-boot policy as the live-key check above.
+    const secret = opts?.webhookSecret ?? process.env.STRIPE_WEBHOOK_SECRET;
+    if (process.env.NODE_ENV === "production" && !opts?.stripe && !secret) {
+      throw new Error("STRIPE_WEBHOOK_SECRET is required when PAYMENT_PROVIDER=stripe in production");
+    }
+    this.webhookSecret = secret ?? "";
     this.stripe = opts?.stripe ?? new Stripe(key as string);
   }
 
@@ -58,10 +65,17 @@ export class StripeProvider implements PaymentProvider {
         amount_refunded?: number;
         amount?: number;
       };
-      let orderId = obj?.client_reference_id ?? obj?.metadata?.orderId;
+      let orderId: string | undefined = obj?.client_reference_id ?? obj?.metadata?.orderId;
       let type: "paid" | "refunded" | null = null;
       let fullRefund: boolean | undefined;
-      if (event.type === "checkout.session.completed" && obj?.payment_status === "paid") type = "paid";
+      // async_payment_succeeded: delayed-notification methods (SEPA, Boleto…)
+      // settle after checkout.session.completed arrived as unpaid.
+      if (
+        (event.type === "checkout.session.completed" || event.type === "checkout.session.async_payment_succeeded") &&
+        obj?.payment_status === "paid"
+      ) {
+        type = "paid";
+      }
       if (event.type === "charge.refunded") {
         type = "refunded";
         orderId = orderId ?? obj?.metadata?.orderId;
@@ -71,6 +85,17 @@ export class StripeProvider implements PaymentProvider {
           typeof obj.amount_refunded === "number" && typeof obj.amount === "number"
             ? obj.amount_refunded >= obj.amount
             : true;
+      }
+      // A dispute (chargeback) reverses the money like a refund and must
+      // revoke the granted credits, or pay-then-chargeback converts packs
+      // into free credits. The dispute object references the payment intent
+      // (not the session), so resolution goes through providerOrderId —
+      // which the paid event already rewrote to the PI id. Dispute *wins*
+      // (funds_reinstated) are handled by an admin re-grant, deliberately.
+      if (event.type === "charge.dispute.created") {
+        type = "refunded";
+        fullRefund = true;
+        orderId = undefined;
       }
       if (!type) return null;
       return {

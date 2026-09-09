@@ -51,6 +51,14 @@ export async function POST(req: Request) {
     const isVideo = getModel(model)?.mediaType === "video";
 
     if (isVideo) {
+      // The public API has no image field: pure image-to-video models (i2v)
+      // would pre-auth credits and die at the provider with no first frame.
+      if (getModel(model)?.requiresImageInput) {
+        return new NextResponse(
+          JSON.stringify({ ok: false, error: `invalid-input: ${model} requires a first-frame image — use the web app` }),
+          { status: 400 },
+        );
+      }
       // Provider-enforced duration range (Seedance 2.0 rejects <4s) — check
       // before pre-authing credits
       const range = getModel(model)?.durationSecRange;

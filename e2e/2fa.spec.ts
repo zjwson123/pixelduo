@@ -22,7 +22,7 @@ async function signOutAndOpenLogin(page: Page, email: string, password: string) 
   await expect(page.locator("h1", { hasText: "Two-factor authentication" })).toBeVisible();
 }
 
-test("2FA: enable, TOTP login, backup code login, guarded partial session", async ({ page }) => {
+test("2FA: enable (password re-auth + global sign-out), TOTP login, backup code login", async ({ page }) => {
   // Multi-step auth flow; slow CI runners need headroom beyond the default 60s.
   test.setTimeout(120_000);
   const email = `2fa-${Date.now()}@test.dev`;
@@ -36,8 +36,9 @@ test("2FA: enable, TOTP login, backup code login, guarded partial session", asyn
   await page.click('button[type="submit"]');
   await page.waitForURL("**/studio");
 
-  // 2. Enable 2FA from the security page.
+  // 2. Enable 2FA from the security page — now behind password re-auth.
   await page.goto("/account/security");
+  await page.fill("#setup-pw", password);
   await page.locator("button", { hasText: "Enable 2FA" }).click();
   const secret = (await page.locator("code").innerText()).trim();
   await expect(page.locator("img[alt='TOTP QR code']")).toBeVisible();
@@ -48,22 +49,26 @@ test("2FA: enable, TOTP login, backup code login, guarded partial session", asyn
   await expect(page.locator("h2", { hasText: "Save your backup codes" })).toBeVisible();
   const backupCodes = await page.locator("code").allInnerTexts();
   expect(backupCodes).toHaveLength(10);
-  await page.locator("button", { hasText: "I saved them" }).click();
-  await expect(page.locator("button", { hasText: "Disable 2FA" })).toBeVisible();
+  // Enabling 2FA invalidates every pre-existing session — the enabling browser
+  // included; the page says so and routes to sign-in.
+  await expect(page.getByText("all other sessions were signed out", { exact: false })).toBeVisible();
+  await page.locator("a", { hasText: "Go to sign-in" }).click();
+  await expect(page.locator("#email")).toBeVisible();
 
-  // 3. Sign out, sign back in → 2FA step; protected API is guarded meanwhile.
-  await page.goto("/studio");
-  await signOutAndOpenLogin(page, email, password);
+  // 3. Sign in with password + live TOTP code.
+  await page.fill("#email", email);
+  await page.fill("#password", password);
+  await page.click('button[type="submit"]');
+  await expect(page.locator("h1", { hasText: "Two-factor authentication" })).toBeVisible();
 
   const meStatus = await page.evaluate(() => fetch("/api/me").then((r) => r.status));
   expect(meStatus).toBe(403); // partial session cannot touch protected APIs
 
-  // 4. Complete login with a live TOTP code.
   await page.fill("#code", totp());
   await page.locator("button", { hasText: "Verify" }).click();
   await page.waitForURL("**/studio");
 
-  // 5. Sign out and log in again with a backup code.
+  // 4. Sign out and log in again with a backup code.
   await signOutAndOpenLogin(page, email, password);
   await page.locator("button", { hasText: "Use a backup code instead" }).click();
   await page.fill("#code", backupCodes[0]);

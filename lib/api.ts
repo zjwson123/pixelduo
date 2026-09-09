@@ -128,3 +128,23 @@ export async function enforceUserRateLimit(
   const r = await rateLimit(`u:${scope}:${userId}`, limit, windowMs);
   return r.ok ? null : new ApiError(429, "rate-limited");
 }
+
+// Refuse oversized bodies BEFORE req.json() buffers them: Node route handlers
+// have no built-in cap, so a multi-hundred-MB authenticated upload is a heap-
+// exhaustion vector even when zod would reject it after parsing. Reads the
+// body once (text() consumes it) and hands the raw string back — callers
+// JSON.parse it themselves. Same pattern as the payment webhook route.
+export async function readBodyCapped(
+  req: Request,
+  maxBytes: number,
+): Promise<{ tooLarge: true } | { raw: string }> {
+  const declared = Number(req.headers.get("content-length") ?? NaN);
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    return { tooLarge: true };
+  }
+  const raw = await req.text();
+  if (raw.length > maxBytes) {
+    return { tooLarge: true };
+  }
+  return { raw };
+}

@@ -14,13 +14,13 @@ const schema = z.object({
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   try {
-    await requireAdmin();
+    const adminId = await requireAdmin();
     const body = schema.parse(await req.json());
     const user = await prisma.user.findUnique({ where: { id: id }, select: { id: true } });
     if (!user) return fail(new Error("user-not-found"));
     await prisma.$transaction(async (tx) => {
-      if (body.delta > 0) await adminGrantTx(tx, user.id, body.delta, body.note);
-      else await adminClawbackTx(tx, user.id, -body.delta, body.note);
+      if (body.delta > 0) await adminGrantTx(tx, user.id, body.delta, body.note, adminId);
+      else await adminClawbackTx(tx, user.id, -body.delta, body.note, adminId);
     });
     const updated = await prisma.user.findUniqueOrThrow({ where: { id: user.id }, select: { credits: true } });
     return ok({ credits: updated.credits });

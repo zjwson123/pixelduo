@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "./prisma";
 import { estimateGenerationCost, estimateModelCost, type ModelId, type Quality } from "./cost";
 import { addCreditsTx, spendCreditsTx, refundCreditsTx, type SpendConsumption } from "./ledger";
+import { getStorage } from "./storage";
 
 export interface CreateJobInput {
   userId: string;
@@ -242,6 +243,12 @@ export async function failJob(jobId: string, error: string, opts?: { terminal?: 
         jobId,
         "refund on terminal failure",
       );
+      // The ref image outlived its job — retries are over, so nothing can
+      // read it anymore. Without this, terminally-failed edit jobs leak the
+      // upload permanently (credit-neutral loops could fill storage).
+      if (job.refImageKey) {
+        await getStorage().delete(job.refImageKey).catch(() => undefined);
+      }
     }
   });
 }

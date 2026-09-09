@@ -53,6 +53,9 @@ export async function POST(req: Request) {
       prisma.backupCode.deleteMany({ where: { userId } }),
       prisma.verificationToken.deleteMany({ where: { userId } }),
       prisma.creditReminder.deleteMany({ where: { userId } }),
+      // ApiKey has no FK relation (by design, hash-only table), so it needs an
+      // explicit wipe or key metadata survives the erasure request.
+      prisma.apiKey.deleteMany({ where: { userId } }),
       prisma.user.delete({ where: { id: userId } }),
     ]);
     return ok({ deleted: true });
