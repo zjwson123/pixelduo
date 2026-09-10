@@ -58,10 +58,13 @@ function expectedStatus(msg: string): number | null {
     msg.startsWith("model-disabled:") ||
     msg.startsWith("not-a-video-model:") ||
     msg.startsWith("video-timeout:") ||
-    msg.startsWith("image-flagged:")
+    msg.startsWith("image-flagged:") ||
+    msg.startsWith("cannot-") ||
+    msg.includes("2fa-code-required")
   ) {
     return 400;
   }
+  if (msg.startsWith("too-many-keys")) return 409;
   if (msg.startsWith("queue-full:") || msg.includes("rate-limited")) return 429;
   if (msg.includes("unauthorized")) return 401;
   if (msg.includes("2fa-required") || msg.includes("admin-required") || msg.includes("verify-email-required")) {
@@ -131,9 +134,12 @@ export async function enforceUserRateLimit(
 
 // Refuse oversized bodies BEFORE req.json() buffers them: Node route handlers
 // have no built-in cap, so a multi-hundred-MB authenticated upload is a heap-
-// exhaustion vector even when zod would reject it after parsing. Reads the
-// body once (text() consumes it) and hands the raw string back — callers
-// JSON.parse it themselves. Same pattern as the payment webhook route.
+// exhaustion vector even when zod would reject it after parsing. Streams the
+// body with a running byte counter and aborts at the cap — req.text() would
+// buffer the ENTIRE body first (chunked transfer-encoding sends no
+// content-length, so the header pre-check alone is bypassable). Counts bytes,
+// not string length, so multibyte bodies can't slip ~3-4x past the cap.
+// Returns the raw string — callers JSON.parse it themselves.
 export async function readBodyCapped(
   req: Request,
   maxBytes: number,
@@ -142,9 +148,24 @@ export async function readBodyCapped(
   if (Number.isFinite(declared) && declared > maxBytes) {
     return { tooLarge: true };
   }
-  const raw = await req.text();
-  if (raw.length > maxBytes) {
-    return { tooLarge: true };
+  if (!req.body) {
+    const raw = await req.text();
+    return Buffer.byteLength(raw, "utf8") > maxBytes ? { tooLarge: true } : { raw };
   }
-  return { raw };
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      // Cancel so the client upload is cut off instead of drained.
+      await reader.cancel().catch(() => {});
+      return { tooLarge: true };
+    }
+    chunks.push(value);
+  }
+  return { raw: Buffer.concat(chunks).toString("utf8") };
 }

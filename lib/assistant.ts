@@ -1,5 +1,6 @@
 import { getDeepSeekKey, getDeepSeekBaseUrl, getModelVerseKey, getAliyunKey } from "./keys";
 import { ASSISTANT_MODELS } from "./assistant-models";
+import { readJsonCapped } from "./store";
 
 export { ASSISTANT_MODELS };
 export type { AssistantModelOption } from "./assistant-models";
@@ -95,7 +96,7 @@ async function callAssistantModel(prompt: string, mode: string, modelId: string)
       clearTimeout(timer);
     }
     if (res.ok) {
-      const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+      const data = (await readJsonCapped(res, 8 * 1024 * 1024)) as unknown as { choices?: Array<{ message?: { content?: string } }> };
       const text = data.choices?.[0]?.message?.content?.trim();
       if (text) return { text, offline: false, model: modelId };
     }

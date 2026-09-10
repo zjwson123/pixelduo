@@ -16,7 +16,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     if (!job) return new NextResponse(JSON.stringify({ ok: false, error: "job-not-found" }), { status: 404 });
     let images: string[];
     try {
-      images = JSON.parse(job.images) as string[];
+      images = (JSON.parse(job.images) as unknown[]).filter((k): k is string => typeof k === "string");
       if (!Array.isArray(images)) images = [];
     } catch {
       images = [];

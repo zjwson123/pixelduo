@@ -3,6 +3,7 @@
 
 import { getDeepSeekKey, getDeepSeekBaseUrl } from "./keys";
 import { getImageModels } from "./model-registry";
+import { readJsonCapped } from "./store";
 
 export interface RoutingResult {
   recommendedModel: string;
@@ -64,7 +65,7 @@ export async function routePrompt(prompt: string): Promise<RoutingResult> {
       clearTimeout(timer);
     }
     if (res.ok) {
-      const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+      const data = (await readJsonCapped(res, 8 * 1024 * 1024)) as unknown as { choices?: Array<{ message?: { content?: string } }> };
       const text = data.choices?.[0]?.message?.content?.trim() ?? "";
       const cleaned = text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "");
       const start = cleaned.indexOf("{");

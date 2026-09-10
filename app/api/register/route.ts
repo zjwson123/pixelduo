@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { signupBonus } from "@/lib/ledger";
 import { createToken } from "@/lib/tokens";
 import { sendVerificationEmail } from "@/lib/mail";
-import { ok, fail, enforceRateLimit } from "@/lib/api";
+import { ok, fail, enforceRateLimit, readBodyCapped } from "@/lib/api";
 
 const schema = z.object({
   email: z.string().email().max(120),
@@ -20,7 +20,9 @@ export async function POST(req: Request) {
     const registerLimit = Number(process.env.REGISTER_RATE_LIMIT ?? 10);
     const limited = await enforceRateLimit(req, "register", registerLimit, 3_600_000);
     if (limited) return limited;
-    const body = schema.parse(await req.json());
+    const bodyRaw = await readBodyCapped(req, 8 * 1024);
+    if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
+    const body = schema.parse(JSON.parse(bodyRaw.raw));
     const email = body.email.toLowerCase().trim();
     const existing = await prisma.user.findUnique({ where: { email } });
     if (existing) return fail(new Error("email-already-registered"));

@@ -2,6 +2,7 @@ import fs from "fs";
 import fsp from "fs/promises";
 import path from "path";
 import { randomUUID } from "crypto";
+import { Readable } from "stream";
 import {
   S3Client,
   PutObjectCommand,
@@ -11,9 +12,17 @@ import {
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
+export interface StorageStream {
+  stream: ReadableStream<Uint8Array>;
+  length?: number;
+}
+
 export interface StorageDriver {
   put(key: string, data: Buffer, contentType?: string): Promise<void>;
   get(key: string): Promise<Buffer | null>;
+  // Streaming variant for serving large objects (videos): get() materializes
+  // the whole object in heap, so /api/files must not use it.
+  getStream(key: string): Promise<StorageStream | null>;
   delete(key: string): Promise<void>;
   publicUrl(key: string): Promise<string>;
   health(): Promise<boolean>;
@@ -59,6 +68,20 @@ class LocalStorage implements StorageDriver {
       fs.unlinkSync(this.p(key));
     } catch {
       // ignore missing
+    }
+  }
+
+  async getStream(key: string): Promise<StorageStream | null> {
+    try {
+      const f = this.p(key);
+      const stat = await fsp.stat(f);
+      if (!stat.isFile()) return null;
+      return {
+        stream: Readable.toWeb(fs.createReadStream(f)) as ReadableStream<Uint8Array>,
+        length: stat.size,
+      };
+    } catch {
+      return null;
     }
   }
 
@@ -108,6 +131,19 @@ class S3Storage implements StorageDriver {
     try {
       const r = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }));
       return Buffer.from(await r.Body!.transformToByteArray());
+    } catch {
+      return null;
+    }
+  }
+
+  async getStream(key: string): Promise<StorageStream | null> {
+    try {
+      const r = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }));
+      if (!r.Body) return null;
+      return {
+        stream: Readable.toWeb(r.Body as Readable) as ReadableStream<Uint8Array>,
+        length: r.ContentLength,
+      };
     } catch {
       return null;
     }

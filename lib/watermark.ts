@@ -1,14 +1,36 @@
 import sharp from "sharp";
 
+// Raster magic bytes only — provider bytes are untrusted input to libvips,
+// and an SVG payload would reach librsvg's XML parser (entity/filter abuse).
+function isRasterImage(buf: Buffer): boolean {
+  if (buf.length >= 4 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return true; // PNG
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return true; // JPEG
+  if (
+    buf.length >= 12 &&
+    buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&
+    buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50
+  ) {
+    return true; // WebP
+  }
+  return false;
+}
+
+// Pixel-count cap: sharp's ~268MP default admits a ~1GB RGBA decompression
+// bomb; 100MP is far above any real generated image.
+const MAX_INPUT_PIXELS = 100_000_000;
+
 // Bake a visible "AI 生成" badge into an image (bottom-right).
 // Watermark is a plan perk: free plans get marked outputs, paid plans get
 // clean files. gpt-image-2 has no built-in AI marker (unlike Seedream's
 // provider-side "AI生成" mark, toggled via the API watermark param), so for
 // free-tier gpt/wan images we bake our own badge here.
 export async function bakeWatermark(buf: Buffer): Promise<Buffer> {
-  const meta = await sharp(buf).metadata();
-  const width = meta.width ?? 1024;
-  const height = meta.height ?? width;
+  if (!isRasterImage(buf)) throw new Error("unsupported-image-format");
+  const meta = await sharp(buf, { limitInputPixels: MAX_INPUT_PIXELS }).metadata();
+  // Provider-controlled dimensions flow into the badge SVG's raster size —
+  // clamp so a lying header can't request a multi-GB librsvg allocation.
+  const width = Math.min(meta.width ?? 1024, 8192);
+  const height = Math.min(meta.height ?? width, 8192);
   const fontSize = Math.max(24, Math.round(width / 32));
   const pad = Math.max(12, Math.round(width / 60));
   // Images too small to carry a readable badge (e.g. the 1×1 mock

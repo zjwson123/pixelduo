@@ -19,7 +19,7 @@ export type LedgerType =
 // - SUBSCRIPTION (monthly quota): valid until the cycle end (planRenewsAt)
 // - ROLLOVER (30% carryover): valid only until the following cycle end
 // - SIGNUP_BONUS / CHECKIN (free): never expire
-export type GrantSource = "SIGNUP_BONUS" | "CHECKIN" | "PURCHASE" | "SUBSCRIPTION" | "ROLLOVER" | "ADMIN";
+export type GrantSource = "SIGNUP_BONUS" | "CHECKIN" | "PURCHASE" | "SUBSCRIPTION" | "ROLLOVER" | "ADMIN" | "REFUND";
 
 export interface SpendConsumption {
   grantId: string;
@@ -154,7 +154,12 @@ export async function spendCreditsTx(
 }
 
 // Refund restores the exact grants consumed by the original pre-auth.
-// Grants keep their original expiry (a failed job never extends validity).
+// Grants keep their original expiry (a failed job never extends validity) —
+// EXCEPT grants that expired (or vanished) while the job sat in retries:
+// the expiry sweep zeroes remaining>0 rows on expired grants and deducts
+// them back out of the balance, which would silently swallow the refund.
+// The expired portion lands in a fresh non-expiring REFUND grant instead,
+// preserving User.credits == SUM(CreditGrant.remaining).
 export async function refundCreditsTx(
   tx: Prisma.TransactionClient,
   userId: string,
@@ -170,10 +175,41 @@ export async function refundCreditsTx(
     await addCreditsTx(tx, userId, "REFUND", amount, refType, refId, note);
     return;
   }
+  // Lock the consumed rows so the expiry sweep serializes with this refund:
+  // if the sweep locks first it zeroes the row and the expiry check below
+  // (re-read after the lock) routes that portion into the replacement grant.
+  const rows = await tx.$queryRaw<Array<{ id: string; expiresAt: Date | null }>>(
+    Prisma.sql`SELECT id, "expiresAt" FROM "CreditGrant"
+      WHERE id IN (${Prisma.join(consumption.map((c) => c.grantId))})
+      FOR UPDATE`,
+  );
+  const expiredOrGone = new Set(
+    rows
+      .filter((r) => !r.expiresAt || r.expiresAt.getTime() <= Date.now())
+      .map((r) => r.id),
+  );
+  let expiredTotal = 0;
   for (const c of consumption) {
+    if (expiredOrGone.has(c.grantId) || !rows.some((r) => r.id === c.grantId)) {
+      expiredTotal += c.amount;
+      continue;
+    }
     await tx.creditGrant.update({
       where: { id: c.grantId },
       data: { remaining: { increment: c.amount } },
+    });
+  }
+  if (expiredTotal > 0) {
+    await tx.creditGrant.create({
+      data: {
+        userId,
+        source: "REFUND",
+        amount: expiredTotal,
+        remaining: expiredTotal,
+        expiresAt: null,
+        refType: refType ?? null,
+        refId: refId ?? null,
+      },
     });
   }
   await addCreditsTx(tx, userId, "REFUND", amount, refType, refId, note);
@@ -206,7 +242,16 @@ export async function dailyCheckin(userId: string): Promise<CheckinResult> {
       where: { userId_date: { userId, date } },
     });
     if (existing) return { claimed: false, credits: 0 };
-    await tx.checkin.create({ data: { userId, date, credits: 2 } });
+    try {
+      await tx.checkin.create({ data: { userId, date, credits: 2 } });
+    } catch (e) {
+      // Two tabs checking in at once: the @@unique(userId, date) loser is a
+      // normal "already claimed today", not a 500.
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
+        return { claimed: false, credits: 0 };
+      }
+      throw e;
+    }
     await grantCreditsTx(tx, userId, "CHECKIN", 2, null, "none", date, "daily check-in");
     return { claimed: true, credits: 2 };
   });

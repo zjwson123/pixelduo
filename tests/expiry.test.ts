@@ -61,6 +61,45 @@ describe("credit grants & expiry", () => {
     expect(await grantRemaining("PURCHASE")).toBe(990);
   });
 
+  it("a refund for a grant that expired mid-retry lands in a fresh non-expiring grant", async () => {
+    // Refunding into the dead grant would hand the expiry sweep a fresh
+    // remaining>0 row on an expired grant — the sweep zeroes it and deducts
+    // the refund right back out of the balance (user silently loses it).
+    // Uses its own user so the cumulative assertions below are unaffected.
+    const u = await prisma.user.create({
+      data: { email: `expiry-refund-${Date.now()}@test.dev`, passwordHash: "x" },
+    });
+    try {
+      const bal = () => prisma.user.findUniqueOrThrow({ where: { id: u.id } }).then((x) => x.credits);
+      const soon = new Date(Date.now() + 2000);
+      const consumption = await prisma.$transaction(async (tx) => {
+        await grantCreditsTx(tx, u.id, "PURCHASE", 50, soon);
+        return spendCreditsTx(tx, u.id, 50, "job", "j-exp-refund", "spend before expiry");
+      });
+      expect(consumption).toHaveLength(1);
+      const before = await bal();
+      await new Promise((r) => setTimeout(r, 2100)); // grant crosses expiresAt
+      await prisma.$transaction((tx) =>
+        refundCreditsTx(tx, u.id, 50, consumption, "job", "j-exp-refund", "late refund"),
+      );
+      expect(await bal()).toBe(before + 50);
+      await runExpiry(); // must NOT claw the refund back out
+      expect(await bal()).toBe(before + 50);
+      const replacement = await prisma.creditGrant.findFirstOrThrow({
+        where: { userId: u.id, source: "REFUND" },
+      });
+      expect(replacement.remaining).toBe(50);
+      expect(replacement.expiresAt).toBeNull();
+      // And the refund grant is spendable (invariant: credits == SUM(remaining)).
+      await prisma.$transaction((tx) =>
+        spendCreditsTx(tx, u.id, 50, "job", "j-exp-refund-2", "spend replacement"),
+      );
+      expect(await bal()).toBe(before);
+    } finally {
+      await prisma.user.deleteMany({ where: { id: u.id } });
+    }
+  });
+
   it("spends earliest-expiring paid grants first", async () => {
     const soon = new Date(Date.now() + 7 * 24 * 3600_000);
     const later = new Date(Date.now() + PACK_VALIDITY_MS);

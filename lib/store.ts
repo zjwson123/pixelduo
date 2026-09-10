@@ -1,5 +1,7 @@
 import { isIP } from "net";
 import { lookup as dnsLookup } from "dns/promises";
+import { lookup as dnsLookupCb, type LookupAddress, type LookupOptions } from "dns";
+import { Agent, fetch as pinnedFetch } from "undici";
 import { getStorage, newStorageKey } from "./storage";
 
 export async function saveBase64Image(base64: string, ext = "png"): Promise<string> {
@@ -40,13 +42,50 @@ export async function readBodyCapped(res: Response, maxBytes: number): Promise<B
   return Buffer.concat(chunks);
 }
 
+// Parse a JSON response body with the same streaming cap — for outbound calls
+// to operator-configured LLM/moderation endpoints (a hostile or compromised
+// gateway must not be able to OOM the process with an unbounded body).
+export async function readJsonCapped(res: Response, maxBytes: number): Promise<Record<string, unknown>> {
+  return JSON.parse((await readBodyCapped(res, maxBytes)).toString("utf8")) as Record<string, unknown>;
+}
+
 // ---- SSRF guard ----------------------------------------------------------
 // The URL comes from a provider response, not user input, but a compromised
 // provider must not be able to point us at internal services. Validate every
-// hop: scheme, IP literal form (including decimal/hex/octal and IPv6-mapped
-// spellings), and all DNS-resolved addresses. Residual risk: a TOCTOU DNS
-// rebinding between our lookup and fetch's own resolution (pinning the
-// connection to the resolved IP would require a custom agent).
+// hop: scheme, port, IP literal form (including decimal/hex/octal and
+// IPv6-mapped spellings), and all DNS-resolved addresses. The fetch itself
+// runs on a pinned undici Agent whose custom lookup re-validates every
+// address at CONNECT time — closing the DNS-rebinding TOCTOU where a
+// TTL≈0 name resolves public for our check and internal for fetch's own
+// resolution (validation and connect now share one lookup).
+
+// Custom connect-time lookup: resolve, drop private-range addresses, and
+// fail closed when every address is internal.
+const publicOnlyLookup = (
+  host: string,
+  opts: LookupOptions,
+  cb: (err: NodeJS.ErrnoException | null, address: string, family?: number) => void,
+) => {
+  dnsLookupCb(host, { ...opts, all: true }, (err, addrs: LookupAddress[] | LookupAddress) => {
+    if (err) return cb(err, "");
+    const list: LookupAddress[] = Array.isArray(addrs) ? addrs : [addrs];
+    const safe = list.filter((a) => {
+      if (isIP(a.address) === 4) return !ipv4Private(a.address);
+      if (isIP(a.address) === 6) return !ipv6Private(a.address);
+      return false;
+    });
+    if (safe.length === 0) {
+      const blocked = new Error("blocked-internal-address") as NodeJS.ErrnoException;
+      blocked.code = "EACCES";
+      return cb(blocked, "", 4);
+    }
+    cb(null, safe[0].address, safe[0].family ?? (isIP(safe[0].address) === 6 ? 6 : 4));
+  });
+};
+
+const ssrfPinnedAgent = new Agent({
+  connect: { lookup: publicOnlyLookup },
+});
 
 function ipv4Private(v4: string): boolean {
   const o = v4.split(".").map(Number);
@@ -164,8 +203,22 @@ export async function fetchPublicBuffer(rawUrl: string, opts: FetchPublicOptions
     let url = parsed;
     for (let hop = 0; hop < 6; hop++) {
       if (!(await hostIsPublic(url.hostname))) throw new Error("blocked-internal-url");
-      const res = await fetch(url, { signal: controller.signal, redirect: "manual" });
+      // Ports are part of the SSRF surface too: without this a "public" host
+      // could be probed on internal-ish services (redis :6379, ssh :22 …).
+      if (url.port !== "" && url.port !== "80" && url.port !== "443") {
+        throw new Error("blocked-port");
+      }
+      // Pinned agent: even if DNS rebinds between the check above and the
+      // TCP connect, the connect itself refuses non-public addresses.
+      const res = (await pinnedFetch(url, {
+        signal: controller.signal,
+        redirect: "manual",
+        dispatcher: ssrfPinnedAgent,
+      })) as unknown as Response;
       if (res.status >= 300 && res.status < 400) {
+        // Release the connection instead of leaving the 3xx body pinned
+        // until GC (up to 6 hops per download).
+        await res.body?.cancel().catch(() => undefined);
         const loc = res.headers.get("location");
         if (!loc) throw new Error(`download failed: ${res.status}`);
         try {

@@ -5,7 +5,7 @@ import { serveUserUrl } from "@/lib/store";
 function serialize(job: Awaited<ReturnType<typeof getActiveJobsForUser>>[number]) {
   let images: string[];
   try {
-    images = JSON.parse(job.images) as string[];
+    images = (JSON.parse(job.images) as unknown[]).filter((k): k is string => typeof k === "string");
     if (!Array.isArray(images)) images = [];
   } catch {
     images = [];

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit } from "@/lib/api";
+import { requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { generateTwoFactorSetup } from "@/lib/twofa";
 import bcrypt from "bcryptjs";
@@ -18,7 +18,9 @@ export async function POST(req: Request) {
     if (limited) return limited;
     const userLimited = await enforceUserRateLimit(userId, "2fa-setup", 5, 60_000);
     if (userLimited) return fail(userLimited);
-    const body = schema.parse(await req.json());
+    const bodyRaw = await readBodyCapped(req, 8 * 1024);
+    if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
+    const body = schema.parse(JSON.parse(bodyRaw.raw));
     const user = await prisma.user.findUniqueOrThrow({
       where: { id: userId },
       select: { email: true, totpEnabled: true, passwordHash: true },

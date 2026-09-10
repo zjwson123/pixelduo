@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { requireAdmin } from "@/lib/admin";
-import { ok, fail } from "@/lib/api";
+import { ok, fail, readBodyCapped } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { adminGrantTx, adminClawbackTx } from "@/lib/ledger";
 
@@ -15,7 +15,9 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const { id } = await params;
   try {
     const adminId = await requireAdmin();
-    const body = schema.parse(await req.json());
+    const bodyRaw = await readBodyCapped(req, 8 * 1024);
+    if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
+    const body = schema.parse(JSON.parse(bodyRaw.raw));
     const user = await prisma.user.findUnique({ where: { id: id }, select: { id: true } });
     if (!user) return fail(new Error("user-not-found"));
     await prisma.$transaction(async (tx) => {

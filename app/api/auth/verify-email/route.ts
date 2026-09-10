@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ok, fail, enforceRateLimit } from "@/lib/api";
+import { ok, fail, enforceRateLimit, readBodyCapped } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { signupBonus } from "@/lib/ledger";
 import { consumeToken } from "@/lib/tokens";
@@ -10,7 +10,9 @@ export async function POST(req: Request) {
   try {
     const limited = await enforceRateLimit(req, "verify", 10, 60_000);
     if (limited) return limited;
-    const body = schema.parse(await req.json());
+    const bodyRaw = await readBodyCapped(req, 8 * 1024);
+    if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
+    const body = schema.parse(JSON.parse(bodyRaw.raw));
     const result = await consumeToken("verify-email", body.token);
     if (!result.ok || !result.email) return fail(new Error("invalid-token"));
 

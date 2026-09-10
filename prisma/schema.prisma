@@ -113,7 +113,7 @@ model LedgerEntry {
 model CreditGrant {
   id        String    @id @default(cuid())
   userId    String
-  source    String // SIGNUP_BONUS | CHECKIN | PURCHASE | SUBSCRIPTION | ROLLOVER
+  source    String // SIGNUP_BONUS | CHECKIN | PURCHASE | SUBSCRIPTION | ROLLOVER | ADMIN | REFUND
   amount    Int // original grant
   remaining Int
   expiresAt DateTime?

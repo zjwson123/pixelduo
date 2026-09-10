@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit } from "@/lib/api";
+import { requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
 import { routePrompt } from "@/lib/router";
 
 const schema = z.object({
@@ -16,7 +16,9 @@ export async function POST(req: Request) {
     // IP rotation must not lift the cap on uncharged LLM spend.
     const userLimited = await enforceUserRateLimit(userId, "route", 30, 60_000);
     if (userLimited) return fail(userLimited);
-    const body = schema.parse(await req.json());
+    const bodyRaw = await readBodyCapped(req, 64 * 1024);
+    if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
+    const body = schema.parse(JSON.parse(bodyRaw.raw));
     const result = await routePrompt(body.prompt);
     return ok(result);
   } catch (e) {

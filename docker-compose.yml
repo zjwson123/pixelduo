@@ -51,7 +51,7 @@ services:
       # Local dev: let the container read real provider keys from the host
       # cc-proxy config. Production: inject MODELVERSE_IMAGE_API_KEY /
       # ARK_IMAGE_API_KEY / DEEPSEEK_API_KEY via env/secrets instead.
-      - ${CC_PROXY_CONFIG:-${HOME}/.cc-proxy/config.json}:/root/.cc-proxy/config.json:ro
+      - ${CC_PROXY_CONFIG:-${HOME}/.cc-proxy/config.json}:/home/node/.cc-proxy/config.json:ro
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -74,7 +74,7 @@ services:
       <<: *appenv
       MOCK_IMAGE_PROVIDER: ${MOCK_IMAGE_PROVIDER:-0}
     volumes:
-      - ${CC_PROXY_CONFIG:-${HOME}/.cc-proxy/config.json}:/root/.cc-proxy/config.json:ro
+      - ${CC_PROXY_CONFIG:-${HOME}/.cc-proxy/config.json}:/home/node/.cc-proxy/config.json:ro
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -97,7 +97,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pixelduo}
       POSTGRES_DB: ${POSTGRES_DB:-pixelduo}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -110,7 +110,7 @@ services:
     image: redis:7-alpine
     container_name: pixelduo-redis
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redisdata:/data
     healthcheck:
@@ -127,8 +127,8 @@ services:
       MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-pixelduo}
       MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-pixelduo-secret}
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
     volumes:
       - miniodata:/data
     healthcheck:

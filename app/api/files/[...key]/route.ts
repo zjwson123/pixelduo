@@ -1,4 +1,4 @@
-import { requireUserId, ApiError } from "@/lib/api";
+import { requireUserId, ApiError, enforceRateLimit } from "@/lib/api";
 import { authenticateApiKey } from "@/lib/apikey";
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
@@ -40,6 +40,12 @@ function sniffContentType(buf: Uint8Array): string {
 // any logged-in user can fetch them by key, but the key must exist in the
 // Template table so arbitrary file enumeration is impossible.
 export async function GET(req: Request, { params }: { params: Promise<{ key: string[] }> }) {
+  // Objects are the largest payloads in the system (videos up to 100 MB);
+  // without a per-IP cap a single user concurrent-fetching their own videos
+  // in a loop is a self-service heap/bandwidth pump. 600/min keeps gallery
+  // browsing (dozens of images per page) far below the ceiling.
+  const limited = await enforceRateLimit(req, "files", 600, 60_000);
+  if (limited) return limited;
   const { key: keyParts } = await params;
   const key = keyParts.join("/");
   // requireUserId (not raw getServerSession) so a partial 2FA session or a
@@ -66,23 +72,49 @@ export async function GET(req: Request, { params }: { params: Promise<{ key: str
     if (!template) return new NextResponse("not found", { status: 404 });
   }
 
-  const buf = await getStorage().get(key);
-  if (!buf) return new NextResponse("not found", { status: 404 });
+  // Stream the object: the old full-buffer get() materialized up to 100 MB
+  // per request in heap. Pull the first chunk to sniff the content type from
+  // magic bytes, then replay it ahead of the rest of the stream.
+  const obj = await getStorage().getStream(key);
+  if (!obj) return new NextResponse("not found", { status: 404 });
+  const reader = obj.stream.getReader();
+  const first = await reader.read();
+  const head = first.done ? new Uint8Array(0) : first.value!;
 
   const download = new URL(req.url).searchParams.get("download") === "1";
   // Sanitize filename to prevent header injection (CR/LF, quotes, path traversal).
   const rawName = key.split("/").pop() || "image";
   const baseName = rawName.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 128) || "image";
   const headers: Record<string, string> = {
-    "Content-Type": sniffContentType(buf),
+    "Content-Type": sniffContentType(head),
     "Cache-Control": "private, max-age=31536000, immutable",
     "X-Content-Type-Options": "nosniff",
   };
+  if (obj.length !== undefined) headers["Content-Length"] = String(obj.length);
   if (download) {
     headers["Content-Disposition"] = `attachment; filename="${baseName}"`;
   }
 
-  return new NextResponse(new Uint8Array(buf), {
+  const body = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      try {
+        if (head.byteLength > 0) controller.enqueue(head);
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) controller.enqueue(value);
+        }
+        controller.close();
+      } catch (e) {
+        controller.error(e);
+      }
+    },
+    cancel() {
+      reader.cancel().catch(() => undefined);
+    },
+  });
+
+  return new NextResponse(body, {
     headers,
   });
 }

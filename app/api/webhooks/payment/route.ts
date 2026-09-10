@@ -91,17 +91,34 @@ export async function POST(req: Request) {
       } else if (event.type === "refunded") {
         // Only a FULL refund revokes credits AND flips the order: a partial
         // refund (e.g. $0.01) must neither wipe the remaining balance nor
-        // consume the "paid" status a later full refund still needs.
-        if (order && event.fullRefund !== false) {
-          // CAS from "paid": two distinct refund events (refund + chargeback,
-          // or duplicate deliveries) must not both revoke. Concurrent
-          // deliveries serialize on the row lock; the loser sees count 0.
+        // consume the "paid" status a later full refund still needs. When the
+        // provider doesn't flag full/partial explicitly, compare the refunded
+        // amount against the order amount — and default to FULL when nothing
+        // is comparable (fail closed: a skipped revocation is a fraud win,
+        // an over-broad revoke is an admin-fixable overreaction).
+        let fullRefund = event.fullRefund;
+        if (fullRefund === undefined) {
+          fullRefund =
+            event.refundAmountUsd === undefined ||
+            !order ||
+            event.refundAmountUsd >= order.amountUsd - 0.005;
+        }
+        if (order && fullRefund) {
+          // CAS from "paid" (or "pending" — a refund delivered before the
+          // paid event flips it so the late fulfillment can never grant
+          // credits for an already-refunded payment): two distinct refund
+          // events (refund + chargeback, or duplicate deliveries) must not
+          // both revoke. Concurrent deliveries serialize on the row lock;
+          // the loser sees count 0.
           const claim = await tx.order.updateMany({
-            where: { id: order.id, status: "paid" },
+            where: { id: order.id, status: { in: ["paid", "pending"] } },
             data: { status: "refunded" },
           });
           if (claim.count === 1) {
-            await revokeOrderCreditsTx(tx, order);
+            // A pending order never granted credits — flip status only.
+            if (order.status === "paid") {
+              await revokeOrderCreditsTx(tx, order);
+            }
             const user = await tx.user.findUnique({ where: { id: order.userId }, select: { email: true } });
             return {
               kind: "refund" as const,

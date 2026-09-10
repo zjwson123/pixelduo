@@ -10,7 +10,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     if (!job) return fail(new Error("job-not-found"));
     let images: string[];
     try {
-      images = JSON.parse(job.images) as string[];
+      images = (JSON.parse(job.images) as unknown[]).filter((k): k is string => typeof k === "string");
       if (!Array.isArray(images)) images = [];
     } catch {
       images = [];

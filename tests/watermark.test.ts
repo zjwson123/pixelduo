@@ -42,3 +42,10 @@ describe("bakeWatermark", () => {
     expect(baked.equals(base)).toBe(true);
   });
 });
+
+it("rejects non-raster input — SVG never reaches librsvg", async () => {
+  // Provider bytes are untrusted; an SVG payload would hit librsvg's XML
+  // parser (entity/filter abuse surface).
+  const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"></svg>');
+  await expect(bakeWatermark(svg)).rejects.toThrow("unsupported-image-format");
+});

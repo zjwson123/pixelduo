@@ -18,6 +18,8 @@ export class MockProvider implements PaymentProvider {
         eventId?: string;
         orderId?: string;
         status?: string;
+        fullRefund?: boolean;
+        refundAmountUsd?: number;
         raw?: unknown;
       };
       if (!body.eventId) return null;
@@ -26,6 +28,8 @@ export class MockProvider implements PaymentProvider {
         eventId: body.eventId,
         type: body.status === "refunded" ? "refunded" : "paid",
         orderId: body.orderId,
+        fullRefund: typeof body.fullRefund === "boolean" ? body.fullRefund : undefined,
+        refundAmountUsd: typeof body.refundAmountUsd === "number" ? body.refundAmountUsd : undefined,
         raw: body.raw ?? body,
       };
     } catch {

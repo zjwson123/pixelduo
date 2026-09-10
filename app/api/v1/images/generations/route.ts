@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { NextResponse } from "next/server";
-import { fail, ok } from "@/lib/api";
+import { fail, ok, readBodyCapped } from "@/lib/api";
 import { rateLimit } from "@/lib/rate-limit";
 import { authenticateApiKey } from "@/lib/apikey";
 import { checkPrompt } from "@/lib/safety";
@@ -41,7 +41,9 @@ export async function POST(req: Request) {
         },
       );
     }
-    const body = schema.parse(await req.json());
+    const bodyRaw = await readBodyCapped(req, 64 * 1024);
+    if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
+    const body = schema.parse(JSON.parse(bodyRaw.raw));
     const safety = checkPrompt(body.prompt);
     if (!safety.ok) {
       return new NextResponse(JSON.stringify({ ok: false, error: `blocked:${safety.reason}` }), { status: 400 });

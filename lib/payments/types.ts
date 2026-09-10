@@ -25,6 +25,11 @@ export interface PaymentWebhookEvent {
   // refunds notify but leave granted credits untouched (revoking everything
   // over a $0.01 partial refund would be wildly disproportionate).
   fullRefund?: boolean;
+  // For "refunded": the refunded amount in USD when the provider states it.
+  // Used as the full/partial fallback when the provider doesn't flag it
+  // explicitly — compared against the order amount in the webhook route,
+  // which is where the order row is loaded.
+  refundAmountUsd?: number;
   raw: unknown;
 }
 

@@ -65,8 +65,17 @@ function scopedIdempotencyKey(userId: string, key?: string): string | null {
 export async function createGenerationJob(input: CreateJobInput) {
   const cost = estimateGenerationCost(input.model, input.quality, input.count);
   const idemKey = scopedIdempotencyKey(input.userId, input.idempotencyKey);
+  // Fast path: a replayed idempotency key returns the existing job without
+  // waiting on the advisory lock or counting against the inflight cap — a
+  // client retrying while at the cap must get the duplicate, not a 429.
+  if (idemKey) {
+    const existing = await prisma.job.findUnique({ where: { idempotencyKey: idemKey } });
+    if (existing) return { job: existing, created: false };
+  }
   return prisma.$transaction(async (tx) => {
     await enforceInflightCap(tx, input.userId);
+    // Re-check under the advisory lock: two concurrent same-key submissions
+    // serialize here and the loser must see the winner's committed row.
     if (idemKey) {
       const existing = await tx.job.findUnique({ where: { idempotencyKey: idemKey } });
       if (existing) return { job: existing, created: false };
@@ -105,8 +114,17 @@ export async function createGenerationJob(input: CreateJobInput) {
 export async function createMediaJob(input: CreateMediaJobInput) {
   const cost = estimateModelCost(input.model, input.count, input.quality, input.durationSec ?? 5);
   const idemKey = scopedIdempotencyKey(input.userId, input.idempotencyKey);
+  // Fast path: a replayed idempotency key returns the existing job without
+  // waiting on the advisory lock or counting against the inflight cap — a
+  // client retrying while at the cap must get the duplicate, not a 429.
+  if (idemKey) {
+    const existing = await prisma.job.findUnique({ where: { idempotencyKey: idemKey } });
+    if (existing) return { job: existing, created: false };
+  }
   return prisma.$transaction(async (tx) => {
     await enforceInflightCap(tx, input.userId);
+    // Re-check under the advisory lock: two concurrent same-key submissions
+    // serialize here and the loser must see the winner's committed row.
     if (idemKey) {
       const existing = await tx.job.findUnique({ where: { idempotencyKey: idemKey } });
       if (existing) return { job: existing, created: false };

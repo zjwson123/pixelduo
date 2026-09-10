@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { requireUserId, ok, fail, enforceRateLimit } from "@/lib/api";
+import { requireUserId, ok, fail, enforceRateLimit, readBodyCapped } from "@/lib/api";
 import { getPlan, getPack } from "@/lib/catalog";
 import { prisma } from "@/lib/prisma";
 import { fulfillOrder } from "@/lib/ledger";
@@ -16,7 +16,9 @@ export async function POST(req: Request) {
     const userId = await requireUserId();
     const limited = await enforceRateLimit(req, "checkout", 10, 60_000);
     if (limited) return limited;
-    const body = schema.parse(await req.json());
+    const bodyRaw = await readBodyCapped(req, 16 * 1024);
+    if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
+    const body = schema.parse(JSON.parse(bodyRaw.raw));
     const item = body.kind === "pack" ? getPack(body.itemId) : getPlan(body.itemId);
     if (!item) return fail(new Error("item-not-found"));
     if (body.kind === "plan" && item.price === 0) return fail(new Error("free-plan-not-payable"));

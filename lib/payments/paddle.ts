@@ -115,21 +115,23 @@ export class PaddleProvider implements PaymentProvider {
         if (data.status !== "approved") return null;
         if (data.action !== "refund" && data.action !== "chargeback") return null;
         // Adjustments can be partial (a $1 goodwill refund on a $49.99 pack):
-        // only an amount at or beyond the transaction total counts as full —
-        // a partial one must not wipe the whole balance or consume the
-        // "paid" status a later genuine full refund needs.
-        let fullRefund = true;
-        const adjAmount = typeof data.amount === "string" || typeof data.amount === "number" ? Number(data.amount) : NaN;
-        const txTotal = (data.transaction as { totals?: { total?: string | number } } | undefined)?.totals?.total;
-        const totalNum = txTotal !== undefined ? Number(txTotal) : NaN;
-        if (Number.isFinite(adjAmount) && Number.isFinite(totalNum) && totalNum > 0) {
-          fullRefund = adjAmount >= totalNum;
-        }
+        // a partial one must not wipe the whole balance or consume the "paid"
+        // status a later genuine full refund needs. Paddle flags this directly
+        // on the adjustment resource: data.type is "partial" | "full". (An
+        // earlier version compared data.amount against
+        // data.transaction.totals.total — fields real adjustment payloads
+        // don't carry — so both parsed NaN and every partial was treated as
+        // full.) When the flag is absent, expose the adjustment's own grand
+        // total (data.totals.total, in cents) so the webhook route can compare
+        // it against the order amount once the order row is resolved.
+        const totals = data.totals as { total?: string | number } | undefined;
+        const totalNum = totals?.total !== undefined ? Number(totals.total) : NaN;
         return {
           provider: this.name,
           eventId: parsed.event_id,
           type: "refunded",
-          fullRefund,
+          fullRefund: typeof data.type === "string" ? data.type !== "partial" : undefined,
+          refundAmountUsd: Number.isFinite(totalNum) ? totalNum / 100 : undefined,
           providerOrderId:
             typeof data.transaction_id === "string" ? data.transaction_id
             : typeof data.transactionId === "string" ? data.transactionId

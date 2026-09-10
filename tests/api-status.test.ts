@@ -43,11 +43,35 @@ describe("fail() error classification", () => {
     expect(status).toBe(400);
     expect(body.error).toBe("invalid-json");
   });
+
+  it("maps business rules added in the sixth pass", async () => {
+    expect((await statusOf(new Error("too-many-keys: revoke one first"))).status).toBe(409);
+    expect((await statusOf(new Error("cannot-delete-self"))).status).toBe(400);
+    expect((await statusOf(new Error("cannot-demote-self"))).status).toBe(400);
+    expect((await statusOf(new Error("2fa-code-required"))).status).toBe(400);
+    expect((await statusOf(new Error("user-not-found"))).status).toBe(404);
+  });
 });
 
 describe("readBodyCap", () => {
   const fakeReq = (contentLength: string | null, text: string): Request =>
     ({ headers: new Headers(contentLength ? { "content-length": contentLength } : {}), text: async () => text }) as unknown as Request;
+
+  // A real Request over a ReadableStream body — exactly what a chunked
+  // transfer-encoding request looks like to the route handler (no
+  // content-length header at all).
+  const streamReq = (chunks: string[]): Request =>
+    new Request("http://localhost/x", {
+      method: "POST",
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const c of chunks) controller.enqueue(new TextEncoder().encode(c));
+          controller.close();
+        },
+      }),
+      // @ts-expect-error -- duplex is required when sending a stream body
+      duplex: "half",
+    });
 
   it("rejects on the declared content-length before buffering", async () => {
     const r = await readBodyCapped(fakeReq("999999999", "x"), 64 * 1024);
@@ -62,5 +86,43 @@ describe("readBodyCap", () => {
   it("returns the raw body for parsing when within the cap", async () => {
     const ok = await readBodyCapped(fakeReq("2", "{}"), 64 * 1024);
     expect("raw" in ok && ok.raw).toBe("{}");
+  });
+
+  it("counts bytes, not UTF-16 code units (chunked multibyte body)", async () => {
+    // 60 000 CJK chars = 60 000 UTF-16 units (under a 64 KB string-length
+    // cap) but 180 000 UTF-8 bytes — the byte-based cap must reject it.
+    const r = await readBodyCapped(streamReq(["漢".repeat(60_000)]), 64 * 1024);
+    expect("tooLarge" in r).toBe(true);
+  });
+
+  it("aborts a chunked stream at the cap instead of buffering it whole", async () => {
+    let enqueued = 0;
+    let cancelled = false;
+    const chunk = "x".repeat(1024);
+    const req = new Request("http://localhost/x", {
+      method: "POST",
+      body: new ReadableStream<Uint8Array>({
+        pull(controller) {
+          enqueued += 1;
+          controller.enqueue(new TextEncoder().encode(chunk));
+        },
+        cancel() {
+          cancelled = true;
+        },
+      }),
+      // @ts-expect-error -- duplex is required when sending a stream body
+      duplex: "half",
+    });
+    const r = await readBodyCapped(req, 4 * 1024);
+    expect("tooLarge" in r).toBe(true);
+    // The reader must have stopped after the chunks that crossed the cap —
+    // not drained an endless body into memory first.
+    expect(enqueued).toBeLessThan(16);
+    expect(cancelled).toBe(true);
+  });
+
+  it("reassembles a multi-chunk body within the cap", async () => {
+    const r = await readBodyCapped(streamReq(['{"a":', "1}"]), 64 * 1024);
+    expect("raw" in r && r.raw).toBe('{"a":1}');
   });
 });

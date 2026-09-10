@@ -273,7 +273,7 @@ describe("PaddleProvider", () => {
     expect(evt?.orderId).toBeUndefined();
   });
 
-  it("treats a partial refund adjustment as partial (amount below transaction total)", async () => {
+  it("treats a partial refund adjustment as partial (real payload shape: type flag + own totals)", async () => {
     const p = new PaddleProvider({
       client: new Paddle("pdl_test_dummy", { environment: Environment.sandbox }),
       webhookSecret: PADDLE_SECRET,
@@ -287,32 +287,51 @@ describe("PaddleProvider", () => {
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
+    // Real adjustment.created payloads carry type: "partial" | "full" and the
+    // adjustment's own totals (cents) — no top-level amount, no nested
+    // transaction object (the fabricated fields an earlier version read made
+    // every partial refund parse as NaN-vs-NaN and be treated as FULL).
     const partial = paddleEvent("adjustment.created", {
       ...base,
       id: "adj_partial",
-      amount: "100", // $1 goodwill on a $19.99 pack
-      transaction: { id: "txn_456", totals: { total: "1999" } },
+      type: "partial", // $1 goodwill on a $19.99 pack
+      totals: { subtotal: "100", tax: "0", total: "100" },
     });
     const partialHeaders = new Headers({ "paddle-signature": paddleSignature(partial, PADDLE_SECRET) });
     const partialEvt = await p.verifyWebhook(partial, partialHeaders);
     expect(partialEvt?.type).toBe("refunded");
     expect(partialEvt?.fullRefund).toBe(false);
+    expect(partialEvt?.refundAmountUsd).toBeCloseTo(1);
 
     const full = paddleEvent("adjustment.created", {
       ...base,
       id: "adj_full",
-      amount: "1999",
-      transaction: { id: "txn_456", totals: { total: "1999" } },
+      type: "full",
+      totals: { subtotal: "1999", tax: "0", total: "1999" },
     });
     const fullHeaders = new Headers({ "paddle-signature": paddleSignature(full, PADDLE_SECRET) });
     const fullEvt = await p.verifyWebhook(full, fullHeaders);
     expect(fullEvt?.fullRefund).toBe(true);
+    expect(fullEvt?.refundAmountUsd).toBeCloseTo(19.99);
 
-    // Amounts absent → conservative whole-item refund (previous behavior).
-    const noAmounts = paddleEvent("adjustment.created", { ...base, id: "adj_none" });
-    const noHeaders = new Headers({ "paddle-signature": paddleSignature(noAmounts, PADDLE_SECRET) });
-    const noEvt = await p.verifyWebhook(noAmounts, noHeaders);
-    expect(noEvt?.fullRefund).toBe(true);
+    // Flag absent → fullRefund stays undefined; the webhook route then
+    // compares refundAmountUsd against the order (or fails closed to full).
+    const noFlag = paddleEvent("adjustment.created", {
+      ...base,
+      id: "adj_noflag",
+      totals: { subtotal: "1999", tax: "0", total: "1999" },
+    });
+    const noHeaders = new Headers({ "paddle-signature": paddleSignature(noFlag, PADDLE_SECRET) });
+    const noEvt = await p.verifyWebhook(noFlag, noHeaders);
+    expect(noEvt?.fullRefund).toBeUndefined();
+    expect(noEvt?.refundAmountUsd).toBeCloseTo(19.99);
+
+    // Nothing comparable at all → both undefined (route defaults to full).
+    const bare = paddleEvent("adjustment.created", { ...base, id: "adj_bare" });
+    const bareHeaders = new Headers({ "paddle-signature": paddleSignature(bare, PADDLE_SECRET) });
+    const bareEvt = await p.verifyWebhook(bare, bareHeaders);
+    expect(bareEvt?.fullRefund).toBeUndefined();
+    expect(bareEvt?.refundAmountUsd).toBeUndefined();
   });
 
   it("fails at construction when the webhook secret is missing in production", () => {

@@ -1,6 +1,6 @@
 import { getStorage } from "./storage";
 import { getVisionConfig } from "./keys";
-import { hostIsPublic } from "./store";
+import { hostIsPublic, readJsonCapped } from "./store";
 
 const BLOCKED: Array<{ re: RegExp; reason: string }> = [
   { re: /\b(sex|nude|naked|porn|erotic|nsfw|explicit)\b/i, reason: "adult-content" },
@@ -91,7 +91,7 @@ async function moderateWithVision(dataUrl: string): Promise<ImageAudit> {
       clearTimeout(timer);
     }
     if (!res.ok) return { checked: false };
-    const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+    const data = (await readJsonCapped(res, 8 * 1024 * 1024)) as unknown as { choices?: Array<{ message?: { content?: string } }> };
     const text = data.choices?.[0]?.message?.content;
     if (!text) return { checked: false };
     const parsed = parseModerationJson(text);
@@ -142,7 +142,7 @@ export async function analyzeImage(url: string): Promise<ImageAudit> {
         clearTimeout(timer);
       }
       if (!res.ok) return { checked: false };
-      const data = (await res.json()) as { flagged?: boolean };
+      const data = (await readJsonCapped(res, 8 * 1024 * 1024)) as unknown as { flagged?: boolean };
       return { checked: true, flagged: Boolean(data.flagged), provider: "external" };
     } catch {
       return { checked: false };

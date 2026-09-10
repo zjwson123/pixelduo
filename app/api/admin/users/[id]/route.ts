@@ -9,6 +9,9 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
   try {
     const adminId = await requireAdmin();
     if (id === adminId) return fail(new Error("cannot-delete-self"));
+    // P2025 on the cascade delete below would 500; unknown ids are a plain 404.
+    const target = await prisma.user.findUnique({ where: { id }, select: { id: true } });
+    if (!target) return fail(new Error("user-not-found"));
     // Generated outputs AND user-uploaded reference images (Job.refImageKey)
     // — mirrors the self-service erasure route.
     const images = await prisma.image.findMany({ where: { userId: id }, select: { url: true } });

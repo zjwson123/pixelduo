@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { requireVerifiedUser, ok, fail, enforceRateLimit } from "@/lib/api";
+import { requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { createApiKey } from "@/lib/apikey";
 import { verifyTotp, useBackupCode } from "@/lib/twofa";
@@ -38,13 +38,22 @@ export async function POST(req: Request) {
     const userId = await requireVerifiedUser();
     const limited = await enforceRateLimit(req, "apikey-create", 5, 60_000);
     if (limited) return limited;
-    const body = schema.parse(await req.json());
+    // Per-account cap alongside the per-IP one: this endpoint is a password +
+    // TOTP re-auth gate, so guesses spread across rotating IPs must not
+    // dilute the limit (same treatment as 2fa/disable and account/delete).
+    const userLimited = await enforceUserRateLimit(userId, "apikey-create", 5, 60_000);
+    if (userLimited) return fail(userLimited);
+    const bodyRaw = await readBodyCapped(req, 8 * 1024);
+    if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
+    const body = schema.parse(JSON.parse(bodyRaw.raw));
     const user = await prisma.user.findUniqueOrThrow({
       where: { id: userId },
       select: { passwordHash: true, totpSecret: true, totpEnabled: true },
     });
     if (!(await bcrypt.compare(body.password, user.passwordHash))) return fail(new Error("invalid-password"));
     if (user.totpEnabled && user.totpSecret) {
+      // normalizeBackupCode(undefined) would throw a TypeError → masked 500.
+      if (!body.token && !body.backupCode) return fail(new Error("2fa-code-required"));
       const ok2 = body.token
         ? verifyTotp(user.totpSecret, body.token)
         : await useBackupCode(userId, body.backupCode!);
