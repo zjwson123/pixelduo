@@ -81,7 +81,7 @@ export default function LoginPage() {
               id="code"
               value={code}
               onChange={(e) => setCode(e.target.value)}
-              placeholder={backupMode ? "XXXXXXXXXX" : "••••••"}
+              placeholder={backupMode ? "XXXXXXXXXXXXXXXXXXXX" : "••••••"}
               autoFocus
               required
             />

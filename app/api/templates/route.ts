@@ -43,7 +43,13 @@ export async function GET(req: Request) {
   ]);
 
   return ok({
-    templates: templates.map((t) => ({ ...t, img: serveUserUrl(t.img) })),
+    // Storage keys (imported Explore cases) resolve through the authenticated
+    // /api/files route; the bundled seed set ships in public/templates, so its
+    // absolute path is passed through untouched. Wrapping those in
+    // serveUserUrl produced "/api/files//templates/x.png" — Next collapses the
+    // double slash with a 308, the lookup then misses Template.img (stored
+    // with the leading slash) and every seeded thumbnail 404s.
+    templates: templates.map((t) => ({ ...t, img: t.img.startsWith("/") ? t.img : serveUserUrl(t.img) })),
     total,
     page,
     pageSize,

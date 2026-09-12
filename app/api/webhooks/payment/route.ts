@@ -1,4 +1,4 @@
-import { ok, fail, enforceRateLimit } from "@/lib/api";
+import { ok, fail, enforceRateLimit, readBodyCapped } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { fulfillOrder, revokeOrderCreditsTx } from "@/lib/ledger";
 import { getPaymentProvider } from "@/lib/payments";
@@ -17,14 +17,16 @@ export async function POST(req: Request) {
   try {
     const limited = await enforceRateLimit(req, "webhook", 60, 60_000);
     if (limited) return limited;
-    const declared = Number(req.headers.get("content-length") ?? NaN);
-    if (Number.isFinite(declared) && declared > WEBHOOK_MAX_BYTES) {
-      return new NextResponse("payload too large", { status: 413 });
-    }
-    const raw = await req.text();
-    if (raw.length > WEBHOOK_MAX_BYTES) {
-      return new NextResponse("payload too large", { status: 413 });
-    }
+    // readBodyCapped, not req.text(): the content-length pre-check alone is
+    // bypassable with Transfer-Encoding: chunked, and req.text() buffers the
+    // WHOLE body before the length check can fire — an unauthenticated
+    // multi-GB chunked upload used to be a heap-exhaustion vector here. It
+    // also counts bytes rather than UTF-16 code units, so a multibyte body
+    // can't slip ~3x past the cap. Every other body-reading route already
+    // goes through this helper.
+    const bodyRaw = await readBodyCapped(req, WEBHOOK_MAX_BYTES);
+    if ("tooLarge" in bodyRaw) return new NextResponse("payload too large", { status: 413 });
+    const raw = bodyRaw.raw;
     const event = await getPaymentProvider().verifyWebhook(raw, req.headers);
     if (!event) return new NextResponse("invalid webhook signature", { status: 400 });
 

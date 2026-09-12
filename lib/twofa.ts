@@ -37,7 +37,12 @@ export function verifyTotp(secret: string | null | undefined, token: string): bo
 export function generateBackupCodes(count = 10): string[] {
   const codes: string[] = [];
   for (let i = 0; i < count; i++) {
-    codes.push(randomBytes(6).toString("hex").toUpperCase().slice(0, 10));
+    // 10 random bytes = 80 bits, rendered as 20 hex chars. The previous
+    // 6 bytes sliced to 10 chars carried only 40 bits, which is small enough
+    // to brute-force offline against the (fast, unsalted) SHA-256 hash if the
+    // backup-code table ever leaks. Verification is unchanged: stored hashes
+    // are compared by value, so pre-existing 10-char codes keep working.
+    codes.push(randomBytes(10).toString("hex").toUpperCase());
   }
   return codes;
 }

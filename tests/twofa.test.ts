@@ -65,7 +65,11 @@ describe("two-factor helpers", () => {
   it("hashes backup codes and consumes them once", async () => {
     const codes = generateBackupCodes(3);
     expect(codes).toHaveLength(3);
-    expect(codes[0]).toMatch(/^[A-Z0-9]{10}$/);
+    // Codes are the only recovery path once the authenticator is lost, and
+    // they are verified against a fast unsalted hash — so they must carry real
+    // entropy (80 bits / 20 hex chars), not a guessable 10-char token.
+    expect(codes[0]).toMatch(/^[A-F0-9]{20}$/);
+    expect(new Set(codes).size).toBe(codes.length);
     expect(hashBackupCode(` ${codes[0].toLowerCase()} `)).toBe(hashBackupCode(codes[0]));
     expect(normalizeBackupCode(" abcd-1234 ")).toBe("ABCD1234");
 
