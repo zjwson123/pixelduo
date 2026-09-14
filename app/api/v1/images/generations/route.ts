@@ -27,6 +27,11 @@ export async function POST(req: Request) {
     if (!auth.emailVerified) {
       return new NextResponse(JSON.stringify({ ok: false, error: "verify-email-required" }), { status: 403 });
     }
+    // Client-supplied retry key: without it, a caller that times out on the
+    // 202 and retries pre-auths credits and pays the provider a second time.
+    // Namespaced per user inside scopedIdempotencyKey (lib/queue.ts).
+    const suppliedKey = (req.headers.get("idempotency-key") ?? "").trim().slice(0, 120);
+    const idemSuffix = suppliedKey || randomUUID();
     const r = await rateLimit(`apikey:${auth.keyId}`, 20, 60_000);
     if (!r.ok) {
       return NextResponse.json(
@@ -77,7 +82,7 @@ export async function POST(req: Request) {
         quality: "standard",
         count: 1,
         prompt: body.prompt.trim(),
-        idempotencyKey: `api:${auth.userId}:${body.prompt.trim()}:${randomUUID()}`,
+        idempotencyKey: `api:${body.model}:${body.n}:${body.duration}:${idemSuffix}`,
         durationSec: body.duration,
       });
       return ok({ jobId: job.id, status: job.status, costCredits: job.costCredits, duplicate: !created });
@@ -91,7 +96,7 @@ export async function POST(req: Request) {
         quality: body.quality,
         count: body.n,
         prompt: body.prompt.trim(),
-        idempotencyKey: `api:${auth.userId}:${body.prompt.trim()}:${randomUUID()}`,
+        idempotencyKey: `api:${body.model}:${body.n}:${body.duration}:${idemSuffix}`,
       });
       return ok({ jobId: job.id, status: job.status, costCredits: job.costCredits, duplicate: !created });
     }
@@ -104,7 +109,7 @@ export async function POST(req: Request) {
       quality: body.quality,
       count: body.n,
       prompt: body.prompt.trim(),
-      idempotencyKey: `api:${auth.userId}:${body.prompt.trim()}:${randomUUID()}`,
+      idempotencyKey: `api:${body.model}:${body.n}:${body.duration}:${idemSuffix}`,
     });
     return ok({ jobId: job.id, status: job.status, costCredits: job.costCredits, duplicate: !created });
   } catch (e) {

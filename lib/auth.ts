@@ -5,9 +5,20 @@ import GitHubProvider from "next-auth/providers/github";
 import bcrypt from "bcryptjs";
 import { randomBytes } from "crypto";
 import { prisma } from "./prisma";
-import { isLoginBlocked, recordLoginFailure, clearLoginFailures } from "./login-guard";
+import { reserveLoginAttempt, clearLoginFailures } from "./login-guard";
 import { verifyPreAuthToken } from "./twofa";
 import { signupBonus } from "./ledger";
+
+// Source address for the per-(email, IP) login cap. Behind Caddy the LAST
+// X-Forwarded-For entry is the address the edge saw. The value is a hint only:
+// spoofing it splits the per-pair counter, but the per-email cap still binds.
+function loginAttemptIp(headers: Record<string, unknown> | undefined): string | undefined {
+  const raw = headers?.["x-forwarded-for"] ?? headers?.["x-real-ip"];
+  const value = Array.isArray(raw) ? raw[raw.length - 1] : raw;
+  if (typeof value !== "string") return undefined;
+  const parts = value.split(",").map((s) => s.trim()).filter(Boolean);
+  return parts.length > 0 ? parts[parts.length - 1] : undefined;
+}
 
 interface AuthUser {
   id: string;
@@ -28,7 +39,7 @@ export const authOptions: NextAuthOptions = {
     CredentialsProvider({
       name: "credentials",
       credentials: { email: {}, password: {} },
-      async authorize(credentials) {
+      async authorize(credentials, req) {
         if (!credentials?.email || !credentials?.password) return null;
         const email = credentials.email.toLowerCase().trim();
         const user = await prisma.user.findUnique({ where: { email } });
@@ -36,13 +47,16 @@ export const authOptions: NextAuthOptions = {
           await bcrypt.compare(credentials.password, DUMMY_HASH);
           return null;
         }
-        if (await isLoginBlocked(email)) return null;
+        const ip = loginAttemptIp(req?.headers);
+        // Reserve before the compare (atomic check-and-increment) so a
+        // concurrent burst cannot slip past the cap by all reading the same
+        // pre-increment count.
+        const attempt = await reserveLoginAttempt(email, ip);
+        if (!attempt.allowed) return null;
         const ok = await bcrypt.compare(credentials.password, user.passwordHash);
-        if (!ok) {
-          await recordLoginFailure(email);
-          return null;
-        }
-        await clearLoginFailures(email);
+        if (!ok) return null;
+        // Correct password: refund this attempt from both counters.
+        await clearLoginFailures(email, ip);
         if (user.totpEnabled) {
           const pre = (credentials as Record<string, string>).preAuthToken;
           // Second step: password + valid one-time 2FA ticket → real session.

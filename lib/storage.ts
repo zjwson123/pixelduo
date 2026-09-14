@@ -48,9 +48,11 @@ class LocalStorage implements StorageDriver {
   }
 
   async put(key: string, data: Buffer) {
+    // Async: a synchronous write of a multi-MB reference image blocks the
+    // event loop for every other request in the web container.
     const f = this.p(key);
-    fs.mkdirSync(path.dirname(f), { recursive: true });
-    fs.writeFileSync(f, data);
+    await fsp.mkdir(path.dirname(f), { recursive: true });
+    await fsp.writeFile(f, data);
   }
 
   async get(key: string): Promise<Buffer | null> {
@@ -65,7 +67,7 @@ class LocalStorage implements StorageDriver {
 
   async delete(key: string) {
     try {
-      fs.unlinkSync(this.p(key));
+      await fsp.unlink(this.p(key));
     } catch {
       // ignore missing
     }
@@ -90,11 +92,14 @@ class LocalStorage implements StorageDriver {
   }
 
   async health(): Promise<boolean> {
+    // Same async discipline as put/delete: this runs on every /api/health
+    // probe, and three synchronous syscalls per probe (one of them a write)
+    // stall every concurrent request in the process.
     const probe = path.join(this.root, ".health");
     try {
-      fs.mkdirSync(this.root, { recursive: true });
-      fs.writeFileSync(probe, String(Date.now()));
-      fs.unlinkSync(probe);
+      await fsp.mkdir(this.root, { recursive: true });
+      await fsp.writeFile(probe, String(Date.now()));
+      await fsp.unlink(probe);
       return true;
     } catch {
       return false;

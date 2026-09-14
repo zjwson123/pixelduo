@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { sessionUser, ApiError, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
+import { requirePartialSession, ApiError, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { verifyTotp, useBackupCode, createPreAuthToken } from "@/lib/twofa";
 
@@ -17,7 +17,7 @@ export async function POST(req: Request) {
   try {
     const limited = await enforceRateLimit(req, "2fa", 5, 60_000);
     if (limited) return limited;
-    const su = await sessionUser();
+    const su = await requirePartialSession();
     if (!su.totpPending) return fail(new ApiError(403, "2fa-required"));
     const userLimited = await enforceUserRateLimit(su.id, "2fa-verify", 5, 60_000);
     if (userLimited) return fail(userLimited);

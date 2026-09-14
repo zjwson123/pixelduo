@@ -1,33 +1,19 @@
 import { claimNextJob, completeJob, failJob, heartbeat, recoverStuckJobs, setJobPolling, schedulePoll } from "../lib/queue";
 import { generateImages, createVideoTask, pollVideoTask, saveRemoteVideo, type ProviderImage } from "../lib/providers";
 import { modelCost, videoCost } from "../lib/cost";
-import { analyzeImage } from "../lib/safety";
+import { analyzeAllImagesSequentially } from "../lib/safety";
 import { getStorage } from "../lib/storage";
 import { initObservability, captureError } from "../lib/observability";
 import { bakeWatermark } from "../lib/watermark";
 import { getModel } from "../lib/model-registry";
 import { prisma } from "../lib/prisma";
+import { isPermanentProviderError } from "../lib/worker-errors";
 
 initObservability("worker");
 
 // Hard cap on a single video job (task creation + polling). Long after a
 // normal provider task finishes, this turns a zombie into a refund.
 const VIDEO_HARD_TIMEOUT_MS = 30 * 60_000;
-
-// Provider errors that retries can never fix (auth, key restrictions,
-// delisted models). Failing these terminally refunds the user in seconds
-// instead of after 3 rounds of backoff.
-export function isPermanentProviderError(msg: string): boolean {
-  return (
-    /\b40[13]\b/.test(msg) ||
-    /access ?denied/i.test(msg) ||
-    /invalid.?api.?key/i.test(msg) ||
-    /model .*is offline/i.test(msg) ||
-    /model not exist/i.test(msg) ||
-    /safety system|content (policy|moderation)|flagged.*moderation/i.test(msg) ||
-    /unknown-model|model-not-supported|not-a-video-model|model-disabled/i.test(msg)
-  );
-}
 
 async function processImageJob(job: {
   id: string;
@@ -136,7 +122,9 @@ async function processImageJob(job: {
       }
     }
 
-    const audits = await Promise.all(rows.map((r) => analyzeImage(r.url)));
+    // Sequential, not Promise.all: each in-process audit holds the image
+    // buffer plus its base64 encoding plus the JSON body at once.
+    const audits = await analyzeAllImagesSequentially(rows.map((r) => r.url));
     if (audits.some((a) => a.flagged)) {
       const msg = "image-flagged: moderation rejected the generated image";
       await failJob(job.id, msg, { terminal: true });
@@ -176,6 +164,7 @@ async function processVideoJob(job: {
   providerTaskId: string | null;
   status: string;
   startedAt: Date | null;
+  createdAt: Date;
 }, workerId: string): Promise<boolean> {
   const modelInfo = getModel(job.model);
   if (!modelInfo) {
@@ -207,7 +196,11 @@ async function processVideoJob(job: {
 
     // Phase 2: poll the existing upstream task (whatever status we were
     // claimed in — polling directly, or running/queued after recovery).
-    if (job.startedAt && Date.now() - new Date(job.startedAt).getTime() > VIDEO_HARD_TIMEOUT_MS) {
+    // Measured from createdAt, not startedAt: claimNextJob resets startedAt on
+    // every claim, so a recovered job used to get a fresh 30-minute budget each
+    // time. The cap is meant to bound the upstream task — which is created
+    // exactly once — so it has to survive re-claims.
+    if (Date.now() - new Date(job.createdAt).getTime() > VIDEO_HARD_TIMEOUT_MS) {
       const msg = "video-timeout: task exceeded 30 minutes";
       await failJob(job.id, msg, { terminal: true });
       console.error(`[worker ${workerId}] job ${job.id}: ${msg}`);

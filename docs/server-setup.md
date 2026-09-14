@@ -51,6 +51,7 @@ docker compose -f docker-compose.single.yml up -d --build --scale worker=3
 ```bash
 curl -fsS https://pixelduo.ai/api/health          # db/redis/storage 全 up
 npx tsx scripts/promote-admin.ts <你的邮箱>        # 提权管理员（在服务器上跑）
+npx tsx scripts/reset-2fa.ts <用户邮箱> --notify   # 用户丢失验证器+备用码时重置 2FA（吊销全部会话与 API Key，并邮件通知本人）
 ```
 
 然后按 [release.md](release.md) 的冒烟清单走一遍：注册→邮箱验证→真实支付一笔→退款→API Key→管理台。

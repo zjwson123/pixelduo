@@ -33,6 +33,10 @@ export interface ImageAudit {
   provider?: string;
 }
 
+// Largest image worth sending to the in-process vision audit (base64 + JSON
+// stringification multiply this by ~2.4x).
+const MODERATION_MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+
 // Robustly extract {flagged, reason} from a vision-model reply (may be fenced).
 export function parseModerationJson(text: string): { flagged: boolean; reason?: string } | null {
   const cleaned = text
@@ -152,6 +156,11 @@ export async function analyzeImage(url: string): Promise<ImageAudit> {
     try {
       const buf = await getStorage().get(url);
       if (!buf) return { checked: false };
+      // The vision path base64-encodes the object and stringifies it into a
+      // JSON body, so peak cost per image is roughly 2.4x the file. Skip
+      // anything past the audit budget instead of letting one huge output
+      // dominate the worker's heap.
+      if (buf.length > MODERATION_MAX_IMAGE_BYTES) return { checked: false };
       const ext = url.endsWith(".jpg") || url.endsWith(".jpeg") ? "jpeg" : "png";
       const dataUrl = `data:image/${ext};base64,${buf.toString("base64")}`;
       return moderateWithVision(dataUrl);
@@ -160,4 +169,17 @@ export async function analyzeImage(url: string): Promise<ImageAudit> {
     }
   }
   return { checked: false };
+}
+
+// Audit a batch of images ONE AT A TIME. The caller used Promise.all over a
+// batch of up to 8 images; with the in-process vision path each concurrent
+// audit holds the object buffer, its base64 data URL and the stringified
+// request body simultaneously — a worst case near 1 GB in a single worker
+// container, which OOMs and strands in-flight jobs (which retry and re-bill).
+export async function analyzeAllImagesSequentially(urls: string[]): Promise<ImageAudit[]> {
+  const out: ImageAudit[] = [];
+  for (const url of urls) {
+    out.push(await analyzeImage(url));
+  }
+  return out;
 }

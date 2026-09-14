@@ -32,6 +32,7 @@ export const ROLLOVER_RATE = 0.3;
 export interface CycleUsage {
   granted: number;
   spentNet: number;
+  revoked: number;
 }
 
 // Free credits are consumed first so paid credits can never be diluted by
@@ -103,12 +104,18 @@ export async function cycleUsageTx(
   let granted = 0;
   let preAuth = 0;
   let refund = 0;
+  let revoked = 0;
   for (const e of entries) {
     if (e.type === "SUBSCRIPTION" && e.creditsDelta > 0) granted += e.creditsDelta;
     if (e.type === "PRE_AUTH") preAuth += Math.abs(e.creditsDelta);
     if (e.type === "REFUND") refund += e.creditsDelta;
+    // Clawed-back (REVOKE) and expired (EXPIRE) quota is gone: counting only
+    // PRE_AUTH/REFUND treated a fully refunded cycle as "granted and unused",
+    // so the next purchase collected 30% carryover on credits the user had
+    // already been refunded for — repeatable every cycle.
+    if (e.type === "REVOKE" || e.type === "EXPIRE") revoked += Math.abs(e.creditsDelta);
   }
-  return { granted, spentNet: Math.max(0, preAuth - refund) };
+  return { granted, spentNet: Math.max(0, preAuth - refund), revoked };
 }
 
 export async function cycleUsage(userId: string, cycleStart: Date): Promise<CycleUsage> {
@@ -160,6 +167,13 @@ export async function spendCreditsTx(
 // them back out of the balance, which would silently swallow the refund.
 // The expired portion lands in a fresh non-expiring REFUND grant instead,
 // preserving User.credits == SUM(CreditGrant.remaining).
+//
+// A grant funded by an order that has since been REFUNDED is never restored:
+// its credits were already clawed back (or are about to be), so restoring them
+// here would leave the customer with both the money and the credits. The
+// window is real — a job holds its credits as remaining=0 for as long as it is
+// queued/running (up to the video hard timeout), so revokeOrderCreditsTx finds
+// nothing to revoke and the later failure refund used to hand it all back.
 export async function refundCreditsTx(
   tx: Prisma.TransactionClient,
   userId: string,
@@ -171,26 +185,53 @@ export async function refundCreditsTx(
 ) {
   if (amount <= 0) return;
   if (!consumption?.length) {
-    // Fallback for jobs created before grant tracking: flat refund.
+    // Fallback for jobs created before grant tracking: flat refund. Nothing
+    // links these credits to an order, so a refunded order cannot be detected.
     await addCreditsTx(tx, userId, "REFUND", amount, refType, refId, note);
     return;
   }
   // Lock the consumed rows so the expiry sweep serializes with this refund:
   // if the sweep locks first it zeroes the row and the expiry check below
   // (re-read after the lock) routes that portion into the replacement grant.
-  const rows = await tx.$queryRaw<Array<{ id: string; expiresAt: Date | null }>>(
-    Prisma.sql`SELECT id, "expiresAt" FROM "CreditGrant"
+  // The ORDER BY matches spendCreditsTx so two spends/refunds over the same
+  // rows always take the grant locks in the same sequence.
+  const rows = await tx.$queryRaw<
+    Array<{ id: string; expiresAt: Date | null; refType: string | null; refId: string | null }>
+  >(
+    Prisma.sql`SELECT id, "expiresAt", "refType", "refId" FROM "CreditGrant"
       WHERE id IN (${Prisma.join(consumption.map((c) => c.grantId))})
+      ORDER BY CASE WHEN source IN ('SIGNUP_BONUS', 'CHECKIN') THEN 0 ELSE 1 END,
+               "expiresAt" ASC NULLS LAST, "createdAt" ASC
       FOR UPDATE`,
   );
-  const expiredOrGone = new Set(
-    rows
-      .filter((r) => !r.expiresAt || r.expiresAt.getTime() <= Date.now())
-      .map((r) => r.id),
+  const orderRefs = [
+    ...new Set(
+      rows.filter((r) => r.refType === "order" && r.refId).map((r) => r.refId as string),
+    ),
+  ];
+  const refundedOrders = new Set(
+    orderRefs.length
+      ? (
+          await tx.order.findMany({
+            where: { id: { in: orderRefs }, status: "refunded" },
+            select: { id: true },
+          })
+        ).map((o) => o.id)
+      : [],
   );
   let expiredTotal = 0;
+  let revokedTotal = 0;
   for (const c of consumption) {
-    if (expiredOrGone.has(c.grantId) || !rows.some((r) => r.id === c.grantId)) {
+    const row = rows.find((r) => r.id === c.grantId);
+    if (!row) {
+      expiredTotal += c.amount;
+      continue;
+    }
+    if (row.refType === "order" && row.refId && refundedOrders.has(row.refId)) {
+      revokedTotal += c.amount;
+      continue;
+    }
+    if (row.expiresAt && row.expiresAt.getTime() <= Date.now()) {
       expiredTotal += c.amount;
       continue;
     }
@@ -212,7 +253,9 @@ export async function refundCreditsTx(
       },
     });
   }
-  await addCreditsTx(tx, userId, "REFUND", amount, refType, refId, note);
+  if (amount - revokedTotal > 0) {
+    await addCreditsTx(tx, userId, "REFUND", amount - revokedTotal, refType, refId, note);
+  }
 }
 
 export interface CheckinResult {
@@ -287,6 +330,14 @@ export async function fulfillOrder(
       return { alreadyPaid: true };
     }
     if (kind === "plan" && planId) {
+      // Lock the user row before reading the cycle anchor: two concurrent plan
+      // fulfillments (double-clicked checkout, two provider deliveries) both
+      // read the same planRenewsAt and both write base+1month, so the second
+      // overwrote the first — two paid months produced one, and both
+      // SUBSCRIPTION grants expired at the same early date. The lock also
+      // serializes the rollover computation, which otherwise ran twice on the
+      // same "ended" cycle.
+      await client.$queryRaw(Prisma.sql`SELECT id FROM "User" WHERE id = ${userId} FOR UPDATE`);
       const user = await client.user.findUnique({ where: { id: userId } });
       if (!user) throw new Error("user-not-found");
       const now = new Date();
@@ -304,7 +355,7 @@ export async function fulfillOrder(
         const cycleStart = new Date(user.planRenewsAt);
         cycleStart.setMonth(cycleStart.getMonth() - 1);
         const usage = await cycleUsageTx(client, userId, cycleStart);
-        unused = Math.max(0, usage.granted - usage.spentNet);
+        unused = Math.max(0, usage.granted - usage.spentNet - usage.revoked);
         rollover = Math.floor(unused * ROLLOVER_RATE);
       }
       await client.user.update({ where: { id: userId }, data: { plan: planId, planRenewsAt: renew } });

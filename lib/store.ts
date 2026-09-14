@@ -61,30 +61,49 @@ export async function readJsonCapped(res: Response, maxBytes: number): Promise<R
 
 // Custom connect-time lookup: resolve, drop private-range addresses, and
 // fail closed when every address is internal.
-const publicOnlyLookup = (
-  host: string,
-  opts: LookupOptions,
-  cb: (err: NodeJS.ErrnoException | null, address: string, family?: number) => void,
-) => {
-  dnsLookupCb(host, { ...opts, all: true }, (err, addrs: LookupAddress[] | LookupAddress) => {
-    if (err) return cb(err, "");
-    const list: LookupAddress[] = Array.isArray(addrs) ? addrs : [addrs];
-    const safe = list.filter((a) => {
-      if (isIP(a.address) === 4) return !ipv4Private(a.address);
-      if (isIP(a.address) === 6) return !ipv6Private(a.address);
-      return false;
+//
+// The caller decides the callback ARITY: net.connect passes { all: true }
+// whenever autoSelectFamily is enabled (the default since Node 20) and then
+// requires an ARRAY of { address, family }. Answering with a single string
+// makes net build "undefined" as the address, so the connection dies with
+// ERR_INVALID_IP_ADDRESS before a socket exists — i.e. the guard silently
+// blocks every download it is meant to allow. Honouring opts.all is what
+// keeps the pinned agent usable at all.
+export function createPublicOnlyLookup(
+  isBlocked: (address: string) => boolean = isPrivateAddress,
+) {
+  return (
+    host: string,
+    opts: LookupOptions,
+    cb: (
+      err: NodeJS.ErrnoException | null,
+      address: string | LookupAddress[],
+      family?: number,
+    ) => void,
+  ) => {
+    dnsLookupCb(host, { ...opts, all: true }, (err, addrs: LookupAddress[] | LookupAddress) => {
+      if (err) return cb(err, "");
+      const list: LookupAddress[] = Array.isArray(addrs) ? addrs : [addrs];
+      const safe = list.filter((a) => isIP(a.address) !== 0 && !isBlocked(a.address));
+      if (safe.length === 0) {
+        const blocked = new Error("blocked-internal-address") as NodeJS.ErrnoException;
+        blocked.code = "EACCES";
+        return cb(blocked, "", 4);
+      }
+      if (opts.all) return cb(null, safe, undefined);
+      cb(null, safe[0].address, safe[0].family ?? (isIP(safe[0].address) === 6 ? 6 : 4));
     });
-    if (safe.length === 0) {
-      const blocked = new Error("blocked-internal-address") as NodeJS.ErrnoException;
-      blocked.code = "EACCES";
-      return cb(blocked, "", 4);
-    }
-    cb(null, safe[0].address, safe[0].family ?? (isIP(safe[0].address) === 6 ? 6 : 4));
-  });
-};
+  };
+}
+
+function isPrivateAddress(address: string): boolean {
+  if (isIP(address) === 4) return ipv4Private(address);
+  if (isIP(address) === 6) return ipv6Private(address);
+  return true; // not an IP literal → refuse
+}
 
 const ssrfPinnedAgent = new Agent({
-  connect: { lookup: publicOnlyLookup },
+  connect: { lookup: createPublicOnlyLookup() },
 });
 
 function ipv4Private(v4: string): boolean {
@@ -145,6 +164,11 @@ function ipv6Private(host: string): boolean {
   }
   if (/^f[cd]/.test(h)) return true; // fc00::/7 ULA
   if (/^fe[89ab]/.test(h)) return true; // fe80::/10 link-local
+  if (/^fe[c-f]/.test(h)) return true; // fec0::/10 site-local (deprecated, still routable)
+  if (/^ff/.test(h)) return true; // ff00::/8 multicast
+  if (h.startsWith("2001:db8")) return true; // 2001:db8::/32 documentation
+  if (h.startsWith("2001:0:") || h.startsWith("2001:0000")) return true; // 2001::/32 Teredo
+  if (h.startsWith("100::")) return true; // 100::/64 discard-only
   if (h.startsWith("64:ff9b:")) return true; // NAT64 (embeds an IPv4)
   if (h.startsWith("2002:")) return true; // 6to4 (embeds an IPv4)
   // Embedded dotted quad ("::10.0.0.1", "64:ff9b::10.0.0.1")

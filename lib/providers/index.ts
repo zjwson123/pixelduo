@@ -34,6 +34,16 @@ export interface VideoTaskResult {
 // malfunctioning provider and must be cut off mid-stream, not buffered.
 const MAX_PROVIDER_RESPONSE_BYTES = 40 * 1024 * 1024;
 
+// Provider-supplied text that ends up in Job.error (read back by
+// /api/jobs/[id] and rendered in the workbench) must be bounded at EVERY
+// site, not just the ones that happened to slice it: Job.error is an
+// unbounded text column, so one hostile/garbled response could otherwise
+// store ~1 MB per job.
+const ERR_TEXT_MAX = 240;
+function errText(value: string): string {
+  return value.slice(0, ERR_TEXT_MAX);
+}
+
 async function readTextCapped(res: Response, maxBytes = MAX_PROVIDER_RESPONSE_BYTES): Promise<string> {
   const buf = await readBodyCapped(res, maxBytes);
   return buf.toString("utf8");
@@ -73,7 +83,7 @@ async function callWithKeys(
       }
       if (res.ok) return await readJsonCapped(res);
       const text = await readTextCapped(res, 64 * 1024);
-      const err = new Error(`${res.status}: ${text.slice(0, 240)}`);
+      const err = new Error(`${res.status}: ${errText(text)}`);
       if (res.status === 401 || res.status === 403) {
         lastErr = err;
         continue;
@@ -139,7 +149,7 @@ export async function editWithGpt(prompt: string, imageBase64: string, quality: 
       body: fd,
       signal: controller.signal,
     });
-    if (!res.ok) throw new Error(`${res.status}: ${(await readTextCapped(res, 64 * 1024)).slice(0, 240)}`);
+    if (!res.ok) throw new Error(`${res.status}: ${errText(await readTextCapped(res, 64 * 1024))}`);
     const data = await readJsonCapped(res);
     const items = (data.data as Array<Record<string, unknown>> | undefined) ?? [];
     const b64 = items[0]?.b64_json as string | undefined;
@@ -396,7 +406,9 @@ async function createWanVideoTask(
     });
     const data = (await readJsonCapped(res, 1024 * 1024)) as { output?: { task_id?: string }; code?: string; message?: string };
     if (!res.ok || !data.output?.task_id) {
-      throw new Error(`wan video task creation failed: ${data.code ?? res.status} ${data.message ?? ""}`);
+      throw new Error(
+        `wan video task creation failed: ${errText(String(data.code ?? res.status))} ${errText(data.message ?? "")}`,
+      );
     }
     return { taskId: data.output.task_id, model: modelId === "wan2.7-t2v-2026-06-12" ? "wan-t2v" : "wan-i2v" };
   } finally {
@@ -460,7 +472,7 @@ async function pollSeedanceTask(taskId: string): Promise<VideoTaskStatus> {
       const url = parseSeedanceVideoUrl(data.content?.video_url);
       return url ? { status: "succeeded", videoUrl: url } : { status: "succeeded" };
     }
-    if (status === "failed") return { status: "failed", error: data.error?.message ?? "generation failed" };
+    if (status === "failed") return { status: "failed", error: errText(data.error?.message ?? "generation failed") };
     return { status: status === "running" ? "running" : "pending" };
   } catch (e) {
     return { status: "unknown", error: e instanceof Error ? e.message : String(e) };

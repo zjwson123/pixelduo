@@ -8,7 +8,12 @@ backups
 *.db-journal
 prisma/*.db
 prisma/*.db-journal
-.env
+# Every dotenv flavour, not just the literal ".env": Docker patterns are exact,
+# so `.env.local`/`.env.production` were in the build context and landed in the
+# worker image layer via `COPY . .` — baking real provider/payment/SMTP keys
+# into any image that leaves the registry.
+.env*
+!.env.example
 test-results
 playwright-report
 coverage

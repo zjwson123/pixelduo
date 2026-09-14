@@ -1,4 +1,11 @@
-import type { CheckoutSession, CreateCheckoutInput, PaymentProvider, PaymentWebhookEvent } from "./types";
+import {
+  IGNORED_WEBHOOK,
+  type CheckoutSession,
+  type CreateCheckoutInput,
+  type IgnoredWebhook,
+  type PaymentProvider,
+  type PaymentWebhookEvent,
+} from "./types";
 
 // Development shell: fulfills inline in the checkout route (no external call),
 // and accepts the legacy JSON webhook format used by tests/demos.
@@ -12,7 +19,10 @@ export class MockProvider implements PaymentProvider {
     };
   }
 
-  async verifyWebhook(rawBody: string, _headers: Headers): Promise<PaymentWebhookEvent | null> {
+  async verifyWebhook(
+    rawBody: string,
+    _headers: Headers,
+  ): Promise<PaymentWebhookEvent | IgnoredWebhook | null> {
     try {
       const body = JSON.parse(rawBody) as {
         eventId?: string;
@@ -22,7 +32,7 @@ export class MockProvider implements PaymentProvider {
         refundAmountUsd?: number;
         raw?: unknown;
       };
-      if (!body.eventId) return null;
+      if (!body.eventId) return IGNORED_WEBHOOK;
       return {
         provider: this.name,
         eventId: body.eventId,

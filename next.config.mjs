@@ -28,10 +28,16 @@ const nextConfig = {
 
 // Only wrap with Sentry when a DSN is configured; otherwise the build and
 // runtime stay untouched (source-map upload is skipped without an auth token).
+// Source maps are turned off unless SENTRY_AUTH_TOKEN can actually upload
+// them: @sentry/nextjs deletes them only AFTER a successful upload, so a
+// DSN-without-token deployment would otherwise ship the complete original
+// TypeScript of the client bundle (and .next/server) to anyone who fetches a
+// chunk.map — free reconnaissance for every other attack.
 export default process.env.SENTRY_DSN
   ? withSentryConfig(nextConfig, {
       silent: true,
       telemetry: false,
       disableLogger: true,
+      sourcemaps: { disable: !process.env.SENTRY_AUTH_TOKEN },
     })
   : nextConfig;

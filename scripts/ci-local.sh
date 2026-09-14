@@ -6,7 +6,7 @@ set -euo pipefail
 
 export DATABASE_URL="postgresql://pixelduo:pixelduo@localhost:5432/pixelduo_test"
 export TEST_DATABASE_URL="$DATABASE_URL"
-export NEXTAUTH_SECRET="ci-local-secret"
+export NEXTAUTH_SECRET="5c1f8e2a94b7d03f6ae4c81d2795bf30e6a1c47d8b92f650"
 export REDIS_URL="redis://localhost:6379"
 export MOCK_IMAGE_PROVIDER="1"
 export MIDDLEWARE_AUTH_LIMIT="1000"

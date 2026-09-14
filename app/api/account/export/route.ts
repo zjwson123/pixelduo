@@ -1,10 +1,18 @@
-import { requireUserId, ok, fail } from "@/lib/api";
+import { requireUserId, ok, fail, enforceRateLimit, enforceUserRateLimit } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 
 // GDPR / PIPL data export.
-export async function POST() {
+export async function POST(req: Request) {
   try {
     const userId = await requireUserId();
+    // This is the most expensive read in the app (up to 25k rows serialized
+    // into one unpaged body), so it needs a limit of its own on top of the
+    // shared middleware one — per IP AND per account, since IP rotation must
+    // not multiply a self-controlled query/egress amplifier.
+    const limited = await enforceRateLimit(req, "export", 3, 60 * 60_000);
+    if (limited) return limited;
+    const userLimited = await enforceUserRateLimit(userId, "export", 3, 60 * 60_000);
+    if (userLimited) return fail(userLimited);
     // Bounded take so a hoarded account cannot force an unbounded response.
     const [user, ledger, images, jobs, orders] = await Promise.all([
       prisma.user.findUnique({

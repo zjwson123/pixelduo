@@ -189,6 +189,9 @@ model Template {
   sourceUrl String?  // attribution link for community-sourced cases
   tags      Json?     // { styles: [...], scenes: [...] } from upstream tags
   featured  Boolean  @default(false)
+
+  // /api/files resolves a thumbnail by img, one lookup per Explore render.
+  @@index([img])
 }
 
 model Order {
@@ -206,6 +209,11 @@ model Order {
   paidAt           DateTime?
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Every order listing (user history, admin table, account export) filters by
+  // userId and had no index on it at all, so an account hoarding junk pending
+  // orders degraded those reads for every user into sequential scans.
+  @@index([userId, createdAt])
 }
 
 // Idempotent payment webhook events

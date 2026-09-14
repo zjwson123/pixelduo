@@ -28,7 +28,12 @@ export async function POST(req: Request) {
     if ("tooLarge" in bodyRaw) return new NextResponse("payload too large", { status: 413 });
     const raw = bodyRaw.raw;
     const event = await getPaymentProvider().verifyWebhook(raw, req.headers);
+    // null = the signature did not verify (reject). A signed event we don't
+    // act on must be ACKed, not 400'd: providers retry "failed" deliveries for
+    // days and can disable the endpoint over them, which would stop the paid
+    // events we do need from ever arriving.
     if (!event) return new NextResponse("invalid webhook signature", { status: 400 });
+    if ("ignored" in event) return ok({ processed: true, ignored: true });
 
     const existing = await prisma.paymentEvent.findUnique({ where: { eventId: event.eventId } });
     if (existing) return ok({ processed: true, duplicate: true });
@@ -106,21 +111,36 @@ export async function POST(req: Request) {
             event.refundAmountUsd >= order.amountUsd - 0.005;
         }
         if (order && fullRefund) {
-          // CAS from "paid" (or "pending" — a refund delivered before the
-          // paid event flips it so the late fulfillment can never grant
-          // credits for an already-refunded payment): two distinct refund
-          // events (refund + chargeback, or duplicate deliveries) must not
-          // both revoke. Concurrent deliveries serialize on the row lock;
-          // the loser sees count 0.
-          const claim = await tx.order.updateMany({
-            where: { id: order.id, status: { in: ["paid", "pending"] } },
+          // The pre-state has to be part of the CAS, never a value read earlier
+          // in this transaction: updateMany re-evaluates its predicate against
+          // the row as it looks AFTER any lock wait (READ COMMITTED /
+          // EvalPlanQual). A paid event that committed `pending → paid` plus
+          // the credit grant while this refund waited left the in-memory
+          // `order.status` reading "pending", so the old
+          // `status: { in: [paid, pending] }` claim matched, flipped the order
+          // to refunded, and then skipped the revocation — money refunded,
+          // credits kept, permanently (every later refund event sees count 0
+          // and is acked as a duplicate). Claiming "paid" first makes the
+          // revocation follow whatever the row actually was.
+          const paidClaim = await tx.order.updateMany({
+            where: { id: order.id, status: "paid" },
             data: { status: "refunded" },
           });
-          if (claim.count === 1) {
-            // A pending order never granted credits — flip status only.
-            if (order.status === "paid") {
-              await revokeOrderCreditsTx(tx, order);
-            }
+          let claimed = paidClaim.count === 1;
+          if (claimed) {
+            await revokeOrderCreditsTx(tx, order);
+          } else {
+            // Nothing granted yet: a refund delivered before the paid event
+            // flips the order so the late fulfillment can never grant credits
+            // for an already-refunded payment. Concurrent deliveries serialize
+            // on the row lock; the loser sees count 0.
+            const pendingClaim = await tx.order.updateMany({
+              where: { id: order.id, status: "pending" },
+              data: { status: "refunded" },
+            });
+            claimed = pendingClaim.count === 1;
+          }
+          if (claimed) {
             const user = await tx.user.findUnique({ where: { id: order.userId }, select: { email: true } });
             return {
               kind: "refund" as const,

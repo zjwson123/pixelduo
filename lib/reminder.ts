@@ -15,7 +15,10 @@ export async function sendExpiryReminders(): Promise<number> {
   const grants = await prisma.creditGrant.findMany({
     where: {
       remaining: { gt: 0 },
-      expiresAt: { not: null, lte: horizon },
+      // Lower bound too: a grant that already expired but has not been swept
+      // yet must not be mailed as "1 day left" (Math.max(1, …) below pins the
+      // bucket, so nothing else filters it out).
+      expiresAt: { not: null, gt: now, lte: horizon },
       source: { in: ["PURCHASE", "SUBSCRIPTION"] },
     },
     select: { id: true, userId: true, remaining: true, expiresAt: true },
@@ -26,19 +29,26 @@ export async function sendExpiryReminders(): Promise<number> {
     const daysLeft = Math.max(1, Math.ceil((g.expiresAt!.getTime() - now.getTime()) / DAY_MS));
     const bucket = BUCKETS.find((b) => daysLeft <= b);
     if (!bucket) continue;
-    const existing = await prisma.creditReminder.findUnique({
-      where: { grantId_daysBefore: { grantId: g.id, daysBefore: bucket } },
-    });
-    if (existing) continue;
     const user = await prisma.user.findUnique({ where: { id: g.userId }, select: { email: true } });
     if (!user) continue;
     try {
-      await sendCreditExpiryEmail(user.email, bucket, g.remaining);
+      // Claim the reminder BEFORE sending: two overlapping cron runs would
+      // otherwise both pass the existence check and the user gets the same
+      // reminder twice. The unique (grantId, daysBefore) row is the claim; a
+      // failed send releases it so the next run retries.
       await prisma.creditReminder.create({
         data: { grantId: g.id, userId: g.userId, daysBefore: bucket },
       });
+    } catch {
+      continue; // already claimed by a concurrent run
+    }
+    try {
+      await sendCreditExpiryEmail(user.email, bucket, g.remaining);
       sent += 1;
     } catch (e) {
+      await prisma.creditReminder
+        .deleteMany({ where: { grantId: g.id, daysBefore: bucket } })
+        .catch(() => undefined);
       captureError(e, { grantId: g.id, userId: g.userId, daysBefore: bucket });
     }
   }

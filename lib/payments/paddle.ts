@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from "crypto";
 import { Paddle, Environment } from "@paddle/paddle-node-sdk";
-import type { PaymentWebhookEvent } from "./types";
+import { IGNORED_WEBHOOK, type IgnoredWebhook, type PaymentWebhookEvent } from "./types";
 import type { CheckoutSession, CreateCheckoutInput, PaymentProvider } from "./types";
 
 // Paddle Billing (Merchant of Record for overseas sales). Sandbox works with a
@@ -71,7 +71,10 @@ export class PaddleProvider implements PaymentProvider {
   // retry past 5s is rejected (400) and a genuinely paid order can strand.
   // Same algorithm (HMAC-SHA256 over `${ts}:${rawBody}`, v1 and legacy h1
   // tags), with a 5-minute tolerance mirroring Stripe's constructEvent.
-  async verifyWebhook(rawBody: string, headers: Headers): Promise<PaymentWebhookEvent | null> {
+  async verifyWebhook(
+    rawBody: string,
+    headers: Headers,
+  ): Promise<PaymentWebhookEvent | IgnoredWebhook | null> {
     const signature = headers.get("paddle-signature");
     if (!this.webhookSecret || !signature) return null;
     const parts = signature.split(";").reduce<Record<string, string>>((acc, kv) => {
@@ -100,7 +103,7 @@ export class PaddleProvider implements PaymentProvider {
     const data = parsed.data ?? {};
     try {
       if (parsed.event_type === "transaction.completed") {
-        if (data.status !== "completed") return null;
+        if (data.status !== "completed") return IGNORED_WEBHOOK;
         const customData = data.custom_data as Record<string, unknown> | null ?? data.customData as Record<string, unknown> | null;
         return {
           provider: this.name,
@@ -112,8 +115,8 @@ export class PaddleProvider implements PaymentProvider {
         };
       }
       if (parsed.event_type === "adjustment.created") {
-        if (data.status !== "approved") return null;
-        if (data.action !== "refund" && data.action !== "chargeback") return null;
+        if (data.status !== "approved") return IGNORED_WEBHOOK;
+        if (data.action !== "refund" && data.action !== "chargeback") return IGNORED_WEBHOOK;
         // Adjustments can be partial (a $1 goodwill refund on a $49.99 pack):
         // a partial one must not wipe the whole balance or consume the "paid"
         // status a later genuine full refund needs. Paddle flags this directly
@@ -139,7 +142,8 @@ export class PaddleProvider implements PaymentProvider {
           raw: parsed,
         };
       }
-      return null;
+      // Signed, well-formed, but not an event type we handle.
+      return IGNORED_WEBHOOK;
     } catch {
       return null;
     }

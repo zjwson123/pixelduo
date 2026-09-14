@@ -28,7 +28,7 @@ jobs:
           --health-interval 5s --health-timeout 3s --health-retries 10
     env:
       DATABASE_URL: postgresql://pixelduo:pixelduo@localhost:5432/pixelduo_test
-      NEXTAUTH_SECRET: ci-secret
+      NEXTAUTH_SECRET: 5c1f8e2a94b7d03f6ae4c81d2795bf30e6a1c47d8b92f650
       NEXTAUTH_URL: http://localhost:3100
       REDIS_URL: redis://localhost:6379
     steps:
@@ -46,7 +46,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       DATABASE_URL: postgresql://pixelduo:pixelduo@localhost:5432/pixelduo
-      NEXTAUTH_SECRET: ci-secret
+      NEXTAUTH_SECRET: 5c1f8e2a94b7d03f6ae4c81d2795bf30e6a1c47d8b92f650
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -79,7 +79,7 @@ jobs:
           --health-interval 5s --health-timeout 3s --health-retries 10
     env:
       DATABASE_URL: postgresql://pixelduo:pixelduo@localhost:5432/pixelduo_test
-      NEXTAUTH_SECRET: ci-secret
+      NEXTAUTH_SECRET: 5c1f8e2a94b7d03f6ae4c81d2795bf30e6a1c47d8b92f650
       REDIS_URL: redis://localhost:6379
       MOCK_IMAGE_PROVIDER: "1"
       # `next start` runs a production build, so the mock payment provider

@@ -6,6 +6,18 @@ import { getPaymentProvider, _resetPaymentProviderForTests } from "../lib/paymen
 import { MockProvider } from "../lib/payments/mock";
 import { StripeProvider } from "../lib/payments/stripe";
 import { PaddleProvider } from "../lib/payments/paddle";
+import { IGNORED_WEBHOOK, type PaymentWebhookEvent } from "../lib/payments/types";
+
+// verifyWebhook distinguishes "signature invalid" (null) from "signed event we
+// don't act on" (IGNORED_WEBHOOK). Tests asserting on a parsed event go
+// through this narrowing helper.
+async function asEvent(
+  p: Promise<PaymentWebhookEvent | { ignored: true } | null>,
+): Promise<PaymentWebhookEvent> {
+  const e = await p;
+  if (!e || "ignored" in e) throw new Error(`expected a parsed webhook event, got ${JSON.stringify(e)}`);
+  return e;
+}
 
 const WEBHOOK_SECRET = "whsec_test_secret_123";
 
@@ -31,7 +43,9 @@ describe("MockProvider", () => {
     const session = await p.createCheckout({ orderId: "o1", amountUsd: 9.99, itemName: "pack", successUrl: "s", cancelUrl: "c", metadata: {} });
     expect(session.checkoutUrl).toContain("o1");
 
-    const evt = await p.verifyWebhook(JSON.stringify({ eventId: "evt_1", orderId: "o1", status: "paid" }), new Headers());
+    const evt = await asEvent(
+      p.verifyWebhook(JSON.stringify({ eventId: "evt_1", orderId: "o1", status: "paid" }), new Headers()),
+    );
     expect(evt?.type).toBe("paid");
     expect(evt?.orderId).toBe("o1");
     expect(await p.verifyWebhook("not-json", new Headers())).toBeNull();
@@ -72,7 +86,7 @@ describe("StripeProvider", () => {
     const p = new StripeProvider({ webhookSecret: WEBHOOK_SECRET });
     const payload = stripeEvent("checkout.session.completed");
     const headers = new Headers({ "stripe-signature": stripeSignature(payload, WEBHOOK_SECRET) });
-    const evt = await p.verifyWebhook(payload, headers);
+    const evt = await asEvent(p.verifyWebhook(payload, headers));
     expect(evt?.type).toBe("paid");
     expect(evt?.orderId).toBe("order_1");
     expect(evt?.eventId).toMatch(/^evt_/);
@@ -86,7 +100,10 @@ describe("StripeProvider", () => {
 
     const other = stripeEvent("payment_intent.created");
     const okHeaders = new Headers({ "stripe-signature": stripeSignature(other, WEBHOOK_SECRET) });
-    expect(await p.verifyWebhook(other, okHeaders)).toBeNull();
+    // Signed, but not an event we act on: ACK it (IGNORED_WEBHOOK) rather than
+    // reporting a forgery, which made providers retry and eventually disable
+    // the endpoint. Only a bad signature is null.
+    expect(await p.verifyWebhook(other, okHeaders)).toEqual(IGNORED_WEBHOOK);
 
     expect(await p.verifyWebhook(payload, new Headers())).toBeNull();
   });
@@ -95,13 +112,13 @@ describe("StripeProvider", () => {
     const p = new StripeProvider({ webhookSecret: WEBHOOK_SECRET });
     const full = stripeEvent("charge.refunded", { amount_refunded: 1999, amount: 1999, payment_intent: "pi_1" });
     const fullHeaders = new Headers({ "stripe-signature": stripeSignature(full, WEBHOOK_SECRET) });
-    const fullEvt = await p.verifyWebhook(full, fullHeaders);
+    const fullEvt = await asEvent(p.verifyWebhook(full, fullHeaders));
     expect(fullEvt?.type).toBe("refunded");
     expect(fullEvt?.fullRefund).toBe(true);
 
     const partial = stripeEvent("charge.refunded", { amount_refunded: 1, amount: 1999, payment_intent: "pi_1" });
     const partialHeaders = new Headers({ "stripe-signature": stripeSignature(partial, WEBHOOK_SECRET) });
-    const partialEvt = await p.verifyWebhook(partial, partialHeaders);
+    const partialEvt = await asEvent(p.verifyWebhook(partial, partialHeaders));
     expect(partialEvt?.type).toBe("refunded");
     expect(partialEvt?.fullRefund).toBe(false);
   });
@@ -113,7 +130,7 @@ describe("StripeProvider", () => {
     const p = new StripeProvider({ webhookSecret: WEBHOOK_SECRET });
     const payload = stripeEvent("charge.dispute.created", { payment_intent: "pi_dispute_1", amount: 1999 });
     const headers = new Headers({ "stripe-signature": stripeSignature(payload, WEBHOOK_SECRET) });
-    const evt = await p.verifyWebhook(payload, headers);
+    const evt = await asEvent(p.verifyWebhook(payload, headers));
     expect(evt?.type).toBe("refunded");
     expect(evt?.fullRefund).toBe(true);
     expect(evt?.orderId).toBeUndefined();
@@ -124,12 +141,12 @@ describe("StripeProvider", () => {
     const p = new StripeProvider({ webhookSecret: WEBHOOK_SECRET });
     const payload = stripeEvent("checkout.session.async_payment_succeeded", { payment_intent: "pi_async" });
     const headers = new Headers({ "stripe-signature": stripeSignature(payload, WEBHOOK_SECRET) });
-    const evt = await p.verifyWebhook(payload, headers);
+    const evt = await asEvent(p.verifyWebhook(payload, headers));
     expect(evt?.type).toBe("paid");
     // The unpaid completion (SEPA/Boleto before settlement) stays ignored.
     const unpaid = stripeEvent("checkout.session.completed", { payment_status: "unpaid" });
     const unpaidHeaders = new Headers({ "stripe-signature": stripeSignature(unpaid, WEBHOOK_SECRET) });
-    expect(await p.verifyWebhook(unpaid, unpaidHeaders)).toBeNull();
+    expect(await p.verifyWebhook(unpaid, unpaidHeaders)).toEqual(IGNORED_WEBHOOK);
   });
 
   it("fails at construction when the webhook secret is missing in production", () => {
@@ -241,7 +258,7 @@ describe("PaddleProvider", () => {
       updated_at: new Date().toISOString(),
     });
     const headers = new Headers({ "paddle-signature": paddleSignature(payload, PADDLE_SECRET) });
-    const evt = await p.verifyWebhook(payload, headers);
+    const evt = await asEvent(p.verifyWebhook(payload, headers));
     expect(evt?.type).toBe("paid");
     expect(evt?.orderId).toBe("order_paddle_1");
     expect(evt?.providerOrderId).toBe("txn_456");
@@ -267,7 +284,7 @@ describe("PaddleProvider", () => {
       updated_at: new Date().toISOString(),
     });
     const headers = new Headers({ "paddle-signature": paddleSignature(payload, PADDLE_SECRET) });
-    const evt = await p.verifyWebhook(payload, headers);
+    const evt = await asEvent(p.verifyWebhook(payload, headers));
     expect(evt?.type).toBe("refunded");
     expect(evt?.providerOrderId).toBe("txn_456");
     expect(evt?.orderId).toBeUndefined();
@@ -298,7 +315,7 @@ describe("PaddleProvider", () => {
       totals: { subtotal: "100", tax: "0", total: "100" },
     });
     const partialHeaders = new Headers({ "paddle-signature": paddleSignature(partial, PADDLE_SECRET) });
-    const partialEvt = await p.verifyWebhook(partial, partialHeaders);
+    const partialEvt = await asEvent(p.verifyWebhook(partial, partialHeaders));
     expect(partialEvt?.type).toBe("refunded");
     expect(partialEvt?.fullRefund).toBe(false);
     expect(partialEvt?.refundAmountUsd).toBeCloseTo(1);
@@ -310,7 +327,7 @@ describe("PaddleProvider", () => {
       totals: { subtotal: "1999", tax: "0", total: "1999" },
     });
     const fullHeaders = new Headers({ "paddle-signature": paddleSignature(full, PADDLE_SECRET) });
-    const fullEvt = await p.verifyWebhook(full, fullHeaders);
+    const fullEvt = await asEvent(p.verifyWebhook(full, fullHeaders));
     expect(fullEvt?.fullRefund).toBe(true);
     expect(fullEvt?.refundAmountUsd).toBeCloseTo(19.99);
 
@@ -322,14 +339,14 @@ describe("PaddleProvider", () => {
       totals: { subtotal: "1999", tax: "0", total: "1999" },
     });
     const noHeaders = new Headers({ "paddle-signature": paddleSignature(noFlag, PADDLE_SECRET) });
-    const noEvt = await p.verifyWebhook(noFlag, noHeaders);
+    const noEvt = await asEvent(p.verifyWebhook(noFlag, noHeaders));
     expect(noEvt?.fullRefund).toBeUndefined();
     expect(noEvt?.refundAmountUsd).toBeCloseTo(19.99);
 
     // Nothing comparable at all → both undefined (route defaults to full).
     const bare = paddleEvent("adjustment.created", { ...base, id: "adj_bare" });
     const bareHeaders = new Headers({ "paddle-signature": paddleSignature(bare, PADDLE_SECRET) });
-    const bareEvt = await p.verifyWebhook(bare, bareHeaders);
+    const bareEvt = await asEvent(p.verifyWebhook(bare, bareHeaders));
     expect(bareEvt?.fullRefund).toBeUndefined();
     expect(bareEvt?.refundAmountUsd).toBeUndefined();
   });
@@ -386,7 +403,8 @@ describe("PaddleProvider", () => {
 
     const other = paddleEvent("customer.created", { id: "ctm_1", email: "x@y.z" });
     const ok = new Headers({ "paddle-signature": paddleSignature(other, PADDLE_SECRET) });
-    expect(await p.verifyWebhook(other, ok)).toBeNull();
+    // Signed and well-formed, just not an event we handle → ACK, not 400.
+    expect(await p.verifyWebhook(other, ok)).toEqual(IGNORED_WEBHOOK);
 
     expect(await p.verifyWebhook(payload, new Headers())).toBeNull();
   });

@@ -1,5 +1,12 @@
 import Stripe from "stripe";
-import type { CheckoutSession, CreateCheckoutInput, PaymentProvider, PaymentWebhookEvent } from "./types";
+import {
+  IGNORED_WEBHOOK,
+  type CheckoutSession,
+  type CreateCheckoutInput,
+  type IgnoredWebhook,
+  type PaymentProvider,
+  type PaymentWebhookEvent,
+} from "./types";
 
 // Stripe Checkout (test/production). Sandbox works with a test-mode key only —
 // no business entity required. Set PAYMENT_PROVIDER=stripe + STRIPE_SECRET_KEY
@@ -52,7 +59,10 @@ export class StripeProvider implements PaymentProvider {
     return { checkoutUrl: session.url, providerSessionId: session.id };
   }
 
-  async verifyWebhook(rawBody: string, headers: Headers): Promise<PaymentWebhookEvent | null> {
+  async verifyWebhook(
+    rawBody: string,
+    headers: Headers,
+  ): Promise<PaymentWebhookEvent | IgnoredWebhook | null> {
     if (!this.webhookSecret) return null;
     const signature = headers.get("stripe-signature");
     if (!signature) return null;
@@ -97,7 +107,9 @@ export class StripeProvider implements PaymentProvider {
         fullRefund = true;
         orderId = undefined;
       }
-      if (!type) return null;
+      // Signature verified — this is a real event we simply do not act
+      // on. ACK it instead of answering 400 "invalid signature".
+      if (!type) return IGNORED_WEBHOOK;
       return {
         provider: this.name,
         eventId: event.id,

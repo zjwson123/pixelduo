@@ -12,6 +12,19 @@ export async function sessionUser(): Promise<{ id: string; sv: number; totpPendi
   return { id: su.id, sv: su.sv ?? 0, totpPending: su.totpPending ?? false };
 }
 
+// Partial (2FA-pending) session, still checked against the DB sessionVersion.
+// The 2FA endpoints are the one credential-minting path that cannot go through
+// requireUserId (it rejects totpPending sessions by design), so they must do
+// the revocation check themselves — otherwise a stolen password-only session
+// keeps working after the owner resets their password or revokes sessions, and
+// retains a live TOTP/backup-code oracle.
+export async function requirePartialSession(): Promise<{ id: string; totpPending: boolean }> {
+  const { id, sv, totpPending } = await sessionUser();
+  const user = await prisma.user.findUnique({ where: { id }, select: { sessionVersion: true } });
+  if (!user || user.sessionVersion !== sv) throw new ApiError(401, "unauthorized");
+  return { id, totpPending };
+}
+
 export async function requireUserId(): Promise<string> {
   const { id, sv, totpPending } = await sessionUser();
   // Partial 2FA sessions must not touch protected resources.
@@ -45,7 +58,14 @@ export class ApiError extends Error {
 }
 
 export function ok(data: unknown, init?: ResponseInit) {
-  return NextResponse.json({ ok: true, ...(data as object) }, init);
+  // Every ok() response is either user-scoped or freshly computed; none is
+  // URL-addressable public content. Nothing caches them today (Caddy is a
+  // plain reverse proxy and these carry no Last-Modified), but a future CDN or
+  // a proxy caching /api/* would key on URL alone and serve one user's
+  // /api/me, gallery or order history to another. Opt out explicitly.
+  const headers = new Headers(init?.headers);
+  if (!headers.has("Cache-Control")) headers.set("Cache-Control", "private, no-store");
+  return NextResponse.json({ ok: true, ...(data as object) }, { ...init, headers });
 }
 
 // HTTP status for an expected business error, classified from its message.

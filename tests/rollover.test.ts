@@ -58,7 +58,7 @@ describe("subscription carryover and downgrade", () => {
     const cycleStart = new Date();
     cycleStart.setMonth(cycleStart.getMonth() - 1);
     const usage = await cycleUsage(userId, cycleStart);
-    expect(usage).toEqual({ granted: 2000, spentNet: 482 });
+    expect(usage).toEqual({ granted: 2000, spentNet: 482, revoked: 0 });
 
     const second = await makeOrder("plan", 2000, "pro");
     const before = (await prisma.user.findUniqueOrThrow({ where: { id: userId } })).credits;

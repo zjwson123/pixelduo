@@ -48,15 +48,17 @@ describe("payment webhook body cap", () => {
   });
 
   it("still reads and verifies a normal body after the cap refactor", async () => {
+    const eventId = `evt-cap-${Date.now()}`;
     const res = await webhookPOST(
       new Request("http://localhost/api/webhooks/payment", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        // No eventId → the provider cannot verify it. 400 (not 500/413) proves
-        // the body reached verifyWebhook intact.
-        body: JSON.stringify({ status: "paid" }),
+        // A well-formed event the mock provider accepts. Getting a 200 that
+        // names the event id proves the body reached verifyWebhook intact.
+        body: JSON.stringify({ eventId, status: "paid" }),
       }),
     );
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, processed: true });
   });
 });

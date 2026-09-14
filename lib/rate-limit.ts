@@ -120,11 +120,29 @@ export async function rateLimit(key: string, limit: number, windowMs: number): P
 // LAST X-Forwarded-For entry is the client address as seen by the edge; the
 // first entries originate from the client and are freely spoofable. Taking
 // the last entry keeps per-IP limits honest even when a client injects XFF.
+//
+// X-Real-IP carries no such guarantee — nothing in front of us is known to set
+// it, so a client that simply sent `X-Real-IP: <random>` got a fresh bucket per
+// request, disabling every per-IP limit (login, register, password reset, mail
+// bombing, 2FA). It is only consulted when the deployment explicitly declares a
+// proxy that sets it.
 export function clientIp(req: Request): string {
   const fwd = req.headers.get("x-forwarded-for");
   if (fwd) {
     const parts = fwd.split(",").map((s) => s.trim()).filter(Boolean);
     if (parts.length > 0) return parts[parts.length - 1];
   }
-  return req.headers.get("x-real-ip") ?? "unknown";
+  if (process.env.TRUST_X_REAL_IP === "1") {
+    return req.headers.get("x-real-ip") ?? "unknown";
+  }
+  return "unknown";
+}
+
+// Env-provided limits must not fail OPEN on a typo: `Number("300/min")` is NaN
+// and every comparison against NaN is false, so a malformed override silently
+// disabled the limit it was meant to tune.
+export function envLimit(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw === "") return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
 }

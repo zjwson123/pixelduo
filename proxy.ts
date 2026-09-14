@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { envLimit } from "./lib/rate-limit";
 
 // Edge-safe in-memory limiter: a cheap first line of defense, per-instance.
 // Authoritative cross-instance limits live in route handlers backed by Redis
@@ -36,15 +37,18 @@ export function proxy(req: NextRequest) {
   // entries are client-spoofable (see lib/rate-limit.ts clientIp).
   const fwd = req.headers.get("x-forwarded-for");
   const parts = fwd?.split(",").map((s) => s.trim()).filter(Boolean) ?? [];
-  const ip = parts[parts.length - 1] ?? req.headers.get("x-real-ip") ?? "unknown";
+  const ip =
+    parts[parts.length - 1] ??
+    (process.env.TRUST_X_REAL_IP === "1" ? req.headers.get("x-real-ip") : null) ??
+    "unknown";
   const path = req.nextUrl.pathname;
   const isAuth = path.startsWith("/api/auth");
   // Auth is a coarse first line; per-account lockout (login-guard) is the
   // authoritative brute-force protection. 40/min leaves room for multi-step
   // 2FA logins (csrf + callback per step).
   // Overridable for load tests / e2e (MIDDLEWARE_AUTH_LIMIT).
-  const authLimit = Number(process.env.MIDDLEWARE_AUTH_LIMIT ?? 40);
-  const apiLimit = Number(process.env.MIDDLEWARE_API_LIMIT ?? 300);
+  const authLimit = envLimit(process.env.MIDDLEWARE_AUTH_LIMIT, 40);
+  const apiLimit = envLimit(process.env.MIDDLEWARE_API_LIMIT, 300);
   const retry = hit(`ip:${ip}:${isAuth ? "auth" : "api"}`, isAuth ? authLimit : apiLimit, 60_000);
   if (retry !== null) {
     return NextResponse.json(

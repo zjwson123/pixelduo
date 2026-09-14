@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { requireUserId, ok, fail, enforceRateLimit, readBodyCapped } from "@/lib/api";
+import { requireUserId, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
 import { getPlan, getPack } from "@/lib/catalog";
 import { prisma } from "@/lib/prisma";
 import { fulfillOrder } from "@/lib/ledger";
@@ -16,6 +16,11 @@ export async function POST(req: Request) {
     const userId = await requireUserId();
     const limited = await enforceRateLimit(req, "checkout", 10, 60_000);
     if (limited) return limited;
+    // Every call mints a new pending order row AND a provider-side checkout
+    // session, so IP rotation must not be able to drive it in a loop (rows are
+    // never expired or deduped, and the provider sees the traffic as ours).
+    const userLimited = await enforceUserRateLimit(userId, "checkout", 10, 60_000);
+    if (userLimited) return fail(userLimited);
     const bodyRaw = await readBodyCapped(req, 16 * 1024);
     if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
     const body = schema.parse(JSON.parse(bodyRaw.raw));

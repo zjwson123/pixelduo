@@ -3,6 +3,7 @@ import { z } from "zod";
 import { ok, fail, enforceRateLimit, readBodyCapped } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { consumeToken } from "@/lib/tokens";
+import { clearLoginFailures } from "@/lib/login-guard";
 
 const schema = z.object({
   token: z.string().min(20).max(200),
@@ -32,6 +33,10 @@ export async function POST(req: Request) {
       }),
       prisma.apiKey.updateMany({ where: { userId: user.id, revokedAt: null }, data: { revokedAt: new Date() } }),
     ]);
+    // Proof of mailbox ownership is also the documented recovery path out of a
+    // brute-force lockout: without this, junk passwords from a few sources
+    // would keep the real owner out even after they rotated their password.
+    await clearLoginFailures(user.email);
     return ok({ reset: true });
   } catch (e) {
     if (e instanceof z.ZodError) return fail(new Error("invalid-input"));

@@ -33,9 +33,22 @@ export interface PaymentWebhookEvent {
   raw: unknown;
 }
 
+// A provider event that verified correctly but is not one we act on
+// (payment_intent.created, invoice.*, subscription.*, …). It must be ACKed:
+// answering 400 makes a genuinely signed event look like a forgery, so the
+// provider retries it for days and can eventually disable the endpoint — at
+// which point the events we DO need stop being delivered as well, with money
+// taken and no credits granted.
+export const IGNORED_WEBHOOK = { ignored: true } as const;
+export type IgnoredWebhook = typeof IGNORED_WEBHOOK;
+
 export interface PaymentProvider {
   name: string;
   createCheckout(input: CreateCheckoutInput): Promise<CheckoutSession>;
-  // Returns null when the signature/event is invalid.
-  verifyWebhook(rawBody: string, headers: Headers): Promise<PaymentWebhookEvent | null>;
+  // null = invalid signature (reject). IGNORED_WEBHOOK = valid signature,
+  // event type we don't handle (ack). Otherwise the parsed event.
+  verifyWebhook(
+    rawBody: string,
+    headers: Headers,
+  ): Promise<PaymentWebhookEvent | IgnoredWebhook | null>;
 }
