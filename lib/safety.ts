@@ -1,6 +1,7 @@
 import { getStorage } from "./storage";
 import { getVisionConfig } from "./keys";
-import { hostIsPublic, readJsonCapped } from "./store";
+import { hostIsPublic, isPublicPort, readJsonCapped, ssrfPinnedAgent, outboundTimeoutMs } from "./store";
+import { fetch as pinnedFetch } from "undici";
 
 const BLOCKED: Array<{ re: RegExp; reason: string }> = [
   { re: /\b(sex|nude|naked|porn|erotic|nsfw|explicit)\b/i, reason: "adult-content" },
@@ -70,7 +71,7 @@ async function moderateWithVision(dataUrl: string): Promise<ImageAudit> {
   try {
     // Timeout after 30s so moderation cannot stall the worker pipeline.
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 30_000);
+    const timer = setTimeout(() => controller.abort(), outboundTimeoutMs(30_000));
     let res: Response;
     try {
       res = await fetch(`${cfg.baseUrl}/chat/completions`, {
@@ -91,16 +92,18 @@ async function moderateWithVision(dataUrl: string): Promise<ImageAudit> {
         }),
         signal: controller.signal,
       });
+      // Read the body while the timer is still armed: clearing it as soon as
+      // the headers land leaves the stream unbounded (see callWithKeys).
+      if (!res.ok) return { checked: false };
+      const data = (await readJsonCapped(res, 8 * 1024 * 1024)) as unknown as { choices?: Array<{ message?: { content?: string } }> };
+      const text = data.choices?.[0]?.message?.content;
+      if (!text) return { checked: false };
+      const parsed = parseModerationJson(text);
+      if (!parsed) return { checked: false };
+      return { checked: true, flagged: parsed.flagged, provider: `vision:${cfg.model}` };
     } finally {
       clearTimeout(timer);
     }
-    if (!res.ok) return { checked: false };
-    const data = (await readJsonCapped(res, 8 * 1024 * 1024)) as unknown as { choices?: Array<{ message?: { content?: string } }> };
-    const text = data.choices?.[0]?.message?.content;
-    if (!text) return { checked: false };
-    const parsed = parseModerationJson(text);
-    if (!parsed) return { checked: false };
-    return { checked: true, flagged: parsed.flagged, provider: `vision:${cfg.model}` };
   } catch {
     return { checked: false };
   }
@@ -113,12 +116,13 @@ async function moderateWithVision(dataUrl: string): Promise<ImageAudit> {
 // Without any of these the audit is skipped (checked: false).
 async function isSafeEndpointUrl(rawUrl: string): Promise<boolean> {
   // Same canonical SSRF guard as fetchPublicBuffer (store.ts): hostname
-  // literal decoding + full DNS resolution. The previous string-prefix
-  // blocklist missed decimal/hex IPv4 forms and rebinding hostnames, and the
-  // fetch followed redirects without re-validation.
+  // literal decoding + full DNS resolution + port allowlist. The previous
+  // string-prefix blocklist missed decimal/hex IPv4 forms and rebinding
+  // hostnames, and the fetch followed redirects without re-validation.
   try {
     const parsed = new URL(rawUrl);
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+    if (!isPublicPort(parsed.port)) return false;
     return await hostIsPublic(parsed.hostname);
   } catch {
     return false;
@@ -132,22 +136,27 @@ export async function analyzeImage(url: string): Promise<ImageAudit> {
     if (!(await isSafeEndpointUrl(endpoint))) return { checked: false };
     try {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 30_000);
-      let res: Response;
+      const timer = setTimeout(() => controller.abort(), outboundTimeoutMs(30_000));
       try {
-        res = await fetch(endpoint, {
+        const res = (await pinnedFetch(endpoint, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ url }),
           signal: controller.signal,
           redirect: "manual", // a detector endpoint has no business redirecting
-        });
+          // Same DNS-pinned agent as fetchPublicBuffer: hostIsPublic above
+          // validates at check time, and the agent re-validates at connect
+          // time, so a rebinding answer between the two cannot reach an
+          // internal address. The global fetch would have used the default
+          // dispatcher and reopened that TOCTOU window.
+          dispatcher: ssrfPinnedAgent,
+        })) as unknown as Response;
+        if (!res.ok) return { checked: false };
+        const data = (await readJsonCapped(res, 8 * 1024 * 1024)) as unknown as { flagged?: boolean };
+        return { checked: true, flagged: Boolean(data.flagged), provider: "external" };
       } finally {
         clearTimeout(timer);
       }
-      if (!res.ok) return { checked: false };
-      const data = (await readJsonCapped(res, 8 * 1024 * 1024)) as unknown as { flagged?: boolean };
-      return { checked: true, flagged: Boolean(data.flagged), provider: "external" };
     } catch {
       return { checked: false };
     }

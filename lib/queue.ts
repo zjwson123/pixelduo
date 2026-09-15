@@ -325,8 +325,16 @@ export async function completeJob(jobId: string, images: JobImage[]) {
 
 // Move a video job into "polling" after creating the provider task.
 // nextAttemptAt throttles re-polls; recoverStuckJobs is the crash safety net.
-export async function setJobPolling(jobId: string, providerTaskId: string) {
-  await prisma.job.updateMany({
+//
+// Returns false when the job was no longer claimable — it went terminal, or
+// another worker already moved it to "polling" with a task of its own — meaning
+// the task just created will never be polled and the provider was billed for
+// work nobody collects. The caller reports that rather than dropping the id
+// silently. (Note a reaped job is NOT this case: recoverStuckJobs re-queues it,
+// which the CAS below still matches, so its task id is recorded normally and
+// the next claim polls the existing task instead of creating a second one.)
+export async function setJobPolling(jobId: string, providerTaskId: string): Promise<boolean> {
+  const claim = await prisma.job.updateMany({
     where: { id: jobId, status: { in: ["running", "queued"] } },
     data: {
       status: "polling",
@@ -335,6 +343,7 @@ export async function setJobPolling(jobId: string, providerTaskId: string) {
       nextAttemptAt: new Date(Date.now() + POLL_INTERVAL_MS),
     },
   });
+  return claim.count === 1;
 }
 
 // Keep polling: task still pending/running upstream. Re-arms nextAttemptAt

@@ -120,8 +120,14 @@ export interface VisionConfig {
 // Vision-capable chat model for post-generation image moderation
 export function getVisionConfig(): VisionConfig | null {
   const model = process.env.VISION_MODERATION_MODEL || "gpt-5.6-luna";
-  const envKey = process.env.VISION_MODERATION_API_KEY;
-  const envBase = process.env.VISION_MODERATION_BASE_URL;
+  // Empty string must mean "unset", the way it does for every other key in
+  // this file. `"" ?? fallback` keeps the empty string (?? only falls back on
+  // null/undefined), so a compose file that declares the variable with an empty
+  // default — which is how .env.example and both prod composes ship it — made
+  // getVisionConfig return null and turned the moderation audit into a silent
+  // no-op that still reported itself as configured.
+  const envKey = process.env.VISION_MODERATION_API_KEY || undefined;
+  const envBase = process.env.VISION_MODERATION_BASE_URL || undefined;
   if (envKey && envBase) {
     return { baseUrl: envBase, apiKey: envKey, model };
   }

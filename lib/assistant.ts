@@ -1,6 +1,6 @@
 import { getDeepSeekKey, getDeepSeekBaseUrl, getModelVerseKey, getAliyunKey } from "./keys";
 import { ASSISTANT_MODELS } from "./assistant-models";
-import { readJsonCapped } from "./store";
+import { readJsonCapped, outboundTimeoutMs } from "./store";
 
 export { ASSISTANT_MODELS };
 export type { AssistantModelOption } from "./assistant-models";
@@ -74,7 +74,7 @@ async function callAssistantModel(prompt: string, mode: string, modelId: string)
 
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 30_000);
+    const timer = setTimeout(() => controller.abort(), outboundTimeoutMs(30_000));
     let res: Response;
     try {
       res = await fetch(apiUrl, {
@@ -92,13 +92,15 @@ async function callAssistantModel(prompt: string, mode: string, modelId: string)
         }),
         signal: controller.signal,
       });
+      // Body read inside the armed-timer window — see callWithKeys in
+      // providers/index.ts for why clearing it after the headers is not enough.
+      if (res.ok) {
+        const data = (await readJsonCapped(res, 8 * 1024 * 1024)) as unknown as { choices?: Array<{ message?: { content?: string } }> };
+        const text = data.choices?.[0]?.message?.content?.trim();
+        if (text) return { text, offline: false, model: modelId };
+      }
     } finally {
       clearTimeout(timer);
-    }
-    if (res.ok) {
-      const data = (await readJsonCapped(res, 8 * 1024 * 1024)) as unknown as { choices?: Array<{ message?: { content?: string } }> };
-      const text = data.choices?.[0]?.message?.content?.trim();
-      if (text) return { text, offline: false, model: modelId };
     }
   } catch {
     // fall through

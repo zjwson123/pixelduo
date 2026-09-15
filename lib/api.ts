@@ -9,7 +9,13 @@ export async function sessionUser(): Promise<{ id: string; sv: number; totpPendi
   const session = await getServerSession(authOptions);
   const su = (session?.user as { id?: string; sv?: number; totpPending?: boolean } | undefined);
   if (!su?.id) throw new ApiError(401, "unauthorized");
-  return { id: su.id, sv: su.sv ?? 0, totpPending: su.totpPending ?? false };
+  // A token without an `sv` claim cannot be revocation-checked. Defaulting it
+  // to 0 accepted it for every account whose sessionVersion was still 0, so a
+  // token minted before the claim existed (30-day lifetime, same secret across
+  // a deploy) stayed valid, and any future credential-minting path that forgot
+  // to stamp `sv` would be silently accepted instead of failing closed.
+  if (typeof su.sv !== "number") throw new ApiError(401, "unauthorized");
+  return { id: su.id, sv: su.sv, totpPending: su.totpPending ?? false };
 }
 
 // Partial (2FA-pending) session, still checked against the DB sessionVersion.
@@ -97,13 +103,23 @@ function expectedStatus(msg: string): number | null {
   return null;
 }
 
+// Error responses carry no-store for the same reason ok() does: a 404/400 for
+// a URL-addressable resource is heuristically cacheable, so a shared cache in
+// front of /api/* could pin one user's error for every other visitor to that
+// path. Kept in one place so every error path inherits it.
+function errorResponse(body: Record<string, unknown>, init: ResponseInit) {
+  const headers = new Headers(init.headers);
+  if (!headers.has("Cache-Control")) headers.set("Cache-Control", "private, no-store");
+  return NextResponse.json(body, { ...init, headers });
+}
+
 export function fail(error: unknown) {
   if (error instanceof ApiError) {
-    return NextResponse.json({ ok: false, error: error.message }, { status: error.status });
+    return errorResponse({ ok: false, error: error.message }, { status: error.status });
   }
   // A malformed JSON body is a client error, not an incident.
   if (error instanceof SyntaxError) {
-    return NextResponse.json({ ok: false, error: "invalid-json" }, { status: 400 });
+    return errorResponse({ ok: false, error: "invalid-json" }, { status: 400 });
   }
   const msg = error instanceof Error ? error.message : "internal-error";
   // Expected business errors are not incidents; capture only unexpected 500s.
@@ -111,9 +127,9 @@ export function fail(error: unknown) {
   if (status === null) {
     captureError(error, { error: msg });
     // Do not leak internal error details to API clients.
-    return NextResponse.json({ ok: false, error: "internal-error" }, { status: 500 });
+    return errorResponse({ ok: false, error: "internal-error" }, { status: 500 });
   }
-  return NextResponse.json({ ok: false, error: msg }, { status });
+  return errorResponse({ ok: false, error: msg }, { status });
 }
 
 // Route-level limit keyed by IP + scope. Returns 429 response when exceeded.
@@ -125,7 +141,7 @@ export async function enforceRateLimit(
 ): Promise<NextResponse | null> {
   const r = await rateLimit(`${scope}:${clientIp(req)}`, limit, windowMs);
   if (!r.ok) {
-    return NextResponse.json(
+    return errorResponse(
       { ok: false, error: "rate-limited" },
       {
         status: 429,
@@ -150,6 +166,17 @@ export async function enforceUserRateLimit(
 ): Promise<ApiError | null> {
   const r = await rateLimit(`u:${scope}:${userId}`, limit, windowMs);
   return r.ok ? null : new ApiError(429, "rate-limited");
+}
+
+// Upper bound for ?page=. Clamping only the lower bound left a huge finite
+// value (21+ digits) producing a skip of ~1e21 — a non-integer the query
+// engine rejects, i.e. a masked 500 instead of the "garbage input degrades to
+// page 1" the guards promise. Far past any real result set.
+export const PAGE_MAX = 10_000;
+export function clampPage(raw: string | null, max = PAGE_MAX): number {
+  const n = Number.parseInt(raw ?? "1", 10);
+  if (!Number.isFinite(n) || n < 1) return 1;
+  return Math.min(n, max);
 }
 
 // Refuse oversized bodies BEFORE req.json() buffers them: Node route handlers

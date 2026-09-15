@@ -133,7 +133,14 @@ async function processImageJob(job: {
       captureError(new Error(msg), { jobId: job.id, model: job.model });
       return true;
     } else if (audits.some((a) => !a.checked)) {
-      console.log(`[worker ${workerId}] job ${job.id}: safety audit skipped (no moderation configured)`);
+      // IMAGE_MODERATION=1 with no resolvable vision config looks exactly like
+      // "audited and clean" from the outside, so an operator who believes
+      // moderation is on ships unaudited output indefinitely. Report it rather
+      // than logging a line nobody reads.
+      const msg =
+        "safety audit SKIPPED — moderation is not usable (IMAGE_MODERATION / IMAGE_NSFW_ENDPOINT set but no detector configured, or the detector failed). Output was delivered unaudited.";
+      console.warn(`[worker ${workerId}] job ${job.id}: ${msg}`);
+      captureError(new Error(msg), { jobId: job.id, model: job.model });
     } else {
       console.log(`[worker ${workerId}] job ${job.id}: safety audit passed (${audits.map((a) => a.provider).join(",")})`);
     }
@@ -189,7 +196,17 @@ async function processVideoJob(job: {
         durationSec: job.durationSec ?? 5,
         imageBase64,
       });
-      await setJobPolling(job.id, result.taskId);
+      const recorded = await setJobPolling(job.id, result.taskId);
+      if (!recorded) {
+        // The job was no longer claimable while we were creating the upstream
+        // task, so nothing will ever poll it: the provider was billed for work
+        // this job will not collect. Not a security event, but it must be
+        // visible rather than silently dropping the task id.
+        const msg = `provider task orphaned: job is no longer claimable (task ${result.taskId})`;
+        console.error(`[worker ${workerId}] job ${job.id}: ${msg}`);
+        captureError(new Error(msg), { jobId: job.id, model: job.model, taskId: result.taskId });
+        return true;
+      }
       console.log(`[worker ${workerId}] job ${job.id}: video task created (${result.taskId}), polling...`);
       return true; // claimed again once nextAttemptAt is due
     }

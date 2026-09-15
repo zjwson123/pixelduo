@@ -45,7 +45,12 @@ services:
       context: .
       target: web
     ports:
-      - "3000:3000"
+      # Loopback-only. With no edge in front, publishing on 0.0.0.0 exposes an
+      # unencrypted origin AND makes every per-IP limiter (auth, register,
+      # password reset, 2FA) key on a client-chosen X-Forwarded-For: anyone who
+      # can reach the port sends a fresh header per request and gets a fresh
+      # bucket. The stateful services below are pinned for the same reason.
+      - "127.0.0.1:3000:3000"
     environment: *appenv
     volumes:
       # Local dev: let the container read real provider keys from the host

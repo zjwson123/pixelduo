@@ -1,5 +1,5 @@
 import { requireAdmin } from "@/lib/admin";
-import { ok, fail } from "@/lib/api";
+import { ok, fail, clampPage } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 
 export async function GET(req: Request) {
@@ -7,7 +7,9 @@ export async function GET(req: Request) {
     await requireAdmin();
     const url = new URL(req.url);
     // NaN-guard: garbage ?page= must fall back to 1, not produce skip: NaN.
-    const page = Math.max(1, Math.floor(Number(url.searchParams.get("page") ?? 1)) || 1);
+    // clampPage also caps the top end, where a huge finite value overflowed
+    // the skip into a rejected query (masked 500).
+    const page = clampPage(url.searchParams.get("page"));
     const take = 50;
     const [orders, total] = await Promise.all([
       prisma.order.findMany({

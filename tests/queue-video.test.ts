@@ -205,4 +205,26 @@ describe("video job state machine", () => {
       { url: "videos/i.mp4", model: "seedance", quality: "standard", credits: 42, prompt: "interval" },
     ]);
   });
+
+  // A reaped job goes back to "queued" (not terminal), which the CAS still
+  // matches — so its task id IS recorded and the next claim polls the task that
+  // already exists instead of creating a second one. setJobPolling reports
+  // whether the CAS applied so the worker can surface a genuinely orphaned
+  // (billed, unpollable) task instead of dropping its id silently.
+  it("records the provider task on a reaped job, and reports a job that is gone", async () => {
+    const job = await createBackdatedVideoJob("reaped");
+    await prisma.job.update({ where: { id: job.id }, data: { status: "queued" } });
+    expect(await setJobPolling(job.id, "task-reaped")).toBe(true);
+    const row = await prisma.job.findUniqueOrThrow({ where: { id: job.id } });
+    expect(row.status).toBe("polling");
+    expect(row.providerTaskId).toBe("task-reaped");
+
+    await completeJob(job.id, [
+      { url: "videos/reaped.mp4", model: "seedance", quality: "standard", credits: 42, prompt: "reaped" },
+    ]);
+    // The job is done: a task created after that point can never be polled.
+    expect(await setJobPolling(job.id, "task-late")).toBe(false);
+    const after = await prisma.job.findUniqueOrThrow({ where: { id: job.id } });
+    expect(after.providerTaskId).toBe("task-reaped"); // the live id is not clobbered
+  });
 });

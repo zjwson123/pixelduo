@@ -3,7 +3,7 @@
 //            doubao-seedance, wan2.7-t2v/i2v [video, async task-based]
 
 import { getModelVerseKey, getArkKey, getArkBaseUrl, getAliyunKey, getAliyunBaseUrl } from "../keys";
-import { saveBase64Image, saveRemoteImage, fetchPublicBuffer, readBodyCapped } from "../store";
+import { saveBase64Image, saveRemoteImage, fetchPublicBuffer, readBodyCapped, outboundTimeoutMs } from "../store";
 import { getModel, type ModelInfo } from "../model-registry";
 import type { Quality } from "../cost";
 
@@ -64,23 +64,25 @@ async function callWithKeys(
   // Image models are slow: gpt-image-2 high quality routinely takes 2-5 min
   // (a 120s cap aborted every attempt and burned the retries). Default
   // 300s for image work; callers doing fast calls pass a shorter one.
-  const timeoutMs = opts?.timeoutMs ?? 300_000;
+  const timeoutMs = opts?.timeoutMs ?? outboundTimeoutMs(300_000);
   let lastErr: unknown;
   for (const key of keys) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
-      let res: Response;
-      try {
-        res = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}`, ...(opts?.headers ?? {}) },
-          body: JSON.stringify(body),
-          signal: controller.signal,
-        });
-      } finally {
-        clearTimeout(timer);
-      }
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}`, ...(opts?.headers ?? {}) },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      // The abort timer must stay armed until the BODY is read, not just until
+      // the headers arrive. Disarming it here left the body read unbounded:
+      // undici's own bodyTimeout is an idle timer that every chunk resets, so a
+      // provider answering 200 and then dribbling one byte at a time held the
+      // connection — and this worker's single tick loop — open forever, with
+      // the job never recovering because its heartbeat was still being
+      // refreshed. readBodyCapped bounds memory, not time.
       if (res.ok) return await readJsonCapped(res);
       const text = await readTextCapped(res, 64 * 1024);
       const err = new Error(`${res.status}: ${errText(text)}`);
@@ -91,6 +93,8 @@ async function callWithKeys(
       throw err;
     } catch (e) {
       lastErr = e;
+    } finally {
+      clearTimeout(timer);
     }
   }
   throw lastErr instanceof Error ? lastErr : new Error("provider call failed");
@@ -457,8 +461,12 @@ async function pollSeedanceTask(taskId: string): Promise<VideoTaskStatus> {
   const timer = setTimeout(() => controller.abort(), 30_000);
   try {
     const key = keys[0];
+    // The id comes from the provider's own JSON and is interpolated into a URL
+    // path while our Authorization header rides along, so it is percent-encoded:
+    // a value containing "/", "?" or "#" would otherwise re-target the request
+    // within the provider host.
     const res = await fetch(
-      `https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks/${taskId}`,
+      `https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks/${encodeURIComponent(taskId)}`,
       { headers: { Authorization: `Bearer ${key}` }, signal: controller.signal },
     );
     if (!res.ok) return { status: "unknown", error: `poll failed: ${res.status}` };
@@ -488,8 +496,9 @@ async function pollWanVideoTask(taskId: string): Promise<VideoTaskStatus> {
   const timer = setTimeout(() => controller.abort(), 30_000);
   try {
     const key = keys[0];
+    // Percent-encoded for the same reason as pollSeedanceTask above.
     const res = await fetch(
-      `https://dashscope.aliyuncs.com/api/v1/tasks/${taskId}`,
+      `https://dashscope.aliyuncs.com/api/v1/tasks/${encodeURIComponent(taskId)}`,
       { headers: { Authorization: `Bearer ${key}` }, signal: controller.signal },
     );
     if (!res.ok) return { status: "unknown", error: `poll failed: ${res.status}` };

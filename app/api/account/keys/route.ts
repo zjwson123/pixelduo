@@ -60,10 +60,18 @@ export async function POST(req: Request) {
       if (!ok2) return fail(new Error("invalid-code"));
     }
     // Cap active keys: unbounded creation bloats the table and each key adds
-    // its own per-key v1 rate budget.
-    const active = await prisma.apiKey.count({ where: { userId, revokedAt: null } });
-    if (active >= MAX_ACTIVE_KEYS) return fail(new Error("too-many-keys: revoke one before creating another"));
-    const key = await createApiKey(userId, body.name ?? "default");
+    // its own per-key v1 rate budget. Count-then-create is a TOCTOU, so it runs
+    // under a per-account advisory lock (same pattern as the job inflight cap):
+    // without it N parallel re-auth'd requests all read the same pre-insert
+    // count, all pass, and each mints a permanent credential.
+    const key = await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${userId}))`;
+      const active = await tx.apiKey.count({ where: { userId, revokedAt: null } });
+      if (active >= MAX_ACTIVE_KEYS) {
+        throw new Error("too-many-keys: revoke one before creating another");
+      }
+      return createApiKey(userId, body.name ?? "default", tx);
+    });
     return ok({ ...key, note: "copy now — the full key is shown only once" });
   } catch (e) {
     if (e instanceof z.ZodError) return fail(new Error("invalid-input"));

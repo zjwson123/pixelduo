@@ -42,6 +42,17 @@ export async function POST(req: Request) {
           sessionVersion: { increment: 1 },
         },
       });
+      // Revoke API keys alongside the session bump. authenticateApiKey never
+      // consults sessionVersion, so an attacker who trialled the password
+      // before 2FA was on could mint a pd_live_ key that survived the very
+      // remediation the alert tells the owner to perform ("enable 2FA") — the
+      // key has no expiry and keeps spending the victim's credits. This is the
+      // same pairing reset-password and revoke-sessions already do; enablement
+      // is the one sessionVersion bump that was missing it.
+      await tx.apiKey.updateMany({
+        where: { userId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
       await tx.backupCode.deleteMany({ where: { userId } });
       await tx.backupCode.createMany({
         data: codes.map((c) => ({ userId, codeHash: hashBackupCode(c) })),

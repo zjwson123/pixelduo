@@ -3,7 +3,7 @@
 
 import { getDeepSeekKey, getDeepSeekBaseUrl } from "./keys";
 import { getImageModels } from "./model-registry";
-import { readJsonCapped } from "./store";
+import { readJsonCapped, outboundTimeoutMs } from "./store";
 
 export interface RoutingResult {
   recommendedModel: string;
@@ -43,7 +43,7 @@ export async function routePrompt(prompt: string): Promise<RoutingResult> {
   if (!key) return offlineDefault();
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 15_000);
+    const timer = setTimeout(() => controller.abort(), outboundTimeoutMs(15_000));
     let res: Response;
     try {
       res = await fetch(`${getDeepSeekBaseUrl()}/chat/completions`, {
@@ -61,22 +61,25 @@ export async function routePrompt(prompt: string): Promise<RoutingResult> {
         }),
         signal: controller.signal,
       });
-    } finally {
-      clearTimeout(timer);
-    }
-    if (res.ok) {
-      const data = (await readJsonCapped(res, 8 * 1024 * 1024)) as unknown as { choices?: Array<{ message?: { content?: string } }> };
-      const text = data.choices?.[0]?.message?.content?.trim() ?? "";
-      const cleaned = text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "");
-      const start = cleaned.indexOf("{");
-      const end = cleaned.lastIndexOf("}");
-      if (start >= 0 && end > start) {
-        const parsed = JSON.parse(cleaned.slice(start, end + 1)) as { model?: string; reason?: string };
-        const validModels = getImageModels().map((m) => m.id);
-        if (parsed.model && validModels.includes(parsed.model)) {
-          return { recommendedModel: parsed.model, reason: parsed.reason ?? "smart routing", offline: false };
+      // The body read stays inside the armed-timer window: clearing the
+      // timeout as soon as the headers arrive leaves the stream unbounded
+      // (undici's bodyTimeout is an idle timer that every chunk resets).
+      if (res.ok) {
+        const data = (await readJsonCapped(res, 8 * 1024 * 1024)) as unknown as { choices?: Array<{ message?: { content?: string } }> };
+        const text = data.choices?.[0]?.message?.content?.trim() ?? "";
+        const cleaned = text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "");
+        const start = cleaned.indexOf("{");
+        const end = cleaned.lastIndexOf("}");
+        if (start >= 0 && end > start) {
+          const parsed = JSON.parse(cleaned.slice(start, end + 1)) as { model?: string; reason?: string };
+          const validModels = getImageModels().map((m) => m.id);
+          if (parsed.model && validModels.includes(parsed.model)) {
+            return { recommendedModel: parsed.model, reason: parsed.reason ?? "smart routing", offline: false };
+          }
         }
       }
+    } finally {
+      clearTimeout(timer);
     }
   } catch {
     // fall through to offline

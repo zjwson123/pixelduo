@@ -35,4 +35,16 @@ describe("expiring credits", () => {
     expect(expiring[0].remaining).toBe(400);
     expect(expiring[0].daysLeft).toBe(3);
   });
+
+  // An already-expired grant that has not been swept yet is unspendable
+  // (spendCreditsTx refuses it), so the banner must not advertise it as a live
+  // countdown — daysLeft is clamped to a minimum of 1, which made expired
+  // credits read as "1 day left". The reminder path already filtered these.
+  it("does not advertise credits that have already expired", async () => {
+    await addGrant("PURCHASE", 77, -2); // expired two days ago, not yet swept
+    const expiring = await listExpiringCredits(userId);
+    expect(expiring.map((g) => g.remaining)).not.toContain(77);
+    expect(expiring).toHaveLength(1);
+    expect(expiring[0].remaining).toBe(400);
+  });
 });

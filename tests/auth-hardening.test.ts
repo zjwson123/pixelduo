@@ -23,7 +23,14 @@ const origRedisUrl = process.env.REDIS_URL;
 let redisUp = false;
 
 describe("production config assertions", () => {
-  const base = { NODE_ENV: "production", PAYMENT_ALLOW_MOCK: undefined } as NodeJS.ProcessEnv;
+  const secret = "5c1f8e2a94b7d03f6ae4c81d2795bf30e6a1c47d8b92f650";
+  // A production deployment that satisfies every startup check.
+  const base = {
+    NODE_ENV: "production",
+    NEXTAUTH_SECRET: secret,
+    NEXTAUTH_URL: "https://pixelduo.ai",
+    SMTP_URL: "smtps://user:pass@smtp.example.com:465",
+  } as NodeJS.ProcessEnv;
 
   it("refuses a placeholder or short NEXTAUTH_SECRET in production", () => {
     expect(() => assertProductionConfig({ ...base, NEXTAUTH_SECRET: "" })).toThrow(/NEXTAUTH_SECRET/);
@@ -36,24 +43,43 @@ describe("production config assertions", () => {
     expect(() => assertProductionConfig({ ...base, NEXTAUTH_SECRET: "a".repeat(40) })).not.toThrow();
   });
 
-  it("accepts a generated secret and ignores non-production environments", () => {
-    const secret = "5c1f8e2a94b7d03f6ae4c81d2795bf30e6a1c47d8b92f650";
-    expect(() => assertProductionConfig({ ...base, NEXTAUTH_SECRET: secret })).not.toThrow();
+  it("accepts a fully configured deployment and ignores non-production environments", () => {
+    expect(() => assertProductionConfig(base)).not.toThrow();
     expect(() =>
       assertProductionConfig({ NODE_ENV: "development", NEXTAUTH_SECRET: "change-me" } as NodeJS.ProcessEnv),
     ).not.toThrow();
   });
 
-  it("refuses EMAIL_VERIFY_AUTO in production unless the deployment is marked as a test one", () => {
-    const secret = "5c1f8e2a94b7d03f6ae4c81d2795bf30e6a1c47d8b92f650";
+  // next-auth derives the cookie's Secure flag and __Secure- prefix from this
+  // URL's scheme alone, so an http:// value silently downgrades the session
+  // cookie while the deployment still looks healthy.
+  it("requires an https NEXTAUTH_URL in production", () => {
+    expect(() => assertProductionConfig({ ...base, NEXTAUTH_URL: "http://pixelduo.ai" })).toThrow(/NEXTAUTH_URL/);
+    expect(() => assertProductionConfig({ ...base, NEXTAUTH_URL: undefined })).toThrow(/NEXTAUTH_URL/);
+    // The documented local prod-mode test deployment is exempt.
     expect(() =>
-      assertProductionConfig({ ...base, NEXTAUTH_SECRET: secret, EMAIL_VERIFY_AUTO: "1" }),
+      assertProductionConfig({ ...base, NEXTAUTH_URL: "http://localhost:3000", PAYMENT_ALLOW_MOCK: "1" }),
+    ).not.toThrow();
+  });
+
+  // Without SMTP_URL the mailer logs the full message body, so password-reset
+  // links (account-takeover credentials) land in the container log while real
+  // users never receive auth mail.
+  it("requires SMTP_URL unless the deployment explicitly accepts a log-only mailer", () => {
+    expect(() => assertProductionConfig({ ...base, SMTP_URL: undefined })).toThrow(/SMTP_URL/);
+    expect(() => assertProductionConfig({ ...base, SMTP_URL: "" })).toThrow(/SMTP_URL/);
+    expect(() => assertProductionConfig({ ...base, SMTP_URL: undefined, MAIL_DEV_MODE: "1" })).not.toThrow();
+    expect(() => assertProductionConfig({ ...base, SMTP_URL: undefined, PAYMENT_ALLOW_MOCK: "1" })).not.toThrow();
+  });
+
+  it("refuses EMAIL_VERIFY_AUTO in production unless the deployment is marked as a test one", () => {
+    expect(() =>
+      assertProductionConfig({ ...base, EMAIL_VERIFY_AUTO: "1" }),
     ).toThrow(/EMAIL_VERIFY_AUTO/);
     // CI / ci-local.sh run a production build with PAYMENT_ALLOW_MOCK=1.
     expect(() =>
       assertProductionConfig({
         ...base,
-        NEXTAUTH_SECRET: secret,
         EMAIL_VERIFY_AUTO: "1",
         PAYMENT_ALLOW_MOCK: "1",
       }),

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { requireVerifiedUser, ok, fail, enforceRateLimit, readBodyCapped } from "@/lib/api";
+import { requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
 import { checkPrompt } from "@/lib/safety";
 import { createGenerationJob, createMediaJob } from "@/lib/queue";
 import { enabledImageModelIds, modelEnum } from "@/lib/model-registry";
@@ -23,6 +23,11 @@ export async function POST(req: Request) {
     // request, so an unthrottled parse is a memory-exhaustion vector.
     const limited = await enforceRateLimit(req, "generate", 20, 60_000);
     if (limited) return limited;
+    // Per-account limit matching edit/video/assistant/route. The per-IP bucket
+    // is keyed on the last XFF entry, so a caller with several source IPs has
+    // no account-level ceiling here otherwise.
+    const userLimited = await enforceUserRateLimit(userId, "generate", 20, 60_000);
+    if (userLimited) return fail(userLimited);
     const bodyRaw = await readBodyCapped(req, GENERATE_MAX_BYTES);
     if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
     const body = schema.parse(JSON.parse(bodyRaw.raw));

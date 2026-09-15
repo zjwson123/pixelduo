@@ -90,6 +90,14 @@ export async function grantCreditsTx(
   await addCreditsTx(tx, userId, source, amount, refType, refId, note);
 }
 
+// Canonical grant-lock order. EVERY statement that locks CreditGrant rows must
+// acquire them in this sequence: two transactions locking the same rows in
+// opposite orders deadlock, and Postgres resolves that by aborting one (a 500
+// on a webhook or an admin action). It matches the FIFO spend order, so
+// spendCreditsTx can take the rows in the order they come back.
+const GRANT_LOCK_ORDER = Prisma.sql`ORDER BY CASE WHEN source IN ('SIGNUP_BONUS', 'CHECKIN') THEN 0 ELSE 1 END,
+               "expiresAt" ASC NULLS LAST, "createdAt" ASC`;
+
 // Credits granted, pre-authed and refunded inside one billing cycle, used to
 // compute unused quota for the 30% carryover at renewal time.
 export async function cycleUsageTx(
@@ -99,8 +107,22 @@ export async function cycleUsageTx(
 ): Promise<CycleUsage> {
   const entries = await tx.ledgerEntry.findMany({
     where: { userId, createdAt: { gte: cycleStart } },
-    select: { type: true, creditsDelta: true },
+    select: { type: true, creditsDelta: true, refId: true },
   });
+  // Only clawbacks of THIS cycle's own plan quota may reduce its unused quota.
+  // The previous version summed every REVOKE and EXPIRE in the window, so a
+  // refunded credit PACK (~6000 credits) silently ate the whole carryover, and
+  // an unrelated EXPIRE (the previous cycle's rollover grant, which is never
+  // counted in `granted`) did the same — both in the customer's disfavour.
+  // Scoping to the orders that funded this cycle's SUBSCRIPTION grants keeps
+  // the refunded-plan protection while dropping the collateral damage.
+  const cycleGrants = await tx.creditGrant.findMany({
+    where: { userId, source: "SUBSCRIPTION", createdAt: { gte: cycleStart } },
+    select: { refId: true },
+  });
+  const cycleOrderIds = new Set(
+    cycleGrants.map((g) => g.refId).filter((id): id is string => Boolean(id)),
+  );
   let granted = 0;
   let preAuth = 0;
   let refund = 0;
@@ -109,11 +131,16 @@ export async function cycleUsageTx(
     if (e.type === "SUBSCRIPTION" && e.creditsDelta > 0) granted += e.creditsDelta;
     if (e.type === "PRE_AUTH") preAuth += Math.abs(e.creditsDelta);
     if (e.type === "REFUND") refund += e.creditsDelta;
-    // Clawed-back (REVOKE) and expired (EXPIRE) quota is gone: counting only
-    // PRE_AUTH/REFUND treated a fully refunded cycle as "granted and unused",
-    // so the next purchase collected 30% carryover on credits the user had
-    // already been refunded for — repeatable every cycle.
-    if (e.type === "REVOKE" || e.type === "EXPIRE") revoked += Math.abs(e.creditsDelta);
+    // Clawed-back (REVOKE) quota is gone: counting only PRE_AUTH/REFUND
+    // treated a fully refunded cycle as "granted and unused", so the next
+    // purchase collected 30% carryover on credits the user had already been
+    // refunded for — repeatable every cycle. EXPIRE is deliberately NOT
+    // counted: that is bookkeeping for credits whose validity already ended
+    // at the cycle boundary, and including it made the carryover depend on
+    // whether the expiry sweep happened to run before the renewal.
+    if (e.type === "REVOKE" && e.refId && cycleOrderIds.has(e.refId)) {
+      revoked += Math.abs(e.creditsDelta);
+    }
   }
   return { granted, spentNet: Math.max(0, preAuth - refund), revoked };
 }
@@ -139,8 +166,7 @@ export async function spendCreditsTx(
     Prisma.sql`SELECT id, remaining FROM "CreditGrant"
       WHERE "userId" = ${userId} AND remaining > 0
         AND ("expiresAt" IS NULL OR "expiresAt" > now())
-      ORDER BY CASE WHEN source IN ('SIGNUP_BONUS', 'CHECKIN') THEN 0 ELSE 1 END,
-               "expiresAt" ASC NULLS LAST, "createdAt" ASC
+      ${GRANT_LOCK_ORDER}
       FOR UPDATE`,
   );
   let needed = amount;
@@ -200,8 +226,7 @@ export async function refundCreditsTx(
   >(
     Prisma.sql`SELECT id, "expiresAt", "refType", "refId" FROM "CreditGrant"
       WHERE id IN (${Prisma.join(consumption.map((c) => c.grantId))})
-      ORDER BY CASE WHEN source IN ('SIGNUP_BONUS', 'CHECKIN') THEN 0 ELSE 1 END,
-               "expiresAt" ASC NULLS LAST, "createdAt" ASC
+      ${GRANT_LOCK_ORDER}
       FOR UPDATE`,
   );
   const orderRefs = [
@@ -393,17 +418,35 @@ export async function revokeOrderCreditsTx(
   tx: Prisma.TransactionClient,
   order: { id: string; userId: string },
 ): Promise<number> {
+  // Lock EVERY grant this order funded, including ones sitting at
+  // remaining = 0. The `AND remaining > 0` filter used to run BEFORE the lock,
+  // so a grant drained by a queued/running job (exactly the state a job leaves
+  // it in) was never locked and never serialized with refundCreditsTx
+  // restoring that same grant on a job failure: the restore read the order
+  // status without a lock, saw the pre-flip "paid", and handed the credits
+  // back while this revoke found nothing to take. Money refunded AND credits
+  // kept, permanently — every later refund event finds the order non-paid and
+  // is deduped. Locking the row makes the restore wait; the post-lock re-read
+  // then sees the restored amount and revokes it. The remaining > 0 test moves
+  // into the loop, where it only decides whether there is anything to take.
+  // GRANT_LOCK_ORDER keeps this consistent with every other grant-locking
+  // statement (without it, a revoke racing a refund could deadlock).
   const grants = await tx.$queryRaw<Array<{ id: string; remaining: number }>>(
     Prisma.sql`SELECT id, remaining FROM "CreditGrant"
-      WHERE "refId" = ${order.id} AND remaining > 0
+      WHERE "refId" = ${order.id}
+      ${GRANT_LOCK_ORDER}
       FOR UPDATE`,
   );
-  if (grants.length === 0) return 0;
   let revoked = 0;
   for (const g of grants) {
+    if (g.remaining <= 0) continue;
     await tx.creditGrant.update({ where: { id: g.id }, data: { remaining: 0 } });
     revoked += g.remaining;
   }
+  // No spendable remainder (already spent, or drained and revoked elsewhere):
+  // nothing to take, so no ledger entry either — a zero-delta REVOKE would
+  // just be noise in the cycle-usage window.
+  if (revoked <= 0) return 0;
   await addCreditsTx(tx, order.userId, "REVOKE", -revoked, "order", order.id, "credits revoked on payment refund");
   return revoked;
 }
@@ -431,15 +474,30 @@ export async function adminClawbackTx(
   adminId: string,
 ): Promise<void> {
   if (amount <= 0) throw new Error("invalid-amount");
-  const rows = await tx.$queryRaw<Array<{ id: string; remaining: number }>>(
-    Prisma.sql`SELECT id, remaining FROM "CreditGrant"
+  // Rows are LOCKED in the canonical order (GRANT_LOCK_ORDER) so a clawback
+  // racing a spend or a refund cannot deadlock, then TAKEN in this endpoint's
+  // own semantic order — free/admin grants first, which is deliberately not
+  // the FIFO order the lock uses. Locking order and take order are separate
+  // concerns; conflating them is what made this differ from spendCreditsTx.
+  const rows = await tx.$queryRaw<
+    Array<{ id: string; remaining: number; source: string; expiresAt: Date | null; createdAt: Date }>
+  >(
+    Prisma.sql`SELECT id, remaining, source, "expiresAt", "createdAt" FROM "CreditGrant"
       WHERE "userId" = ${userId} AND remaining > 0
-      ORDER BY CASE WHEN source IN ('SIGNUP_BONUS', 'CHECKIN', 'ADMIN') THEN 0 ELSE 1 END,
-               "expiresAt" ASC NULLS LAST, "createdAt" ASC
+      ${GRANT_LOCK_ORDER}
       FOR UPDATE`,
   );
+  const freeFirst = (s: string) => (s === "SIGNUP_BONUS" || s === "CHECKIN" || s === "ADMIN" ? 0 : 1);
+  const takeOrder = [...rows].sort((a, b) => {
+    const fa = freeFirst(a.source) - freeFirst(b.source);
+    if (fa !== 0) return fa;
+    const ea = a.expiresAt?.getTime() ?? Number.POSITIVE_INFINITY;
+    const eb = b.expiresAt?.getTime() ?? Number.POSITIVE_INFINITY;
+    if (ea !== eb) return ea - eb;
+    return a.createdAt.getTime() - b.createdAt.getTime();
+  });
   let needed = amount;
-  for (const r of rows) {
+  for (const r of takeOrder) {
     if (needed <= 0) break;
     const take = Math.min(r.remaining, needed);
     await tx.creditGrant.update({

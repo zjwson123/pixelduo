@@ -102,9 +102,17 @@ function isPrivateAddress(address: string): boolean {
   return true; // not an IP literal → refuse
 }
 
-const ssrfPinnedAgent = new Agent({
+export const ssrfPinnedAgent = new Agent({
   connect: { lookup: createPublicOnlyLookup() },
 });
+
+// Ports permitted for any outbound fetch of a URL we do not control. Without
+// this a "public" host could still be probed on internal-ish services
+// (redis :6379, ssh :22, …). Shared with lib/safety.ts's detector endpoint so
+// the two paths cannot drift apart.
+export function isPublicPort(port: string): boolean {
+  return port === "" || port === "80" || port === "443";
+}
 
 function ipv4Private(v4: string): boolean {
   const o = v4.split(".").map(Number);
@@ -208,6 +216,14 @@ export interface FetchPublicOptions {
   maxBytes: number;
 }
 
+// Deadline for ONE outbound provider/LLM call, body read included, when the
+// call site has no more specific value. Overridable so a test can exercise the
+// deadline without waiting the production interval out.
+export function outboundTimeoutMs(defaultMs: number): number {
+  const raw = Number(process.env.OUTBOUND_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : defaultMs;
+}
+
 // Hardened download of a provider-returned URL, shared by the image and video
 // paths: validates scheme and every DNS-resolved address, follows redirects
 // manually so each hop is re-validated, and caps the response size.
@@ -229,7 +245,7 @@ export async function fetchPublicBuffer(rawUrl: string, opts: FetchPublicOptions
       if (!(await hostIsPublic(url.hostname))) throw new Error("blocked-internal-url");
       // Ports are part of the SSRF surface too: without this a "public" host
       // could be probed on internal-ish services (redis :6379, ssh :22 …).
-      if (url.port !== "" && url.port !== "80" && url.port !== "443") {
+      if (!isPublicPort(url.port)) {
         throw new Error("blocked-port");
       }
       // Pinned agent: even if DNS rebinds between the check above and the

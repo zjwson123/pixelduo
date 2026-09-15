@@ -67,9 +67,11 @@ export async function GET(req: Request, { params }: { params: Promise<{ key: str
   // 1. User-owned generated image/video
   const image = await prisma.image.findFirst({ where: { userId: uid, url: key } });
   // 2. Shared template image (Explore gallery) — any logged-in user
+  let shared = false;
   if (!image) {
     const template = await prisma.template.findFirst({ where: { img: key }, select: { id: true } });
     if (!template) return new NextResponse("not found", { status: 404 });
+    shared = true;
   }
 
   // Stream the object: the old full-buffer get() materialized up to 100 MB
@@ -87,7 +89,13 @@ export async function GET(req: Request, { params }: { params: Promise<{ key: str
   const baseName = rawName.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 128) || "image";
   const headers: Record<string, string> = {
     "Content-Type": sniffContentType(head),
-    "Cache-Control": "private, max-age=31536000, immutable",
+    // Authorization is re-evaluated on EVERY request, so the response must not
+    // tell the browser to reuse the bytes for a year without asking again:
+    // on a shared browser profile, media fetched by one session was served
+    // from cache to a later, different session. Templates are the same file
+    // for every user, so they keep the long immutable cache (that is what
+    // keeps Explore fast); user-owned media is revalidated instead.
+    "Cache-Control": shared ? "private, max-age=31536000, immutable" : "private, no-store",
     "X-Content-Type-Options": "nosniff",
   };
   if (obj.length !== undefined) headers["Content-Length"] = String(obj.length);

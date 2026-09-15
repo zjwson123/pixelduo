@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "crypto";
 import { prisma } from "./prisma";
+import type { Prisma } from "@prisma/client";
 
 // Public API keys: raw value (`pd_live_…`) is shown exactly once; only the
 // SHA-256 hash and a display prefix are stored.
@@ -11,10 +12,13 @@ export function hashApiKey(raw: string): string {
 export async function createApiKey(
   userId: string,
   name: string,
+  // Optional transaction client so the caller can mint the key under the same
+  // advisory lock that enforces the per-account active-key cap.
+  tx: Prisma.TransactionClient | typeof prisma = prisma,
 ): Promise<{ key: string; prefix: string; id: string }> {
   const raw = `pd_live_${randomBytes(24).toString("hex")}`;
   const prefix = raw.slice(0, "pd_live_".length + 4);
-  const rec = await prisma.apiKey.create({
+  const rec = await tx.apiKey.create({
     data: { userId, name: name.trim() || "default", keyHash: hashApiKey(raw), prefix },
   });
   return { key: raw, prefix, id: rec.id };

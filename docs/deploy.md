@@ -21,6 +21,19 @@
 4. 生图与审核 Key：`MODELVERSE_IMAGE_API_KEY`、`ARK_IMAGE_API_KEY`、`DEEPSEEK_API_KEY`、`VISION_MODERATION_API_KEY`（无独立 key 时可用 `VISION_MODERATION_BASE_URL` + 同款 ModelVerse key）
 5. `NEXTAUTH_SECRET`（`openssl rand -base64 32` 生成）。它给所有会话 JWT 签名：**少于 32 位或仍是占位符（如 `change-me-…`）时生产环境拒绝启动**（`instrumentation.ts`），不要沿用 `.env.example` 里的示例值
 
+### 生产启动自检（任一不满足即**拒绝启动**，进程退出）
+
+`instrumentation.ts` 的 `assertProductionConfig()` 以 `process.exit(1)` 结束进程（此前只抛错，Next 会吞掉异常并继续监听，线上表现是"容器活着但每个动态路由都 500"）：
+
+| 变量 | 要求 | 原因 |
+| --- | --- | --- |
+| `NEXTAUTH_SECRET` | ≥32 位且非占位符 | 泄露即可离线爆破并伪造任意账号（含管理员）的会话 |
+| `NEXTAUTH_URL` | **https://** | next-auth 仅依此判断是否给会话 Cookie 加 `Secure`；http 时 Cookie 明文可被截获，且邮件链接指向错误域名 |
+| `SMTP_URL` | 必填（或 `MAIL_DEV_MODE=1`） | 缺省时邮件走 stdout，密码重置链接（等于账号接管凭据）会写进容器日志 |
+| `EMAIL_VERIFY_AUTO` | 生产禁用 | 自动验证注册并发放注册奖励 = 无限量带额度的已验证账号 |
+
+标记为测试部署（`PAYMENT_ALLOW_MOCK=1`，CI 与 `ci-local.sh` 使用）时，后三项自动豁免——mock 支付本身在生产已被拒绝，该标记即"这不是真实部署"的声明。
+
 ## 部署步骤
 
 ```bash

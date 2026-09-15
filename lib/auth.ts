@@ -12,8 +12,14 @@ import { signupBonus } from "./ledger";
 // Source address for the per-(email, IP) login cap. Behind Caddy the LAST
 // X-Forwarded-For entry is the address the edge saw. The value is a hint only:
 // spoofing it splits the per-pair counter, but the per-email cap still binds.
-function loginAttemptIp(headers: Record<string, unknown> | undefined): string | undefined {
-  const raw = headers?.["x-forwarded-for"] ?? headers?.["x-real-ip"];
+//
+// X-Real-IP is NOT trusted here. Nothing in front of us is known to set it, so
+// honouring it let a single source pick a fresh bucket per request by sending
+// `X-Real-IP: <random>` with no XFF — defeating the pair cap entirely. This is
+// the same reasoning (and the same TRUST_X_REAL_IP gate) as clientIp in
+// lib/rate-limit.ts, which was fixed earlier while this copy was missed.
+export function loginAttemptIp(headers: Record<string, unknown> | undefined): string | undefined {
+  const raw = headers?.["x-forwarded-for"] ?? (process.env.TRUST_X_REAL_IP === "1" ? headers?.["x-real-ip"] : undefined);
   const value = Array.isArray(raw) ? raw[raw.length - 1] : raw;
   if (typeof value !== "string") return undefined;
   const parts = value.split(",").map((s) => s.trim()).filter(Boolean);
