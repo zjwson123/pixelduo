@@ -1,6 +1,8 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { prisma } from "../lib/prisma";
-import { ensureOAuthUser } from "../lib/auth";
+import { ensureOAuthUser, authOptions } from "../lib/auth";
+
+const signIn = authOptions.callbacks!.signIn!;
 
 const EMAIL = `oauth-${Date.now()}@test.dev`;
 
@@ -55,3 +57,72 @@ describe("OAuth account provisioning", () => {
     expect(db.emailVerified).not.toBeNull();
   });
 });
+
+// GitHub publishes no `email_verified` claim, and NextAuth's GitHub provider
+// builds `profile.email` from /user/emails as `primary ?? emails[0]` WITHOUT
+// looking at the `verified` flag. The signIn callback treated a missing claim as
+// "the provider vouches for this address", so an address the attacker merely
+// added to their own GitHub account would auto-link them into the real owner's
+// (already verified) account — full session, no password, no second factor.
+describe("GitHub sign-in requires a verified address", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function stubGithubEmails(list: Array<{ email: string; verified: boolean; primary?: boolean }>) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify(list), { status: 200 })),
+    );
+  }
+
+  async function githubSignIn(email: string): Promise<boolean> {
+    return (await signIn({
+      user: { id: "gh-1", email, name: "GH" },
+      account: { type: "oauth", provider: "github", access_token: "tok" },
+      profile: {},
+    } as never)) as boolean;
+  }
+
+  it("refuses an address GitHub reports as unverified", async () => {
+    const email = `oauth-gh-unv-${Date.now()}@test.dev`;
+    await prisma.user.create({
+      data: { email, passwordHash: "victim-hash", name: "Victim", emailVerified: new Date() },
+    });
+    stubGithubEmails([{ email, verified: false, primary: true }]);
+    expect(await githubSignIn(email)).toBe(false);
+  });
+
+  it("refuses when GitHub does not list the address at all", async () => {
+    const email = `oauth-gh-absent-${Date.now()}@test.dev`;
+    await prisma.user.create({
+      data: { email, passwordHash: "victim-hash", name: "Victim", emailVerified: new Date() },
+    });
+    stubGithubEmails([{ email: "someone-else@test.dev", verified: true }]);
+    expect(await githubSignIn(email)).toBe(false);
+  });
+
+  it("refuses when the provider API cannot be reached", async () => {
+    const email = `oauth-gh-down-${Date.now()}@test.dev`;
+    await prisma.user.create({
+      data: { email, passwordHash: "victim-hash", name: "Victim", emailVerified: new Date() },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("network down");
+      }),
+    );
+    expect(await githubSignIn(email)).toBe(false);
+  });
+
+  it("accepts an address GitHub reports as verified", async () => {
+    const email = `oauth-gh-ok-${Date.now()}@test.dev`;
+    await prisma.user.create({
+      data: { email, passwordHash: "victim-hash", name: "Victim", emailVerified: new Date() },
+    });
+    stubGithubEmails([{ email, verified: true, primary: true }]);
+    expect(await githubSignIn(email)).toBe(true);
+  });
+});
+

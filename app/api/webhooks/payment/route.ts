@@ -1,6 +1,6 @@
 import { ok, fail, enforceRateLimit, readBodyCapped } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
-import { fulfillOrder, revokeOrderCreditsTx } from "@/lib/ledger";
+import { fulfillOrder, revokeOrderCreditsTx, revokePlanEntitlementTx } from "@/lib/ledger";
 import { getPaymentProvider } from "@/lib/payments";
 import { sanitizeWebhookPayload } from "@/lib/payments/sanitize";
 import { sendOrderReceiptEmail, sendRefundEmail } from "@/lib/mail";
@@ -129,6 +129,10 @@ export async function POST(req: Request) {
           let claimed = paidClaim.count === 1;
           if (claimed) {
             await revokeOrderCreditsTx(tx, order);
+            // A refunded subscription must lose the TIER as well as the
+            // credits — see revokePlanEntitlementTx. Guarded, so refunding a
+            // superseded plan order cannot downgrade a newer one.
+            await revokePlanEntitlementTx(tx, order);
           } else {
             // Nothing granted yet: a refund delivered before the paid event
             // flips the order so the late fulfillment can never grant credits

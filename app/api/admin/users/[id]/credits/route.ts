@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { requireAdmin } from "@/lib/admin";
-import { ok, fail, readBodyCapped } from "@/lib/api";
+import { ok, fail, readBodyCapped, enforceRateLimit, enforceUserRateLimit } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { adminGrantTx, adminClawbackTx } from "@/lib/ledger";
 
@@ -11,10 +11,18 @@ const schema = z.object({
 
 // Admin credit adjustment: positive = compensation grant (never expires,
 // consumed first), negative = clawback (FIFO, free/admin grants first).
+// Rate-limited per IP AND per acting admin: with its sibling below this was one
+// of only two routes that parsed a body with no limit of its own, and it moves
+// up to 1,000,000 credits per request, so a stolen admin session (or a retry
+// loop) had no ceiling below the coarse per-IP middleware cap.
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   try {
     const adminId = await requireAdmin();
+    const limited = await enforceRateLimit(req, "admin-credits", 30, 60_000);
+    if (limited) return limited;
+    const adminLimited = await enforceUserRateLimit(adminId, "admin-credits", 30, 60_000);
+    if (adminLimited) return fail(adminLimited);
     const bodyRaw = await readBodyCapped(req, 8 * 1024);
     if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
     const body = schema.parse(JSON.parse(bodyRaw.raw));

@@ -1,14 +1,21 @@
-import { getServerSession } from "next-auth";
 import { redirect } from "next/navigation";
-import { authOptions } from "@/lib/auth";
-import { prisma } from "@/lib/prisma";
+import { requireAdmin } from "@/lib/admin";
+import { ApiError } from "@/lib/api";
 
+// requireAdmin, not a bare getServerSession: it re-reads User.sessionVersion
+// (a session revoked by reset-password / revoke-sessions must stop rendering the
+// console immediately) and re-reads `role` from the DB, so a demoted admin loses
+// the shell on the next request rather than whenever the JWT expires.
 export default async function AdminLayout({ children }: { children: React.ReactNode }) {
-  const session = await getServerSession(authOptions);
-  const su = session?.user as { id?: string; totpPending?: boolean } | undefined;
-  if (!su?.id) redirect("/login");
-  if (su.totpPending) redirect("/login?2fa=1");
-  const user = await prisma.user.findUnique({ where: { id: su.id }, select: { role: true } });
-  if (user?.role !== "admin") redirect("/studio");
+  let destination: string | null = null;
+  try {
+    await requireAdmin();
+  } catch (e) {
+    if (!(e instanceof ApiError)) throw e;
+    if (e.message === "admin-required") destination = "/studio";
+    else if (e.message === "2fa-required") destination = "/login?2fa=1";
+    else destination = "/login";
+  }
+  if (destination) redirect(destination);
   return <>{children}</>;
 }

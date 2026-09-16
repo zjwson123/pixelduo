@@ -4,6 +4,7 @@
 
 import { getModelVerseKey, getArkKey, getArkBaseUrl, getAliyunKey, getAliyunBaseUrl } from "../keys";
 import { saveBase64Image, saveRemoteImage, fetchPublicBuffer, readBodyCapped, outboundTimeoutMs } from "../store";
+import { getStorage } from "../storage";
 import { getModel, type ModelInfo } from "../model-registry";
 import type { Quality } from "../cost";
 
@@ -282,11 +283,28 @@ export async function generateImages(input: {
   // Legacy "both" mode: generate with gpt + seedream in parallel. No per-image
   // checkpointing — the two lanes would race on the caller's persisted array.
   if (input.model === "both") {
-    const [gpt, seed] = await Promise.all([
+    // Promise.all settles on the FIRST rejection, which left two problems
+    // behind: the surviving lane kept running (still billing the provider, still
+    // calling saveBase64Image) after the caller had already given up, and every
+    // object either lane had stored became permanently unreferenced — the
+    // failure path can only reclaim the images it was handed, and nothing
+    // checkpoints this lane (onImage is deliberately not threaded here, because
+    // the lanes would race on the caller's array). Wait for BOTH lanes to settle
+    // and reclaim a partially-failed batch's objects before surfacing the error,
+    // so a retry starts from a clean slate instead of stacking orphans.
+    const [gpt, seed] = await Promise.allSettled([
       generateWithGpt(input.prompt, input.quality, input.count),
       generateWithSeedream(input.prompt, input.count, undefined, input.watermark ?? true),
     ]);
-    return [...gpt, ...seed];
+    if (gpt.status === "rejected" || seed.status === "rejected") {
+      const stored = [
+        ...(gpt.status === "fulfilled" ? gpt.value : []),
+        ...(seed.status === "fulfilled" ? seed.value : []),
+      ];
+      await Promise.all(stored.map((img) => getStorage().delete(img.key).catch(() => undefined)));
+      throw gpt.status === "rejected" ? gpt.reason : (seed as PromiseRejectedResult).reason;
+    }
+    return [...gpt.value, ...seed.value];
   }
 
   switch (input.model) {
@@ -469,7 +487,16 @@ async function pollSeedanceTask(taskId: string): Promise<VideoTaskStatus> {
       `https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks/${encodeURIComponent(taskId)}`,
       { headers: { Authorization: `Bearer ${key}` }, signal: controller.signal },
     );
-    if (!res.ok) return { status: "unknown", error: `poll failed: ${res.status}` };
+    // Cancel the body before returning: an undici response whose body is never
+    // read keeps its socket out of the pool until GC. This runs every
+    // POLL_INTERVAL_MS (10s) for up to 30 minutes per job, so a provider that
+    // answers 4xx with a body during an incident accumulates hundreds of pinned
+    // sockets per job — fd exhaustion in the worker exactly when the media
+    // pipeline is already degraded.
+    if (!res.ok) {
+      await res.body?.cancel().catch(() => undefined);
+      return { status: "unknown", error: `poll failed: ${res.status}` };
+    }
     const data = (await readJsonCapped(res, 1024 * 1024)) as {
       status?: string;
       content?: { video_url?: string | Array<{ url?: string }> };
@@ -501,7 +528,10 @@ async function pollWanVideoTask(taskId: string): Promise<VideoTaskStatus> {
       `https://dashscope.aliyuncs.com/api/v1/tasks/${encodeURIComponent(taskId)}`,
       { headers: { Authorization: `Bearer ${key}` }, signal: controller.signal },
     );
-    if (!res.ok) return { status: "unknown", error: `poll failed: ${res.status}` };
+    if (!res.ok) {
+      await res.body?.cancel().catch(() => undefined);
+      return { status: "unknown", error: `poll failed: ${res.status}` };
+    }
     const data = (await readJsonCapped(res, 1024 * 1024)) as {
       output?: { task_status?: string; video_url?: string };
       request_id?: string;

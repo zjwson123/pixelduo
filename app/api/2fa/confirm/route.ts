@@ -2,6 +2,7 @@ import { z } from "zod";
 import { requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { verifyTotp, generateBackupCodes, hashBackupCode } from "@/lib/twofa";
+import { sendTwoFactorStateEmail } from "@/lib/mail";
 import bcrypt from "bcryptjs";
 
 const schema = z.object({ token: z.string().min(6).max(20), password: z.string().min(1).max(100) });
@@ -25,7 +26,7 @@ export async function POST(req: Request) {
     const body = schema.parse(JSON.parse(bodyRaw.raw));
     const user = await prisma.user.findUniqueOrThrow({
       where: { id: userId },
-      select: { totpPendingSecret: true, totpEnabled: true, passwordHash: true },
+      select: { totpPendingSecret: true, totpEnabled: true, passwordHash: true, email: true },
     });
     if (user.totpEnabled) return ok({ alreadyEnabled: true });
     if (!(await bcrypt.compare(body.password, user.passwordHash))) return fail(new Error("invalid-password"));
@@ -58,6 +59,10 @@ export async function POST(req: Request) {
         data: codes.map((c) => ({ userId, codeHash: hashBackupCode(c) })),
       });
     });
+    // The owner must learn about an enrollment they did not perform: with only
+    // a leaked password an attacker can bind 2FA here and lock the real owner
+    // out for good (reset-password does not clear totpEnabled).
+    await sendTwoFactorStateEmail(user.email, true);
     return ok({ enabled: true, backupCodes: codes });
   } catch (e) {
     if (e instanceof z.ZodError) return fail(new Error("invalid-input"));

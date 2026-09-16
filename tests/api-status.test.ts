@@ -126,3 +126,32 @@ describe("readBodyCap", () => {
     expect("raw" in r && r.raw).toBe('{"a":1}');
   });
 });
+
+describe("fail() must not classify on substrings", () => {
+  // The classifier tested `msg.includes("already")`, `includes("not-found")`
+  // and `includes("insufficient")`, so an UNEXPECTED internal error whose text
+  // merely contained one of those words was echoed to the API client verbatim
+  // as a 4xx and skipped captureError() — the caller saw raw internals and the
+  // incident never reached the logs or Sentry. These two strings are Prisma's
+  // own transaction-manager errors (see @prisma/client/runtime/client.js).
+  const incidents = [
+    "Transaction already closed: A query cannot be executed on a transaction that was rolled back.",
+    "Transaction already closed: A query cannot be executed on a transaction that was committed.",
+    "there is insufficient privilege to access the table",
+    "unexpected not-found in the internal registry",
+  ];
+
+  for (const msg of incidents) {
+    it(`masks ${JSON.stringify(msg.slice(0, 40))}… as a 500 and does not echo it`, async () => {
+      const { status, body } = await statusOf(new Error(msg));
+      expect(status).toBe(500);
+      expect(body.error).toBe("internal-error");
+    });
+  }
+
+  it("still classifies the real business messages", async () => {
+    expect((await statusOf(new Error("email-already-registered"))).status).toBe(409);
+    expect((await statusOf(new Error("user-not-found"))).status).toBe(404);
+    expect((await statusOf(new Error("insufficient-credits"))).status).toBe(400);
+  });
+});

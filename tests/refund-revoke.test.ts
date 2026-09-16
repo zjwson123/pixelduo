@@ -215,9 +215,9 @@ describe("carryover ignores clawed-back quota", () => {
     });
     expect(revoked).toBe(2000);
 
-    const cycleStart = new Date();
-    cycleStart.setMonth(cycleStart.getMonth() - 1);
-    const usage = await cycleUsage(userId, cycleStart);
+    // cycleUsage takes the cycle's ANCHOR (its end). The tests rewind
+    // planRenewsAt into the past, so "now" is the anchor of the ended cycle.
+    const usage = await cycleUsage(userId, new Date());
     expect(usage.revoked).toBe(2000);
     // Nothing was actually used, but nothing was kept either.
     expect(Math.max(0, usage.granted - usage.spentNet - usage.revoked)).toBe(0);
@@ -276,9 +276,9 @@ describe("carryover ignores clawed-back quota", () => {
     });
     expect(revoked).toBe(6000);
 
-    const cycleStart = new Date();
-    cycleStart.setMonth(cycleStart.getMonth() - 1);
-    const usage = await cycleUsage(userId, cycleStart);
+    // cycleUsage takes the cycle's ANCHOR (its end). The tests rewind
+    // planRenewsAt into the past, so "now" is the anchor of the ended cycle.
+    const usage = await cycleUsage(userId, new Date());
     expect(usage.granted).toBe(2000);
     expect(usage.spentNet).toBe(0);
     expect(usage.revoked).toBe(0); // the pack clawback is NOT plan quota

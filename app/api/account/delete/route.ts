@@ -2,6 +2,7 @@ import { z } from "zod";
 import { requireUserId, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { getStorage } from "@/lib/storage";
+import { checkpointKeys } from "@/lib/queue";
 import { verifyTotp, useBackupCode } from "@/lib/twofa";
 import bcrypt from "bcryptjs";
 
@@ -42,14 +43,22 @@ export async function POST(req: Request) {
     }
     // Generated outputs AND user-uploaded reference images (Job.refImageKey —
     // for i2v/edit workflows these can be personal photos, the most sensitive
-    // files we hold) must both be erased for a true GDPR/PIPL delete.
+    // files we hold) must both be erased for a true GDPR/PIPL delete. So must
+    // the images a job had already persisted into its checkpoint: those have no
+    // Image row yet, so nothing else here (or /api/files) can reach them, and
+    // they were generated from the user's own prompts.
     const images = await prisma.image.findMany({ where: { userId }, select: { url: true } });
-    const jobs = await prisma.job.findMany({ where: { userId }, select: { refImageKey: true } });
+    const jobs = await prisma.job.findMany({
+      where: { userId },
+      select: { refImageKey: true, images: true },
+    });
     const refKeys = jobs.map((j) => j.refImageKey).filter((k): k is string => Boolean(k));
+    const staged = jobs.flatMap((j) => checkpointKeys(j.images));
     const storage = getStorage();
     await Promise.allSettled([
       ...images.map((i) => storage.delete(i.url)),
       ...refKeys.map((k) => storage.delete(k)),
+      ...staged.map((k) => storage.delete(k)),
     ]);
     await prisma.$transaction([
       prisma.backupCode.deleteMany({ where: { userId } }),

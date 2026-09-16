@@ -11,19 +11,55 @@ export interface RateLimiter {
 }
 
 // In-memory sliding-window limiter (single-process fallback).
+//
+// Buckets are keyed per source address, and an attack is free to arrive from an
+// unbounded number of them (a single IPv6 /64 is 2^64 addresses), so the map
+// must be swept: the original implementation only pruned the SAME key on a
+// later hit and never deleted one, i.e. one permanent entry per address ever
+// seen. 400k distinct keys retained ~150 MB of heap and climbing, on endpoints
+// that are reachable BEFORE any auth (/api/health, /api/files, /api/register,
+// /api/auth/*, the payment webhook). That turns the documented Redis-outage
+// degradation — "fail open but keep serving" — into an OOM kill. Both other
+// hand-rolled limiters in this codebase (proxy.ts, login-guard.ts) already
+// sweep; this one is the authoritative limiter and did not.
+type Bucket = { hits: number[]; windowMs: number };
+
+// Amortization knobs for the sweep: cheap to scan a few thousand entries every
+// few seconds, plus a hard trigger past a size no legitimate traffic mix
+// reaches, so a Redis outage cannot let the map grow unbounded between sweeps.
+const SWEEP_MIN_SIZE = 5_000;
+const SWEEP_MIN_INTERVAL_MS = 10_000;
+const SWEEP_FORCE_SIZE = 100_000;
+
 export class MemoryRateLimiter implements RateLimiter {
-  private buckets = new Map<string, number[]>();
+  private buckets = new Map<string, Bucket>();
+  private lastSweep = 0;
+
+  private sweep(now: number) {
+    const size = this.buckets.size;
+    if (size < SWEEP_MIN_SIZE) return;
+    if (size < SWEEP_FORCE_SIZE && now - this.lastSweep < SWEEP_MIN_INTERVAL_MS) return;
+    this.lastSweep = now;
+    for (const [key, b] of this.buckets) {
+      const newest = b.hits[b.hits.length - 1];
+      if (newest === undefined || now - newest >= b.windowMs) this.buckets.delete(key);
+    }
+  }
 
   async hit(key: string, limit: number, windowMs: number): Promise<RateLimitResult> {
     const now = Date.now();
-    const hits = (this.buckets.get(key) ?? []).filter((t) => now - t < windowMs);
+    const bucket = this.buckets.get(key);
+    // A key hit with a different window (a scope reused with new params) starts
+    // a fresh bucket rather than mixing two windows in one array.
+    const hits = bucket && bucket.windowMs === windowMs ? bucket.hits.filter((t) => now - t < windowMs) : [];
     if (hits.length >= limit) {
-      this.buckets.set(key, hits);
+      this.buckets.set(key, { hits, windowMs });
       const oldest = hits[0];
       return { ok: false, retryAfterSec: Math.max(1, Math.ceil((oldest + windowMs - now) / 1000)), remaining: 0 };
     }
     hits.push(now);
-    this.buckets.set(key, hits);
+    this.buckets.set(key, { hits, windowMs });
+    this.sweep(now);
     return { ok: true, remaining: Math.max(0, limit - hits.length) };
   }
 }

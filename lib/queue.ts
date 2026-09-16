@@ -267,8 +267,44 @@ export async function failJob(jobId: string, error: string, opts?: { terminal?: 
       if (job.refImageKey) {
         await getStorage().delete(job.refImageKey).catch(() => undefined);
       }
+      // Same for the images the attempt already persisted and checkpointed in
+      // Job.images. A job that stored 3 of 4 images and then failed for good is
+      // refunded in full, and those objects used to stay in the bucket forever,
+      // referenced by nothing: /api/files resolves only keys with an Image row,
+      // and completeJob — the only other writer of Job.images — never runs.
+      // The retry branch above deliberately keeps the checkpoint so the next
+      // attempt can resume instead of re-billing the whole batch.
+      for (const key of checkpointKeys(job.images)) {
+        await getStorage().delete(key).catch(() => undefined);
+      }
     }
   });
+}
+
+// Storage keys in a Job.images checkpoint. While a job is in flight the column
+// holds the provider images already persisted (objects with a `key`); after
+// completeJob it holds bare URL strings, which are deliberately NOT returned
+// here: those images have Image rows and are owned by the delivery, not by a
+// failed attempt. Exported for the erasure routes, which must reclaim a
+// half-finished job's objects too.
+export function checkpointKeys(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    const keys: string[] = [];
+    for (const item of parsed) {
+      if (
+        typeof item === "object" && item !== null &&
+        typeof (item as { key?: unknown }).key === "string"
+      ) {
+        keys.push((item as { key: string }).key);
+      }
+    }
+    return keys;
+  } catch {
+    return [];
+  }
 }
 
 // Recover jobs stuck in "running" or "polling" after a worker crash.

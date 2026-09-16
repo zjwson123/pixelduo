@@ -98,6 +98,9 @@ async function callAssistantModel(prompt: string, mode: string, modelId: string)
         const data = (await readJsonCapped(res, 8 * 1024 * 1024)) as unknown as { choices?: Array<{ message?: { content?: string } }> };
         const text = data.choices?.[0]?.message?.content?.trim();
         if (text) return { text, offline: false, model: modelId };
+      } else {
+        // Cancel the unread body — see lib/router.ts for why.
+        await res.body?.cancel().catch(() => undefined);
       }
     } finally {
       clearTimeout(timer);

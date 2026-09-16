@@ -1,3 +1,4 @@
+import sharp from "sharp";
 import { getStorage } from "./storage";
 import { getVisionConfig } from "./keys";
 import { hostIsPublic, isPublicPort, readJsonCapped, ssrfPinnedAgent, outboundTimeoutMs } from "./store";
@@ -32,11 +33,14 @@ export interface ImageAudit {
   checked: boolean;
   flagged?: boolean;
   provider?: string;
+  // Moderation is CONFIGURED, but this image could not actually be audited
+  // (detector error/timeout, unparseable reply, object missing, no vision
+  // config resolved). Deliberately distinct from `checked: false` alone, which
+  // also covers "moderation is off by design": the worker must not deliver
+  // output it could not audit when the operator asked for an audit, but must
+  // keep working when they did not.
+  unavailable?: boolean;
 }
-
-// Largest image worth sending to the in-process vision audit (base64 + JSON
-// stringification multiply this by ~2.4x).
-const MODERATION_MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 
 // Robustly extract {flagged, reason} from a vision-model reply (may be fenced).
 export function parseModerationJson(text: string): { flagged: boolean; reason?: string } | null {
@@ -94,19 +98,42 @@ async function moderateWithVision(dataUrl: string): Promise<ImageAudit> {
       });
       // Read the body while the timer is still armed: clearing it as soon as
       // the headers land leaves the stream unbounded (see callWithKeys).
-      if (!res.ok) return { checked: false };
+      if (!res.ok) {
+        await res.body?.cancel().catch(() => undefined);
+        return { checked: false, unavailable: true };
+      }
       const data = (await readJsonCapped(res, 8 * 1024 * 1024)) as unknown as { choices?: Array<{ message?: { content?: string } }> };
       const text = data.choices?.[0]?.message?.content;
-      if (!text) return { checked: false };
+      if (!text) return { checked: false, unavailable: true };
       const parsed = parseModerationJson(text);
-      if (!parsed) return { checked: false };
+      if (!parsed) return { checked: false, unavailable: true };
       return { checked: true, flagged: parsed.flagged, provider: `vision:${cfg.model}` };
     } finally {
       clearTimeout(timer);
     }
   } catch {
-    return { checked: false };
+    return { checked: false, unavailable: true };
   }
+}
+
+// Largest object worth base64-encoding and stringifying into the audit request
+// (peak cost per image is ~2.4x the file size).
+const MODERATION_MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+// Above this, an output is downscaled before the audit instead of being skipped.
+const MODERATION_DOWNSCALE_ABOVE_BYTES = 1024 * 1024;
+const MODERATION_EDGE = 1024;
+
+// Shrink an oversized output so it can still be audited. Skipping anything past
+// the audit budget was a DETERMINISTIC moderation bypass: the encoded size is
+// chosen by the provider, not by us, so a fine-detail prompt at
+// size "1920x1920" (~11 MB as PNG) produced an output that was never moderated
+// while the job reported success and was billed. Downscaling to a reviewable
+// edge keeps every output inside the auditable range.
+async function shrinkForAudit(buf: Buffer): Promise<Buffer> {
+  return sharp(buf, { limitInputPixels: 100_000_000 })
+    .resize({ width: MODERATION_EDGE, height: MODERATION_EDGE, fit: "inside", withoutEnlargement: true })
+    .jpeg({ quality: 82 })
+    .toBuffer();
 }
 
 // Post-generation safety audit:
@@ -133,7 +160,7 @@ export async function analyzeImage(url: string): Promise<ImageAudit> {
   const endpoint = process.env.IMAGE_NSFW_ENDPOINT;
   if (endpoint) {
     // SSRF guard: only allow public http(s) endpoints for the external detector.
-    if (!(await isSafeEndpointUrl(endpoint))) return { checked: false };
+    if (!(await isSafeEndpointUrl(endpoint))) return { checked: false, unavailable: true };
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), outboundTimeoutMs(30_000));
@@ -151,30 +178,42 @@ export async function analyzeImage(url: string): Promise<ImageAudit> {
           // dispatcher and reopened that TOCTOU window.
           dispatcher: ssrfPinnedAgent,
         })) as unknown as Response;
-        if (!res.ok) return { checked: false };
+        if (!res.ok) {
+          await res.body?.cancel().catch(() => undefined);
+          return { checked: false, unavailable: true };
+        }
         const data = (await readJsonCapped(res, 8 * 1024 * 1024)) as unknown as { flagged?: boolean };
         return { checked: true, flagged: Boolean(data.flagged), provider: "external" };
       } finally {
         clearTimeout(timer);
       }
     } catch {
-      return { checked: false };
+      return { checked: false, unavailable: true };
     }
   }
   if (process.env.IMAGE_MODERATION === "1") {
     try {
       const buf = await getStorage().get(url);
-      if (!buf) return { checked: false };
-      // The vision path base64-encodes the object and stringifies it into a
-      // JSON body, so peak cost per image is roughly 2.4x the file. Skip
-      // anything past the audit budget instead of letting one huge output
-      // dominate the worker's heap.
-      if (buf.length > MODERATION_MAX_IMAGE_BYTES) return { checked: false };
-      const ext = url.endsWith(".jpg") || url.endsWith(".jpeg") ? "jpeg" : "png";
-      const dataUrl = `data:image/${ext};base64,${buf.toString("base64")}`;
+      if (!buf) return { checked: false, unavailable: true };
+      let payload = buf;
+      let ext = url.endsWith(".jpg") || url.endsWith(".jpeg") ? "jpeg" : "png";
+      if (buf.length > MODERATION_DOWNSCALE_ABOVE_BYTES) {
+        // Downscale rather than skip — see shrinkForAudit. If even that fails
+        // (corrupt or unsupported object) we have nothing auditable, and an
+        // unauditable output must not be delivered; the worker turns this into
+        // a refunded failure.
+        try {
+          payload = await shrinkForAudit(buf);
+          ext = "jpeg";
+        } catch {
+          return { checked: false, unavailable: true };
+        }
+      }
+      if (payload.length > MODERATION_MAX_IMAGE_BYTES) return { checked: false, unavailable: true };
+      const dataUrl = `data:image/${ext};base64,${payload.toString("base64")}`;
       return moderateWithVision(dataUrl);
     } catch {
-      return { checked: false };
+      return { checked: false, unavailable: true };
     }
   }
   return { checked: false };

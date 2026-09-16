@@ -76,30 +76,50 @@ export function ok(data: unknown, init?: ResponseInit) {
 
 // HTTP status for an expected business error, classified from its message.
 // Returns null for unexpected errors — those are masked as a generic 500.
+//
+// Every test here is an exact match or an anchored prefix, never a substring.
+// The previous version classified with `msg.includes("already")`,
+// `includes("not-found")` and `includes("insufficient")`, so any UNEXPECTED
+// internal error whose text merely contained one of those words was echoed to
+// the API client verbatim as a 4xx AND skipped the captureError below — the
+// caller got raw internals, and the incident never reached the logs or Sentry.
+// Prisma's transaction manager produces exactly such messages ("Transaction
+// already closed: A query cannot be executed on a transaction that was rolled
+// back."), i.e. a broken transaction was reported to the user as a 409 and
+// never recorded.
+const NOT_FOUND_MESSAGES = new Set([
+  "user-not-found",
+  "order-not-found",
+  "item-not-found",
+  "job-not-found",
+  "image-not-found",
+]);
+
 function expectedStatus(msg: string): number | null {
   if (
     msg.startsWith("invalid-") ||
     msg.startsWith("blocked:") ||
+    msg.startsWith("blocked-") ||
     msg.startsWith("unknown-model:") ||
     msg.startsWith("model-disabled:") ||
     msg.startsWith("not-a-video-model:") ||
     msg.startsWith("video-timeout:") ||
     msg.startsWith("image-flagged:") ||
     msg.startsWith("cannot-") ||
-    msg.includes("2fa-code-required")
+    msg === "2fa-code-required" ||
+    msg === "2fa-not-enabled" ||
+    msg === "insufficient-credits"
   ) {
     return 400;
   }
-  if (msg.startsWith("too-many-keys")) return 409;
-  if (msg.startsWith("queue-full:") || msg.includes("rate-limited")) return 429;
-  if (msg.includes("unauthorized")) return 401;
-  if (msg.includes("2fa-required") || msg.includes("admin-required") || msg.includes("verify-email-required")) {
+  if (msg.startsWith("too-many-keys") || msg === "email-already-registered") return 409;
+  if (msg.startsWith("queue-full:") || msg === "rate-limited") return 429;
+  if (msg === "unauthorized") return 401;
+  if (msg === "2fa-required" || msg === "admin-required" || msg === "verify-email-required") {
     return 403;
   }
-  if (msg.includes("2fa-not-enabled") || msg.includes("invalid-password") || msg.includes("invalid-code")) return 400;
-  if (msg.includes("not-found")) return 404;
-  if (msg.includes("already")) return 409;
-  if (msg.includes("insufficient")) return 400;
+  if (msg === "invalid-password" || msg === "invalid-code") return 400;
+  if (NOT_FOUND_MESSAGES.has(msg)) return 404;
   return null;
 }
 

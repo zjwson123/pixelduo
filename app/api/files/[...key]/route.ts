@@ -4,6 +4,15 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getStorage } from "@/lib/storage";
 
+// Error bodies need the same no-store as the success path, for the reason
+// lib/api.ts centralises it: a 401/403/404 for a URL-addressable resource is
+// heuristically cacheable, so a shared cache in front of /api/* can pin one
+// user's error for every later visitor to that exact key. It is reachable by
+// design here — /api/jobs hands out /api/files/<key> URLs for images that are
+// merely checkpointed, so a client following them immediately gets a 404 for a
+// path that starts serving 200 seconds later.
+const NO_STORE = { "Cache-Control": "private, no-store" } as const;
+
 function sniffContentType(buf: Uint8Array): string {
   // Video: MP4
   if (
@@ -59,8 +68,10 @@ export async function GET(req: Request, { params }: { params: Promise<{ key: str
   } catch (e) {
     if (!(e instanceof ApiError)) throw e;
     const apiKey = await authenticateApiKey(req);
-    if (!apiKey) return new NextResponse(e.message, { status: e.status });
-    if (!apiKey.emailVerified) return new NextResponse("email not verified", { status: 403 });
+    if (!apiKey) return new NextResponse(e.message, { status: e.status, headers: NO_STORE });
+    if (!apiKey.emailVerified) {
+      return new NextResponse("email not verified", { status: 403, headers: NO_STORE });
+    }
     uid = apiKey.userId;
   }
 
@@ -70,7 +81,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ key: str
   let shared = false;
   if (!image) {
     const template = await prisma.template.findFirst({ where: { img: key }, select: { id: true } });
-    if (!template) return new NextResponse("not found", { status: 404 });
+    if (!template) return new NextResponse("not found", { status: 404, headers: NO_STORE });
     shared = true;
   }
 
@@ -78,7 +89,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ key: str
   // per request in heap. Pull the first chunk to sniff the content type from
   // magic bytes, then replay it ahead of the rest of the stream.
   const obj = await getStorage().getStream(key);
-  if (!obj) return new NextResponse("not found", { status: 404 });
+  if (!obj) return new NextResponse("not found", { status: 404, headers: NO_STORE });
   const reader = obj.stream.getReader();
   const first = await reader.read();
   const head = first.done ? new Uint8Array(0) : first.value!;

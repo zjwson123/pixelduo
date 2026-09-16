@@ -3,7 +3,9 @@ import Redis from "ioredis";
 import {
   MAX_LOGIN_FAILURES,
   MAX_EMAIL_FAILURES,
+  MAX_EMAIL_HARD_FAILURES,
   isLoginBlocked,
+  loginFailures,
   recordLoginFailure,
   clearLoginFailures,
   _resetLoginGuardForTests,
@@ -53,13 +55,29 @@ describe("login guard", () => {
     expect(await isLoginBlocked(email, ip)).toBe(false);
   });
 
-  it("caps a spray from many sources with the per-email counter", async () => {
+  it("caps a genuinely distributed spray with the per-email brake", async () => {
     if (!redis) return;
     const email = `guard-spray-${Date.now()}@test.dev`;
-    for (let i = 0; i < MAX_EMAIL_FAILURES; i++) {
-      await recordLoginFailure(email, `198.51.100.${i}`);
+    for (let i = 0; i < MAX_EMAIL_HARD_FAILURES; i++) {
+      await recordLoginFailure(email, `198.51.${Math.floor(i / 250)}.${i % 250}`);
     }
     expect(await isLoginBlocked(email, "198.51.100.200")).toBe(true);
     expect(await isLoginBlocked(email)).toBe(true);
+  });
+
+  it("does not let a handful of sources lock the account out", async () => {
+    if (!redis) return;
+    const email = `guard-few-${Date.now()}@test.dev`;
+    // Three sources is enough to exceed the old per-email cap of 25 (10+10+5),
+    // which used to refuse the reservation for EVERYONE — including the owner
+    // typing the correct password, because the reservation happens before the
+    // compare. The soft threshold no longer blocks anything.
+    for (const ip of ["203.0.113.1", "203.0.113.2", "203.0.113.3"]) {
+      for (let i = 0; i < 10; i++) await recordLoginFailure(email, ip);
+    }
+    expect(await loginFailures(email)).toBe(30);
+    expect(await loginFailures(email)).toBeGreaterThanOrEqual(MAX_EMAIL_FAILURES);
+    // The owner, from a clean address, is still allowed in.
+    expect(await isLoginBlocked(email, "198.51.100.77")).toBe(false);
   });
 });

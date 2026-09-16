@@ -9,6 +9,7 @@ vi.mock("next-auth", () => ({
 }));
 
 const { POST: confirmTwoFactor } = await import("../app/api/2fa/confirm/route");
+const { POST: disableTwoFactor } = await import("../app/api/2fa/disable/route");
 const { prisma } = await import("../lib/prisma");
 const { createApiKey, authenticateApiKey } = await import("../lib/apikey");
 const { generateTwoFactorSetup, _resetTwoFaForTests } = await import("../lib/twofa");
@@ -70,6 +71,40 @@ describe("credential revocation on 2FA enablement", () => {
     expect(enabled.totpEnabled).toBe(true);
     expect(enabled.sessionVersion).toBe(user.sessionVersion + 1);
     // The parallel credential is gone.
+    expect(await authenticateApiKey(bearer(key.key))).toBeNull();
+    const rec = await prisma.apiKey.findUniqueOrThrow({ where: { id: key.id } });
+    expect(rec.revokedAt).not.toBeNull();
+  });
+
+  // Turning 2FA OFF is a downgrade, and it was the only security-state
+  // transition in the codebase that revoked nothing: every session minted while
+  // 2FA was on stayed valid (no sessionVersion bump) and every pd_live_ key kept
+  // working (authenticateApiKey never reads sessionVersion at all). The account
+  // lands in exactly the state an attacker wants, with all their credentials
+  // intact.
+  it("revokes sessions and API keys when 2FA is disabled", async () => {
+    const before = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
+    expect(before.totpEnabled).toBe(true);
+
+    const key = await createApiKey(userId, "minted-while-2fa-on");
+    expect((await authenticateApiKey(bearer(key.key)))?.userId).toBe(userId);
+
+    getServerSession.mockResolvedValue({
+      user: { id: userId, sv: before.sessionVersion, totpPending: false },
+    });
+    const res = await disableTwoFactor(
+      new Request("http://localhost/api/2fa/disable", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-forwarded-for": "198.51.100.8" },
+        body: JSON.stringify({ token: authenticator.generate(before.totpSecret!), password }),
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const after = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
+    expect(after.totpEnabled).toBe(false);
+    expect(after.totpSecret).toBeNull();
+    expect(after.sessionVersion).toBe(before.sessionVersion + 1);
     expect(await authenticateApiKey(bearer(key.key))).toBeNull();
     const rec = await prisma.apiKey.findUniqueOrThrow({ where: { id: key.id } });
     expect(rec.revokedAt).not.toBeNull();

@@ -42,7 +42,7 @@ curl -X POST https://pixelduo.ai/api/v1/images/generations \
   so pure i2v models are rejected with `400 invalid-input` — use the workbench
 - Concurrency: jobs are queued asynchronously — submit freely while earlier
   jobs run. Each user may hold up to **5 in-flight jobs** (queued/running/
-  polling); beyond that the API returns `400 queue-full`. Failed/rejected
+  polling); beyond that the API returns `429 queue-full`. Failed/rejected
   submissions never charge (pre-auth is refunded on failure).
 
 Response (async — generation runs in the worker):

@@ -141,3 +141,45 @@ describe("payment webhook refund handling", () => {
     await prisma.user.deleteMany({ where: { id: u.id } });
   });
 });
+
+// Same defect as tests/plan-entitlement.test.ts, but driven through the
+// webhook the way a real chargeback arrives — the entitlement revocation has to
+// be WIRED IN, not merely available as a helper.
+describe("a refunded subscription loses the paid tier", () => {
+  it("downgrades the plan to free when the plan order is refunded", async () => {
+    const { fulfillOrder } = await import("../lib/ledger");
+    const u = await prisma.user.create({
+      data: { email: `webhook-plan-${Date.now()}@test.dev`, passwordHash: "x" },
+    });
+    const o = await prisma.order.create({
+      data: {
+        userId: u.id,
+        kind: "plan",
+        status: "pending",
+        amountUsd: 19,
+        credits: 2000,
+        provider: "mock",
+        planId: "pro",
+        idempotencyKey: `webhook-plan-${Date.now()}`,
+      },
+    });
+    await fulfillOrder(u.id, o.id, "plan", 2000, "pro");
+    const paid = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+    expect(paid.plan).toBe("pro");
+    expect(paid.planRenewsAt).not.toBeNull();
+
+    // A chargeback (Stripe maps charge.dispute.created to a full refund).
+    const res = await webhookPOST(
+      webhookRequest({ eventId: `evt-plan-refund-${Date.now()}`, status: "refunded", orderId: o.id }),
+    );
+    expect(res.status).toBe(200);
+
+    const after = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+    expect(after.plan).toBe("free");
+    expect(after.planRenewsAt).toBeNull();
+    expect(after.credits).toBe(0);
+
+    await prisma.user.deleteMany({ where: { id: u.id } });
+  });
+});
+

@@ -4,8 +4,8 @@ import GoogleProvider from "next-auth/providers/google";
 import GitHubProvider from "next-auth/providers/github";
 import bcrypt from "bcryptjs";
 import { randomBytes } from "crypto";
+import { reserveLoginAttempt, clearLoginFailures, alertLoginAbuse } from "./login-guard";
 import { prisma } from "./prisma";
-import { reserveLoginAttempt, clearLoginFailures } from "./login-guard";
 import { verifyPreAuthToken } from "./twofa";
 import { signupBonus } from "./ledger";
 
@@ -38,6 +38,44 @@ interface AuthUser {
 // returns faster than "wrong password", leaking account existence by timing.
 const DUMMY_HASH = bcrypt.hashSync(randomBytes(16).toString("hex"), 10);
 
+// GitHub's NextAuth provider builds `profile.email` from /user/emails as
+// `emails.find(e => e.primary) ?? emails[0]` and never looks at the `verified`
+// flag, and the profile it maps carries no `email_verified` claim at all — so
+// the "claim absent means the provider vouches for the address" assumption in
+// ensureOAuthUser is simply false for GitHub. A user can add an address they do
+// not own to their own GitHub account and have it surface here, which would
+// auto-link them straight into the real owner's account (and, for an
+// already-verified local account, hand them a full session with no password
+// and no second factor). Confirm the address against GitHub's own list before
+// trusting it; unverifiable ⇒ refuse the sign-in.
+async function githubEmailVerified(accessToken: string | undefined, email: string): Promise<boolean> {
+  if (!accessToken) return false;
+  const target = email.toLowerCase().trim();
+  if (!target) return false;
+  try {
+    const res = await fetch("https://api.github.com/user/emails", {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: "application/vnd.github+json",
+        "User-Agent": "pixelduo",
+      },
+      signal: AbortSignal.timeout(10_000),
+    });
+    // Read the body inside the armed window (undici's bodyTimeout is an idle
+    // timer) and cancel it when we don't need it.
+    if (!res.ok) {
+      await res.body?.cancel().catch(() => undefined);
+      return false;
+    }
+    const list = (await res.json()) as Array<{ email?: unknown; verified?: unknown }>;
+    return list.some(
+      (e) => typeof e.email === "string" && e.email.toLowerCase() === target && e.verified === true,
+    );
+  } catch {
+    return false;
+  }
+}
+
 export const authOptions: NextAuthOptions = {
   session: { strategy: "jwt" },
   pages: { signIn: "/login" },
@@ -60,7 +98,13 @@ export const authOptions: NextAuthOptions = {
         const attempt = await reserveLoginAttempt(email, ip);
         if (!attempt.allowed) return null;
         const ok = await bcrypt.compare(credentials.password, user.passwordHash);
-        if (!ok) return null;
+        if (!ok) {
+          // Fire-and-forget: the owner learns about a distributed grind, and
+          // the caller's response time doesn't depend on SMTP. Never awaited
+          // into the failure path — a mail error must not change the outcome.
+          void alertLoginAbuse(email).catch(() => undefined);
+          return null;
+        }
         // Correct password: refund this attempt from both counters.
         await clearLoginFailures(email, ip);
         if (user.totpEnabled) {
@@ -119,13 +163,19 @@ export const authOptions: NextAuthOptions = {
     async signIn({ user, account, profile }) {
       if (account?.type !== "oauth") return true;
       // Forward the provider's own email_verified claim so an explicitly
-      // unverified address can never auto-verify a local account.
+      // unverified address can never auto-verify a local account. A provider
+      // that publishes no such claim cannot be taken on faith — GitHub doesn't
+      // (see githubEmailVerified) — so it is resolved from the provider's API
+      // and a refusal falls through to `false`.
       const claim = (profile as { email_verified?: unknown } | undefined)?.email_verified;
-      const dbUser = await ensureOAuthUser(
-        user.email ?? "",
-        user.name ?? "",
-        typeof claim === "boolean" ? claim : null,
-      );
+      let emailVerified: boolean | null = typeof claim === "boolean" ? claim : null;
+      if (emailVerified === null && account.provider === "github") {
+        emailVerified = await githubEmailVerified(
+          account.access_token as string | undefined,
+          user.email ?? "",
+        );
+      }
+      const dbUser = await ensureOAuthUser(user.email ?? "", user.name ?? "", emailVerified);
       if (!dbUser) return false;
       if (dbUser.totpEnabled) return false;
       return true;
@@ -170,10 +220,12 @@ export async function ensureOAuthUser(
 ): Promise<{ id: string; totpEnabled: boolean } | null> {
   const e = email.toLowerCase().trim();
   if (!e) return null;
-  // A provider that explicitly reports the address as unverified must not be
-  // allowed to claim (and auto-verify) a pending local registration — that is
-  // an account-takeover path. Claim absent (null) keeps prior behavior: the
-  // configured providers (Google/GitHub) only hand out verified primaries.
+  // A provider that explicitly reports the address as unverified — or that
+  // publishes no claim we could verify ourselves (GitHub: see
+  // githubEmailVerified, which resolves the claim from the provider API and
+  // passes null through only for providers that do publish one) — must not be
+  // allowed to claim (and auto-verify) a pending local registration: that is
+  // an account-takeover path.
   if (providerEmailVerified === false) return null;
   let user = await prisma.user.findUnique({ where: { email: e } });
   if (!user) {

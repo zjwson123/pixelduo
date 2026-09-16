@@ -77,6 +77,11 @@ export async function routePrompt(prompt: string): Promise<RoutingResult> {
             return { recommendedModel: parsed.model, reason: parsed.reason ?? "smart routing", offline: false };
           }
         }
+      } else {
+        // A non-2xx reply's body was never read or cancelled, which keeps its
+        // socket out of the pool until GC. Under provider errors this path is
+        // hit for every request.
+        await res.body?.cancel().catch(() => undefined);
       }
     } finally {
       clearTimeout(timer);

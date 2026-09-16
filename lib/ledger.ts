@@ -97,38 +97,57 @@ export async function grantCreditsTx(
 // spendCreditsTx can take the rows in the order they come back.
 const GRANT_LOCK_ORDER = Prisma.sql`ORDER BY CASE WHEN source IN ('SIGNUP_BONUS', 'CHECKIN') THEN 0 ELSE 1 END,
                "expiresAt" ASC NULLS LAST, "createdAt" ASC`;
+export { GRANT_LOCK_ORDER };
 
 // Credits granted, pre-authed and refunded inside one billing cycle, used to
 // compute unused quota for the 30% carryover at renewal time.
+//
+// `cycleAnchor` is the END of the cycle being measured — the planRenewsAt that
+// cycle ran to. The cycle's own quota is identified as the most recent
+// SUBSCRIPTION grant created at or before that anchor (each renewal mints
+// exactly one), NOT by summing SUBSCRIPTION ledger rows in the
+// `[anchor - 1 month, now]` window. The window silently dropped the quota of
+// any cycle funded by an EARLY renewal: that grant is created before the
+// window opens, so `granted` came out 0, `unused` was 0, and the 30% carryover
+// the customer was promised never materialised (while the leftover quota was
+// still swept at the cycle end). Anchoring on the funding grant also keeps the
+// cash-out protection: it survives planRenewsAt being moved.
 export async function cycleUsageTx(
   tx: Prisma.TransactionClient,
   userId: string,
-  cycleStart: Date,
+  cycleAnchor: Date,
 ): Promise<CycleUsage> {
+  const cycleStart = new Date(cycleAnchor);
+  cycleStart.setMonth(cycleStart.getMonth() - 1);
   const entries = await tx.ledgerEntry.findMany({
     where: { userId, createdAt: { gte: cycleStart } },
     select: { type: true, creditsDelta: true, refId: true },
   });
   // Only clawbacks of THIS cycle's own plan quota may reduce its unused quota.
-  // The previous version summed every REVOKE and EXPIRE in the window, so a
+  // A previous version summed every REVOKE and EXPIRE in the window, so a
   // refunded credit PACK (~6000 credits) silently ate the whole carryover, and
   // an unrelated EXPIRE (the previous cycle's rollover grant, which is never
   // counted in `granted`) did the same — both in the customer's disfavour.
-  // Scoping to the orders that funded this cycle's SUBSCRIPTION grants keeps
-  // the refunded-plan protection while dropping the collateral damage.
-  const cycleGrants = await tx.creditGrant.findMany({
-    where: { userId, source: "SUBSCRIPTION", createdAt: { gte: cycleStart } },
-    select: { refId: true },
+  // Scoping to the order that actually funded this cycle's quota keeps the
+  // refunded-plan protection while dropping the collateral damage.
+  // The cycle's quota came from the most recent renewal, i.e. the newest
+  // SUBSCRIPTION grant on the account at this moment — this runs BEFORE
+  // fulfillOrder mints the incoming cycle's grant, so "newest" is precisely the
+  // grant that funded the cycle being measured. (An `expiresAt = planRenewsAt`
+  // or `createdAt <= planRenewsAt` test would be tighter on paper but breaks
+  // whenever the anchor is moved after the grant was minted — which is how the
+  // expiry tests simulate a lapsed cycle, and how an operator correction looks.)
+  const funding = await tx.creditGrant.findFirst({
+    where: { userId, source: "SUBSCRIPTION" },
+    orderBy: { createdAt: "desc" },
+    select: { amount: true, refId: true },
   });
-  const cycleOrderIds = new Set(
-    cycleGrants.map((g) => g.refId).filter((id): id is string => Boolean(id)),
-  );
-  let granted = 0;
+  const cycleOrderIds = new Set(funding?.refId ? [funding.refId] : []);
+  const granted = funding?.amount ?? 0;
   let preAuth = 0;
   let refund = 0;
   let revoked = 0;
   for (const e of entries) {
-    if (e.type === "SUBSCRIPTION" && e.creditsDelta > 0) granted += e.creditsDelta;
     if (e.type === "PRE_AUTH") preAuth += Math.abs(e.creditsDelta);
     if (e.type === "REFUND") refund += e.creditsDelta;
     // Clawed-back (REVOKE) quota is gone: counting only PRE_AUTH/REFUND
@@ -145,8 +164,10 @@ export async function cycleUsageTx(
   return { granted, spentNet: Math.max(0, preAuth - refund), revoked };
 }
 
-export async function cycleUsage(userId: string, cycleStart: Date): Promise<CycleUsage> {
-  return cycleUsageTx(prisma, userId, cycleStart);
+// `cycleAnchor` is the cycle end (planRenewsAt), not its start — see
+// cycleUsageTx for why the funding grant, not a time window, defines the quota.
+export async function cycleUsage(userId: string, cycleAnchor: Date): Promise<CycleUsage> {
+  return cycleUsageTx(prisma, userId, cycleAnchor);
 }
 
 // Spend credits FIFO: free sources first, then earliest expiry (null last).
@@ -377,9 +398,7 @@ export async function fulfillOrder(
       let rollover = 0;
       let unused = 0;
       if (user.planRenewsAt && user.planRenewsAt <= now) {
-        const cycleStart = new Date(user.planRenewsAt);
-        cycleStart.setMonth(cycleStart.getMonth() - 1);
-        const usage = await cycleUsageTx(client, userId, cycleStart);
+        const usage = await cycleUsageTx(client, userId, user.planRenewsAt);
         unused = Math.max(0, usage.granted - usage.spentNet - usage.revoked);
         rollover = Math.floor(unused * ROLLOVER_RATE);
       }
@@ -449,6 +468,43 @@ export async function revokeOrderCreditsTx(
   if (revoked <= 0) return 0;
   await addCreditsTx(tx, order.userId, "REVOKE", -revoked, "order", order.id, "credits revoked on payment refund");
   return revoked;
+}
+
+// Revoke the PAID TIER itself when a plan order is refunded or charged back.
+// revokeOrderCreditsTx only takes the credits back: User.plan/planRenewsAt are
+// written in exactly two places (the grant here and the expiry sweep in
+// rollover.ts), so a refunded subscription kept its paid entitlement for the
+// rest of the cycle — unwatermarked output, paid-plan UI, zero cost — and
+// because a purchase before the cycle end extends planRenewsAt by another
+// month, each new order pushed the lapse date out again: a chargeback loop
+// bought the paid tier permanently for the price of the dispute fee.
+//
+// Guarded so refunding an OLD, superseded plan order cannot clobber a newer
+// paid one: the downgrade only applies when this order is the one funding the
+// CURRENT cycle, which is the SUBSCRIPTION grant it minted expiring exactly at
+// the plan's own renewal anchor. updateMany re-evaluates that predicate after
+// any lock wait, so a renewal committing concurrently either wins (anchor
+// moved → no downgrade) or loses (anchor still ours → we downgrade and the
+// renewal then starts a fresh cycle).
+export async function revokePlanEntitlementTx(
+  tx: Prisma.TransactionClient,
+  order: { id: string; userId: string; kind: string; planId: string | null },
+): Promise<boolean> {
+  if (order.kind !== "plan" || !order.planId) return false;
+  const funding = await tx.creditGrant.findFirst({
+    where: { userId: order.userId, refType: "order", refId: order.id, source: "SUBSCRIPTION" },
+    select: { expiresAt: true },
+  });
+  if (!funding?.expiresAt) return false;
+  const res = await tx.user.updateMany({
+    where: {
+      id: order.userId,
+      plan: order.planId,
+      planRenewsAt: funding.expiresAt,
+    },
+    data: { plan: "free", planRenewsAt: null },
+  });
+  return res.count === 1;
 }
 
 // Admin compensation: grant non-expiring credits (consumed first like free

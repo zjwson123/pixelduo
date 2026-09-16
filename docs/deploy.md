@@ -66,7 +66,7 @@ export SENTRY_DSN="https://..."
 docker compose -f docker-compose.prod.yml up -d
 
 # 4. 验证
-curl -fsS https://pixelduo.ai/api/health   # {"ok":true,"db":"up","rateLimiter":"redis"}
+curl -fsS https://pixelduo.ai/api/health   # {"ok":true,"db":"up","redis":"up","storage":"up","queue":{"active":false}}
 ```
 
 首次启动会自动申请 Let's Encrypt 证书（需 80 端口可被公网访问）。
@@ -94,8 +94,15 @@ web/worker 启动前会由 CI/部署流程执行 `npx prisma migrate deploy`（�
 
 ### 限流与审核
 
-- `/api/health` 的 `rateLimiter` 应为 `redis`（多实例全局限流），且 `db`/`redis`/`storage` 均为 `up`；`queue.running` 长期为 0 且 `lastHeartbeat` 过期说明 worker 掉线
-- `IMAGE_MODERATION=1` 时每张图过 vision 审核，命中即拦截 + 自动退款；建议先小流量灰度观察误判率
+- `/api/health` 的 `redis` 应为 `up`（多实例全局限流），且 `db`/`redis`/`storage` 均为 `up`
+- **worker 存活检查**：health 出于反侦察只暴露 `queue.active`（是否正在跑任务），它无法区分"空闲"与"卡死"，也不暴露队列深度/心跳时间。要判断 worker 掉线，用容器状态与队列：
+  ```bash
+  docker compose -f docker-compose.prod.yml ps worker          # 应在 Up（含 healthcheck）
+  docker compose -f docker-compose.prod.yml logs --tail=50 worker   # 应有 "job ... done" 或 "idle…"
+  psql "$DATABASE_URL" -c "SELECT status, count(*) FROM \"Job\" WHERE status IN ('queued','running','polling') GROUP BY status"
+  ```
+  `queued` 持续堆积而 worker 日志无输出 = worker 掉线（任务仍持有已预扣的额度，恢复 worker 后会继续跑）
+- `IMAGE_MODERATION=1` 时每张图过 vision 审核：命中即拦截 + 自动退款；**审核跑不起来（网关报错/超时/回复无法解析/未解析到 vision 配置）时同样不交付**——任务终态失败并全额退款，输出对象被删除。这是刻意的 fail-closed：否则任何能让审核失败的人都能拿到未过审的图。需要关闭审核就显式设置 `IMAGE_MODERATION=0`（并清空 `IMAGE_NSFW_ENDPOINT`），不要靠"审核坏了"来降级。超大输出会先缩放到 1024px 再审，不再按体积跳过；建议先小流量灰度观察误判率
 
 ### 回滚
 

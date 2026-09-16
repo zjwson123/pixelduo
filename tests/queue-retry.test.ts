@@ -128,3 +128,70 @@ describe("worker retry / DLQ / recovery", () => {
     expect(await storage.get(refKey)).toBeNull();
   });
 });
+
+// A job that persisted some images and then failed for good is refunded in
+// full, and its checkpointed objects used to stay in the bucket forever,
+// referenced by nothing: /api/files resolves only keys with an Image row, and
+// completeJob — the other writer of Job.images — never runs. A credit-neutral
+// loop (fail terminally, get refunded, repeat) filled storage for free.
+describe("terminal failure reclaims the attempt's stored objects", () => {
+  it("deletes the checkpointed images and the reference upload", async () => {
+    const storage = getStorage();
+    const { job } = await createGenerationJob({
+      userId,
+      model: "gpt",
+      quality: "medium",
+      count: 4,
+      prompt: "orphan check",
+      maxAttempts: 1,
+    });
+
+    const storedKeys = [`img/orphan-a-${Date.now()}.png`, `img/orphan-b-${Date.now()}.png`];
+    const refKey = `img/orphan-ref-${Date.now()}.png`;
+    for (const key of [...storedKeys, refKey]) {
+      await storage.put(key, Buffer.from("not-really-a-png"));
+    }
+    // The shape the worker's persistProgress writes mid-job.
+    await prisma.job.update({
+      where: { id: job.id },
+      data: {
+        refImageKey: refKey,
+        images: JSON.stringify(storedKeys.map((key) => ({ key, model: "gpt" }))),
+      },
+    });
+
+    await failJob(job.id, "terminal", { terminal: true });
+
+    for (const key of [...storedKeys, refKey]) {
+      expect(await storage.get(key)).toBeNull();
+    }
+  });
+
+  it("keeps the checkpoint on a RETRY so the next attempt can resume", async () => {
+    const storage = getStorage();
+    const { job } = await createGenerationJob({
+      userId,
+      model: "seedream",
+      quality: "medium",
+      count: 2,
+      prompt: "resume check",
+      maxAttempts: 3,
+    });
+    const keepKey = `img/keep-${Date.now()}.png`;
+    await storage.put(keepKey, Buffer.from("not-really-a-png"));
+    await prisma.job.update({
+      where: { id: job.id },
+      data: { images: JSON.stringify([{ key: keepKey, model: "seedream" }]) },
+    });
+
+    await failJob(job.id, "transient");
+    const retried = await prisma.job.findUniqueOrThrow({ where: { id: job.id } });
+    expect(retried.status).toBe("queued");
+    // Still on disk: the retry resumes from it instead of re-billing the batch.
+    expect(await storage.get(keepKey)).not.toBeNull();
+
+    await failJob(job.id, "terminal", { terminal: true });
+    expect(await storage.get(keepKey)).toBeNull();
+  });
+});
+

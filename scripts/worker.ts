@@ -132,15 +132,28 @@ async function processImageJob(job: {
       console.warn(`[worker ${workerId}] job ${job.id}: ${msg}`);
       captureError(new Error(msg), { jobId: job.id, model: job.model });
       return true;
-    } else if (audits.some((a) => !a.checked)) {
-      // IMAGE_MODERATION=1 with no resolvable vision config looks exactly like
-      // "audited and clean" from the outside, so an operator who believes
-      // moderation is on ships unaudited output indefinitely. Report it rather
-      // than logging a line nobody reads.
+    } else if (audits.some((a) => a.unavailable)) {
+      // The operator asked for a moderation audit (IMAGE_MODERATION=1 or
+      // IMAGE_NSFW_ENDPOINT) and it could not run — detector error, timeout,
+      // unparseable reply, unresolvable vision config, or an object we could
+      // not read. Delivering here is what made the gate optional in practice:
+      // an attacker who could make the detector fail (flood it, or trip a rate
+      // limit) got unaudited output delivered, and the only trace was a log
+      // line. Refusing costs the caller nothing (failJob refunds in full) and
+      // makes the outage loud and immediate for the operator instead of a
+      // silent content-safety hole. Deployments that do not want an audit must
+      // say so explicitly — unset IMAGE_MODERATION / IMAGE_NSFW_ENDPOINT.
       const msg =
-        "safety audit SKIPPED — moderation is not usable (IMAGE_MODERATION / IMAGE_NSFW_ENDPOINT set but no detector configured, or the detector failed). Output was delivered unaudited.";
-      console.warn(`[worker ${workerId}] job ${job.id}: ${msg}`);
+        "safety-audit-unavailable: moderation could not run, so the output was not delivered (check IMAGE_MODERATION / IMAGE_NSFW_ENDPOINT and the vision gateway)";
+      await failJob(job.id, msg, { terminal: true });
+      await Promise.all(rows.map((r) => getStorage().delete(r.url).catch(() => undefined)));
+      console.error(`[worker ${workerId}] job ${job.id}: ${msg}`);
       captureError(new Error(msg), { jobId: job.id, model: job.model });
+      return true;
+    } else if (audits.every((a) => !a.checked)) {
+      // Nothing configured ⇒ the audit is off by design, not skipped by an
+      // outage.
+      console.log(`[worker ${workerId}] job ${job.id}: safety audit off (moderation not configured)`);
     } else {
       console.log(`[worker ${workerId}] job ${job.id}: safety audit passed (${audits.map((a) => a.provider).join(",")})`);
     }

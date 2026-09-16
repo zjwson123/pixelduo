@@ -163,3 +163,44 @@ export async function sendRefundEmail(to: string, itemName: string, amountUsd: n
     refundHtml(itemName, amountUsd),
   );
 }
+
+// Two-factor state changes were silent, which makes a hostile enrollment
+// indistinguishable from a legitimate one: a password-only attacker (breached
+// or reused — no mailbox access needed) can sign in, bind 2FA to their own
+// authenticator, and the victim is locked out permanently, because the
+// self-service reset-password path revokes credentials but does NOT clear
+// totpEnabled. The operator script that clears it manually
+// (scripts/reset-2fa.ts) emails the owner on exactly this reasoning; the
+// self-service routes must too. Deliberately NOT sendSafely: a mail outage
+// must not fail the 2FA change the user just made, only report it.
+export async function sendTwoFactorStateEmail(to: string, enabled: boolean): Promise<void> {
+  const body = enabled
+    ? [
+        "Two-factor authentication is now active on your account. You will need your authenticator app (or a backup code) each time you sign in.",
+        "",
+        "All other sessions and all API keys were signed out by this change.",
+      ]
+    : [
+        "Two-factor authentication has been turned off on your account. Sign-in now requires only your password.",
+        "",
+        "All other sessions and all API keys were signed out by this change.",
+      ];
+  try {
+    await getMailer().send(
+      to,
+      enabled
+        ? "Two-factor authentication was enabled on your PixelDuo account"
+        : "Two-factor authentication was turned OFF on your PixelDuo account",
+      body
+        .concat([
+          "",
+          "If this wasn't you, reset your password immediately — someone may have your password.",
+          "",
+          `https://pixelduo.ai/login`,
+        ])
+        .join("\n"),
+    );
+  } catch (e) {
+    captureError(e, { mailTo: to, mailSubject: "2fa-state-change" });
+  }
+}

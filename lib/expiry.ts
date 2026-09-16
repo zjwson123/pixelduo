@@ -1,6 +1,6 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "./prisma";
-import { addCreditsTx } from "./ledger";
+import { addCreditsTx, GRANT_LOCK_ORDER } from "./ledger";
 
 const BATCH_SIZE = 200;
 
@@ -26,10 +26,18 @@ export async function runExpiry(): Promise<number> {
           // Lock the user's expiring rows FOR UPDATE so two overlapping sweeps
           // (manual run racing the daily cron) serialize: the loser re-reads
           // zeroed grants and skips, instead of double-deducting a stale sum
-          // from user credits.
+          // from user credits. Locked in GRANT_LOCK_ORDER like every other
+          // grant-locking statement: without an ORDER BY the planner is free to
+          // return rows in physical order, which HOT updates reshuffle, so a
+          // sweep racing an adminClawbackTx over the same expired rows could
+          // take them in the opposite sequence and deadlock (one side aborts;
+          // the clawback surfaces as a 500, and the sweep stops its batch
+          // early). It was the only statement in the codebase outside the
+          // documented order.
           const grants = await tx.$queryRaw<Array<{ id: string; remaining: number }>>(
             Prisma.sql`SELECT id, remaining FROM "CreditGrant"
               WHERE "userId" = ${userId} AND remaining > 0 AND "expiresAt" <= now()
+              ${GRANT_LOCK_ORDER}
               FOR UPDATE`,
           );
           const sum = grants.reduce((acc, g) => acc + g.remaining, 0);

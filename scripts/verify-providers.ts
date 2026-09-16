@@ -13,16 +13,44 @@ import {
   pollVideoTask,
   saveRemoteVideo,
 } from "../lib/providers";
+import { analyzeImage } from "../lib/safety";
 import { getStorage } from "../lib/storage";
+import { getVisionConfig } from "../lib/keys";
+
+// Post-generation moderation is fail-closed in the worker: when an operator has
+// asked for an audit (IMAGE_MODERATION=1 — the default in docker-compose.prod —
+// or IMAGE_NSFW_ENDPOINT) and it cannot complete, the job is failed and refunded
+// instead of delivered unaudited. A false "unavailable" therefore takes
+// generation down, the same way a broken SSRF pin once silently took the video
+// pipeline down: a security fix whose own code path nothing exercises ships as a
+// feature outage. Auditing the image generated above makes that failure mode
+// visible here, for free, instead of in production.
+async function verifyModeration(imageKey: string): Promise<void> {
+  const requested = process.env.IMAGE_MODERATION === "1" || Boolean(process.env.IMAGE_NSFW_ENDPOINT);
+  if (!requested) {
+    console.log("[3/4] moderation not configured (IMAGE_MODERATION / IMAGE_NSFW_ENDPOINT unset) — off by design");
+    return;
+  }
+  const cfg = getVisionConfig();
+  console.log(`[3/4] moderation audit (vision: ${cfg ? `${cfg.model} @ ${cfg.baseUrl}` : "CONFIG MISSING"})…`);
+  const audit = await analyzeImage(imageKey);
+  console.log(`  => ${JSON.stringify(audit)}`);
+  if (!audit.checked) {
+    throw new Error(
+      "moderation was requested but the audit could not complete — the worker will refuse to deliver every generation. Fix the vision config/gateway before serving traffic.",
+    );
+  }
+  console.log(`  ✓ audited (${audit.provider}), flagged=${audit.flagged}`);
+}
 
 async function main() {
   const noVideo = process.argv.includes("--no-video");
 
-  console.log("[1/3] gpt-image-2 generation (medium)…");
+  console.log("[1/4] gpt-image-2 generation (medium)…");
   const imgs = await generateWithGpt("a small red ceramic teacup on white linen, studio light", "medium", 1);
   console.log(`  ✓ stored ${imgs.length} image(s): ${imgs[0].key}`);
 
-  console.log("[2/3] gpt-image-2 edit (low, multipart)…");
+  console.log("[2/4] gpt-image-2 edit (low, multipart)…");
   const base = await sharp({
     create: { width: 1024, height: 1024, channels: 3, background: { r: 180, g: 60, b: 60 } },
   })
@@ -31,13 +59,15 @@ async function main() {
   const edited = await editWithGpt("make the background deep blue", base.toString("base64"), "low");
   console.log(`  ✓ stored ${edited.length} image(s): ${edited[0].key}`);
 
+  await verifyModeration(imgs[0].key);
+
   if (noVideo) {
-    console.log("[3/3] skipped (--no-video)");
+    console.log("[4/4] video skipped (--no-video)");
     console.log("ALL VERIFIED");
     return;
   }
 
-  console.log("[3/3] seedance video (5s, real billing)…");
+  console.log("[4/4] seedance video (5s, real billing)…");
   const task = await createVideoTask({ model: "seedance", prompt: "a paper boat drifting on calm water, soft light", durationSec: 5 });
   console.log(`  task created: ${task.taskId}`);
   const deadline = Date.now() + 10 * 60_000;

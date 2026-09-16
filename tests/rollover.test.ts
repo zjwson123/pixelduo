@@ -55,9 +55,9 @@ describe("subscription carryover and downgrade", () => {
     }
     await spend("high", "h");
 
-    const cycleStart = new Date();
-    cycleStart.setMonth(cycleStart.getMonth() - 1);
-    const usage = await cycleUsage(userId, cycleStart);
+    // cycleUsage takes the cycle's ANCHOR (its end). The tests rewind
+    // planRenewsAt into the past, so "now" is the anchor of the ended cycle.
+    const usage = await cycleUsage(userId, new Date());
     expect(usage).toEqual({ granted: 2000, spentNet: 482, revoked: 0 });
 
     const second = await makeOrder("plan", 2000, "pro");

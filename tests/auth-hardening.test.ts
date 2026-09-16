@@ -10,6 +10,7 @@ const { assertProductionConfig } = await import("../instrumentation");
 const {
   MAX_LOGIN_FAILURES,
   MAX_EMAIL_FAILURES,
+  MAX_EMAIL_HARD_FAILURES,
   reserveLoginAttempt,
   clearLoginFailures,
   loginFailures,
@@ -131,11 +132,14 @@ describe("login guard counters", () => {
     expect(await isLoginBlocked(email, owner)).toBe(false);
   });
 
-  it("caps a distributed spray with the per-email counter", async () => {
+  it("caps a distributed spray with the per-email brake", async () => {
     if (!redisUp) return;
     const email = `spray-${Date.now()}@test.dev`;
-    for (let ip = 0; ip < MAX_EMAIL_FAILURES; ip++) {
-      const r = await reserveLoginAttempt(email, `10.0.0.${ip}`);
+    // The brake sits at MAX_EMAIL_HARD_FAILURES so that the handful of sources
+    // an attacker actually needs (3 sufficed against the old cap of 25) cannot
+    // take a known account offline — see lib/login-guard.ts.
+    for (let ip = 0; ip < MAX_EMAIL_HARD_FAILURES; ip++) {
+      const r = await reserveLoginAttempt(email, `10.${Math.floor(ip / 65000)}.${Math.floor(ip / 250) % 250}.${ip % 250}`);
       expect(r.allowed).toBe(true);
     }
     // Fresh source, same account: refused by the email-wide cap.
@@ -147,7 +151,9 @@ describe("login guard counters", () => {
   it("does not extend the window while an account is blocked", async () => {
     if (!redisUp) return;
     const email = `window-${Date.now()}@test.dev`;
-    for (let ip = 0; ip < MAX_EMAIL_FAILURES; ip++) await reserveLoginAttempt(email, `172.16.0.${ip}`);
+    for (let ip = 0; ip < MAX_EMAIL_HARD_FAILURES; ip++) {
+      await reserveLoginAttempt(email, `172.16.${Math.floor(ip / 250)}.${ip % 250}`);
+    }
     const first = await reserveLoginAttempt(email, "172.20.1.1");
     await new Promise((r) => setTimeout(r, 1100));
     const second = await reserveLoginAttempt(email, "172.20.1.1");

@@ -60,4 +60,27 @@ describe("analyzeImage gating", () => {
     delete process.env.IMAGE_NSFW_ENDPOINT;
     expect(await analyzeImage("img/whatever.png")).toEqual({ checked: false });
   });
+
+  // The vision path used to `return { checked: false }` for anything past an
+  // 8 MB budget, i.e. a DETERMINISTIC moderation bypass: the encoded size is
+  // chosen by the provider, so a fine-detail prompt at size "1920x1920"
+  // (~11 MB as PNG) shipped unmoderated while the job reported success. The
+  // worker also treated every failed audit as "clean". Both now report
+  // `unavailable`, which the worker turns into a refunded failure.
+  it("reports `unavailable` (not clean) when moderation is on but the audit cannot run", async () => {
+    process.env.IMAGE_MODERATION = "1";
+    delete process.env.IMAGE_NSFW_ENDPOINT;
+    // No vision config resolves in the test env, so the audit cannot complete.
+    const audit = await analyzeImage("img/does-not-exist.png");
+    expect(audit.checked).toBe(false);
+    expect(audit.unavailable).toBe(true);
+  });
+
+  it("reports `unavailable` when the external endpoint is not a public target", async () => {
+    delete process.env.IMAGE_MODERATION;
+    process.env.IMAGE_NSFW_ENDPOINT = "http://127.0.0.1:9/moderate";
+    const audit = await analyzeImage("img/x.png");
+    expect(audit.checked).toBe(false);
+    expect(audit.unavailable).toBe(true);
+  });
 });
