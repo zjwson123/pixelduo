@@ -33,6 +33,10 @@ export interface CycleUsage {
   granted: number;
   spentNet: number;
   revoked: number;
+  // The order that funded the measured cycle, so the 30% carryover it produces
+  // can be stamped with — and therefore revoked with — that order rather than
+  // with the incoming one. See fulfillOrder.
+  fundingRefId: string | null;
 }
 
 // Free credits are consumed first so paid credits can never be diluted by
@@ -115,21 +119,14 @@ export { GRANT_LOCK_ORDER };
 export async function cycleUsageTx(
   tx: Prisma.TransactionClient,
   userId: string,
+  // The cycle's end (planRenewsAt). It no longer bounds anything: the funding
+  // grant identifies which quota was in play and its createdAt bounds the spend
+  // scan. It stays in the signature because the call still reads as "measure
+  // the cycle that ended here" — and because anchoring on a timestamp was the
+  // bug (see above), so there is nothing here for a future edit to reach for.
   cycleAnchor: Date,
 ): Promise<CycleUsage> {
-  const cycleStart = new Date(cycleAnchor);
-  cycleStart.setMonth(cycleStart.getMonth() - 1);
-  const entries = await tx.ledgerEntry.findMany({
-    where: { userId, createdAt: { gte: cycleStart } },
-    select: { type: true, creditsDelta: true, refId: true },
-  });
-  // Only clawbacks of THIS cycle's own plan quota may reduce its unused quota.
-  // A previous version summed every REVOKE and EXPIRE in the window, so a
-  // refunded credit PACK (~6000 credits) silently ate the whole carryover, and
-  // an unrelated EXPIRE (the previous cycle's rollover grant, which is never
-  // counted in `granted`) did the same — both in the customer's disfavour.
-  // Scoping to the order that actually funded this cycle's quota keeps the
-  // refunded-plan protection while dropping the collateral damage.
+  void cycleAnchor;
   // The cycle's quota came from the most recent renewal, i.e. the newest
   // SUBSCRIPTION grant on the account at this moment — this runs BEFORE
   // fulfillOrder mints the incoming cycle's grant, so "newest" is precisely the
@@ -140,28 +137,86 @@ export async function cycleUsageTx(
   const funding = await tx.creditGrant.findFirst({
     where: { userId, source: "SUBSCRIPTION" },
     orderBy: { createdAt: "desc" },
-    select: { amount: true, refId: true },
+    select: { id: true, amount: true, refId: true, createdAt: true },
   });
   const cycleOrderIds = new Set(funding?.refId ? [funding.refId] : []);
   const granted = funding?.amount ?? 0;
+
+  // Spend is attributed to the GRANT THAT FUNDED IT, not to a window of the
+  // ledger clock. The window was a time slice, so it was wrong in both
+  // directions at once: pack spend made in the lapse gap (after the cycle
+  // ended, before the renewal) counted as this cycle's quota spend and wiped a
+  // carryover the customer had earned, while any spend made more than a month
+  // before the anchor — the normal case for a cycle funded by an EARLY renewal,
+  // which lasts longer than a month — was invisible and inflated it.
+  // Job.consumption records exactly which grants each pre-auth drew from, so
+  // the cycle's spend is the set of jobs that drew from the funding grant, net
+  // of whatever was refunded to them (a refund may legitimately land after the
+  // anchor: a video job can fail up to its 30-minute hard timeout later).
+  // A job that drew from several grants counts in full — the only way to
+  // straddle the quota's exhaustion point is the single job that exhausts it,
+  // and erring there is in the house's favour by at most one job.
   let preAuth = 0;
   let refund = 0;
-  let revoked = 0;
-  for (const e of entries) {
-    if (e.type === "PRE_AUTH") preAuth += Math.abs(e.creditsDelta);
-    if (e.type === "REFUND") refund += e.creditsDelta;
-    // Clawed-back (REVOKE) quota is gone: counting only PRE_AUTH/REFUND
-    // treated a fully refunded cycle as "granted and unused", so the next
-    // purchase collected 30% carryover on credits the user had already been
-    // refunded for — repeatable every cycle. EXPIRE is deliberately NOT
-    // counted: that is bookkeeping for credits whose validity already ended
-    // at the cycle boundary, and including it made the carryover depend on
-    // whether the expiry sweep happened to run before the renewal.
-    if (e.type === "REVOKE" && e.refId && cycleOrderIds.has(e.refId)) {
-      revoked += Math.abs(e.creditsDelta);
+  if (funding) {
+    // Only a lower time bound: a job cannot draw on a grant that did not exist
+    // yet, and it keeps the scan small. There is deliberately NO upper bound on
+    // the anchor — a job created after the anchor can only have drawn on this
+    // grant if the anchor was moved backwards after the fact (the expiry tests
+    // do exactly that to simulate a lapsed cycle, and an operator correction
+    // looks the same), and in that case the spend is still this cycle's spend.
+    const jobs = await tx.job.findMany({
+      where: { userId, createdAt: { gte: funding.createdAt } },
+      select: { id: true, consumption: true },
+    });
+    const jobIds = jobs.filter((j) => consumesGrant(j.consumption, funding.id)).map((j) => j.id);
+    if (jobIds.length) {
+      const spent = await tx.ledgerEntry.findMany({
+        where: { userId, refId: { in: jobIds }, type: { in: ["PRE_AUTH", "REFUND"] } },
+        select: { type: true, creditsDelta: true },
+      });
+      for (const e of spent) {
+        // Clawed-back (REVOKE) quota is gone: counting only PRE_AUTH/REFUND
+        // treated a fully refunded cycle as "granted and unused", so the next
+        // purchase collected 30% carryover on credits the user had already been
+        // refunded for — repeatable every cycle. EXPIRE is deliberately NOT
+        // counted: that is bookkeeping for credits whose validity already ended
+        // at the cycle boundary, and including it made the carryover depend on
+        // whether the expiry sweep happened to run before the renewal.
+        if (e.type === "PRE_AUTH") preAuth += Math.abs(e.creditsDelta);
+        else refund += e.creditsDelta;
+      }
     }
   }
-  return { granted, spentNet: Math.max(0, preAuth - refund), revoked };
+  // Only clawbacks of THIS cycle's own plan quota may reduce its unused quota.
+  // A previous version summed every REVOKE and EXPIRE in the window, so a
+  // refunded credit PACK (~6000 credits) silently ate the whole carryover, and
+  // an unrelated EXPIRE (the previous cycle's rollover grant, which is never
+  // counted in `granted`) did the same — both in the customer's disfavour.
+  // Scoping to the order that actually funded this cycle's quota keeps the
+  // refunded-plan protection while dropping the collateral damage.
+  let revoked = 0;
+  if (cycleOrderIds.size) {
+    const revokedRows = await tx.ledgerEntry.findMany({
+      where: { userId, type: "REVOKE", refId: { in: [...cycleOrderIds] } },
+      select: { creditsDelta: true },
+    });
+    for (const e of revokedRows) revoked += Math.abs(e.creditsDelta);
+  }
+  return {
+    granted,
+    spentNet: Math.max(0, preAuth - refund),
+    revoked,
+    fundingRefId: funding?.refId ?? null,
+  };
+}
+
+// Did a job's pre-auth draw from this specific grant?
+function consumesGrant(consumption: unknown, grantId: string): boolean {
+  if (!Array.isArray(consumption)) return false;
+  return consumption.some(
+    (c) => typeof c === "object" && c !== null && (c as SpendConsumption).grantId === grantId,
+  );
 }
 
 // `cycleAnchor` is the cycle end (planRenewsAt), not its start — see
@@ -397,10 +452,20 @@ export async function fulfillOrder(
       // keep their remaining quota and wait until the next cycle boundary.
       let rollover = 0;
       let unused = 0;
+      let rolloverRef: string = orderId;
       if (user.planRenewsAt && user.planRenewsAt <= now) {
         const usage = await cycleUsageTx(client, userId, user.planRenewsAt);
         unused = Math.max(0, usage.granted - usage.spentNet - usage.revoked);
         rollover = Math.floor(unused * ROLLOVER_RATE);
+        // Stamp the carryover with the order that funded the MEASURED cycle,
+        // not with the incoming one. The carryover is a benefit derived from
+        // that cycle's unspent quota, and refunding that order must take it
+        // back with the rest (revokeOrderCreditsTx matches on refId): stamped
+        // with the new order it was invisible to the refund of the old one, so
+        // a customer could renew, claim month 1 back and keep 30% of month 1's
+        // quota — every cycle. Falls back to the incoming order when the old
+        // cycle has no funding order to name (legacy/manual grants).
+        if (usage.fundingRefId) rolloverRef = usage.fundingRefId;
       }
       await client.user.update({ where: { id: userId }, data: { plan: planId, planRenewsAt: renew } });
       await grantCreditsTx(client, userId, "SUBSCRIPTION", credits, renew, "order", orderId, `plan ${planId}`);
@@ -412,8 +477,8 @@ export async function fulfillOrder(
           rollover,
           renew,
           "order",
-          orderId,
-          `30% of ${unused} unused quota`,
+          rolloverRef,
+          `30% of ${unused} unused quota${rolloverRef === orderId ? "" : " (previous cycle)"}`,
         );
       }
     } else {
@@ -496,13 +561,54 @@ export async function revokePlanEntitlementTx(
     select: { expiresAt: true },
   });
   if (!funding?.expiresAt) return false;
+  // Downgrade to the newest cycle that is STILL PAID FOR and still running,
+  // not blindly to free. Buying month 2 before month 1 ends extends
+  // planRenewsAt to the end of month 2, so month 2's order is the funding order
+  // of the current cycle and refunding it matched the guard below — dropping a
+  // customer who had paid for month 1 to `free` on day 5 of that month, losing
+  // the tier (unwatermarked output, paid UI) for time they paid for. The
+  // refunded order's own grant is excluded automatically: the webhook flips it
+  // to "refunded" before calling this.
+  const candidates = await tx.creditGrant.findMany({
+    where: {
+      userId: order.userId,
+      source: "SUBSCRIPTION",
+      refType: "order",
+      refId: { not: null },
+      expiresAt: { gt: new Date() },
+    },
+    orderBy: { expiresAt: "desc" },
+    select: { refId: true, expiresAt: true },
+  });
+  const paid = candidates.length
+    ? await tx.order.findMany({
+        where: {
+          id: { in: candidates.map((c) => c.refId as string) },
+          userId: order.userId,
+          status: "paid",
+          kind: "plan",
+        },
+        select: { id: true, planId: true },
+      })
+    : [];
+  const paidById = new Map(paid.map((o) => [o.id, o]));
+  let fallback: { plan: string; expiresAt: Date } | null = null;
+  for (const c of candidates) {
+    const o = c.refId ? paidById.get(c.refId) : undefined;
+    if (o?.planId && c.expiresAt) {
+      fallback = { plan: o.planId, expiresAt: c.expiresAt };
+      break;
+    }
+  }
   const res = await tx.user.updateMany({
     where: {
       id: order.userId,
       plan: order.planId,
       planRenewsAt: funding.expiresAt,
     },
-    data: { plan: "free", planRenewsAt: null },
+    data: fallback
+      ? { plan: fallback.plan, planRenewsAt: fallback.expiresAt }
+      : { plan: "free", planRenewsAt: null },
   });
   return res.count === 1;
 }

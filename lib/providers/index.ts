@@ -253,6 +253,22 @@ export async function generateWithWanImage(
   return out;
 }
 
+// How many images ONE lane must produce for a job that still needs `total`
+// images. "both" fans a single count out to two lanes (gpt + seedream), so it
+// wants PAIRS: a job that owes 2N images costs N per lane. Every other model
+// has exactly one lane and takes the number verbatim.
+//
+// The worker used to hand its resume counter straight to generateImages, which
+// read it as the per-lane count: a count=1 "both" job (charged 14 credits =
+// 1 gpt + 1 seedream) generated 2 gpt + 2 seedream and stored 4 images, so
+// every "both" job was billed to the operator at roughly twice the price the
+// caller paid. Nothing caught it because MOCK_IMAGE_PROVIDER short-circuits
+// the "both" branch entirely — the mock returns `count` images for the model
+// name it was handed, so the doubling never happens in tests.
+export function laneCountFor(model: string, total: number): number {
+  return model === "both" ? Math.max(1, Math.ceil(total / 2)) : total;
+}
+
 // === Unified image generation dispatcher ===
 
 export async function generateImages(input: {

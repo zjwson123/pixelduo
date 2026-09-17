@@ -1,6 +1,5 @@
 import { z } from "zod";
-import { NextResponse } from "next/server";
-import { fail, ok, readBodyCapped } from "@/lib/api";
+import { errorResponse, fail, ok, readBodyCapped } from "@/lib/api";
 import { rateLimit } from "@/lib/rate-limit";
 import { authenticateApiKey } from "@/lib/apikey";
 import { checkPrompt } from "@/lib/safety";
@@ -23,9 +22,9 @@ export const dynamic = "force-dynamic";
 export async function POST(req: Request) {
   try {
     const auth = await authenticateApiKey(req);
-    if (!auth) return new NextResponse(JSON.stringify({ ok: false, error: "unauthorized" }), { status: 401 });
+    if (!auth) return errorResponse({ ok: false, error: "unauthorized" }, { status: 401 });
     if (!auth.emailVerified) {
-      return new NextResponse(JSON.stringify({ ok: false, error: "verify-email-required" }), { status: 403 });
+      return errorResponse({ ok: false, error: "verify-email-required" }, { status: 403 });
     }
     // Client-supplied retry key: without it, a caller that times out on the
     // 202 and retries pre-auths credits and pays the provider a second time.
@@ -34,7 +33,7 @@ export async function POST(req: Request) {
     const idemSuffix = suppliedKey || randomUUID();
     const r = await rateLimit(`apikey:${auth.keyId}`, 20, 60_000);
     if (!r.ok) {
-      return NextResponse.json(
+      return errorResponse(
         { ok: false, error: "rate-limited" },
         {
           status: 429,
@@ -51,7 +50,7 @@ export async function POST(req: Request) {
     const body = schema.parse(JSON.parse(bodyRaw.raw));
     const safety = checkPrompt(body.prompt);
     if (!safety.ok) {
-      return new NextResponse(JSON.stringify({ ok: false, error: `blocked:${safety.reason}` }), { status: 400 });
+      return errorResponse({ ok: false, error: `blocked:${safety.reason}` }, { status: 400 });
     }
 
     const model = body.model;
@@ -61,8 +60,8 @@ export async function POST(req: Request) {
       // The public API has no image field: pure image-to-video models (i2v)
       // would pre-auth credits and die at the provider with no first frame.
       if (getModel(model)?.requiresImageInput) {
-        return new NextResponse(
-          JSON.stringify({ ok: false, error: `invalid-input: ${model} requires a first-frame image — use the web app` }),
+        return errorResponse(
+          { ok: false, error: `invalid-input: ${model} requires a first-frame image — use the web app` },
           { status: 400 },
         );
       }
@@ -70,8 +69,8 @@ export async function POST(req: Request) {
       // before pre-authing credits
       const range = getModel(model)?.durationSecRange;
       if (range && (body.duration < range.min || body.duration > range.max)) {
-        return new NextResponse(
-          JSON.stringify({ ok: false, error: `invalid-input: ${model} supports ${range.min}-${range.max}s videos` }),
+        return errorResponse(
+          { ok: false, error: `invalid-input: ${model} supports ${range.min}-${range.max}s videos` },
           { status: 400 },
         );
       }

@@ -142,11 +142,43 @@ describe("30% carryover is computed from the cycle's funding grant", () => {
     });
     const third = await makePlanOrder(userId, "pro", 2000);
     await fulfillOrder(userId, third.id, "plan", 2000, "pro");
+    // Provenance: the carryover was measured from the cycle funded by the
+    // SECOND order, so that is the order it is stamped with (and the one a
+    // refund would have to take it back from).
     const rollover = await prisma.creditGrant.findMany({
-      where: { userId, source: "ROLLOVER", refId: third.id },
+      where: { userId, source: "ROLLOVER", refId: second.id },
     });
     expect(rollover).toHaveLength(1);
     expect(rollover[0].amount).toBe(600);
+    expect(
+      await prisma.creditGrant.count({ where: { userId, source: "ROLLOVER", refId: third.id } }),
+    ).toBe(0);
+  });
+
+  // Refunding an early renewal must not strip a tier the customer is still
+  // paying for. Buying month 2 early extends planRenewsAt to the end of month 2,
+  // which made month 2's order the funding order of the CURRENT cycle — so
+  // refunding it matched the downgrade guard and pushed a customer who had paid
+  // for month 1 (still running) straight to free.
+  it("keeps the tier when an early renewal is refunded mid-cycle", async () => {
+    const userId = await makeUser("ent-early-refund");
+    const first = await makePlanOrder(userId, "pro", 2000);
+    await fulfillOrder(userId, first.id, "plan", 2000, "pro");
+    const firstEnd = (await prisma.user.findUniqueOrThrow({ where: { id: userId } })).planRenewsAt!;
+
+    const second = await makePlanOrder(userId, "pro", 2000);
+    await fulfillOrder(userId, second.id, "plan", 2000, "pro");
+    const extended = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
+    expect(extended.planRenewsAt!.getTime()).toBeGreaterThan(firstEnd.getTime());
+
+    await refundOrder(second.id, userId);
+
+    const after = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
+    // Month 1 is paid and still running: the tier and its anchor must survive.
+    expect(after.plan).toBe("pro");
+    expect(after.planRenewsAt!.getTime()).toBe(firstEnd.getTime());
+    // The refunded month is gone, so only month 1's quota remains.
+    expect(after.credits).toBe(2000);
   });
 
   it("still refuses to carry over quota that was clawed back", async () => {

@@ -10,8 +10,18 @@ services:
       # container ID, which makes in-container probes (healthcheck) fail.
       # Pin it to 0.0.0.0 so the server listens on all interfaces.
       HOSTNAME: 0.0.0.0
-      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?set NEXTAUTH_SECRET (generate with: openssl rand -base64 32)}
+      # Quoted: the ": " inside the message made this line invalid YAML, so the
+      # documented local stack could not start at all (`docker compose up` and
+      # `docker compose config` both died at parse time).
+      NEXTAUTH_SECRET: "${NEXTAUTH_SECRET:?set NEXTAUTH_SECRET (generate with: openssl rand -base64 32)}"
       NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
+      # This file is the LOCAL stack (prod is docker-compose.prod.yml): it
+      # defaults to an http NEXTAUTH_URL and a mock payment provider, both of
+      # which the production boot assertions refuse. These two flags are the
+      # documented escape hatches those assertions name — without them the
+      # containers exited(1) at boot and the local full-stack path was dead.
+      PAYMENT_ALLOW_MOCK: ${PAYMENT_ALLOW_MOCK:-1}
+      MAIL_DEV_MODE: ${MAIL_DEV_MODE:-1}
       SMTP_URL: ${SMTP_URL:-}
       EMAIL_FROM: ${EMAIL_FROM:-}
       EMAIL_VERIFY_AUTO: ${EMAIL_VERIFY_AUTO:-0}

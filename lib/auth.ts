@@ -212,6 +212,20 @@ export const authOptions: NextAuthOptions = {
   },
 };
 
+// Does this account actually have a password the owner chose?
+//
+// OAuth-created accounts are stored with `randomBytes(32).toString("hex")` as a
+// placeholder (the column is not nullable) — 64 hex characters, never a valid
+// bcrypt hash, so no password can ever match it. Everything else is a real
+// bcrypt hash. The verification route uses this to decide whether the
+// registrant must prove knowledge of the password before an account becomes
+// verified: a placeholder proves nothing (there is no attacker-chosen
+// credential to bind), while a real hash is the credential that has to be bound
+// to the mailbox link.
+export function hasUsablePassword(passwordHash: string | null | undefined): boolean {
+  return typeof passwordHash === "string" && passwordHash.startsWith("$2");
+}
+
 // Find-or-create a local account from a verified OAuth identity.
 export async function ensureOAuthUser(
   email: string,

@@ -269,7 +269,12 @@ export async function fetchPublicBuffer(rawUrl: string, opts: FetchPublicOptions
         if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("invalid-url-scheme");
         continue;
       }
-      if (!res.ok) throw new Error(`download failed: ${res.status}`);
+      if (!res.ok) {
+        // Same release as the 3xx branch above: a 4xx/5xx that carries a body
+        // pins its socket outside the pool until GC, one per download attempt.
+        await res.body?.cancel().catch(() => undefined);
+        throw new Error(`download failed: ${res.status}`);
+      }
       return await readBodyCapped(res, opts.maxBytes);
     }
     throw new Error("too-many-redirects");

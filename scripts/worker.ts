@@ -1,7 +1,8 @@
 import { claimNextJob, completeJob, failJob, heartbeat, recoverStuckJobs, setJobPolling, schedulePoll } from "../lib/queue";
-import { generateImages, createVideoTask, pollVideoTask, saveRemoteVideo, type ProviderImage } from "../lib/providers";
+import { generateImages, laneCountFor, createVideoTask, pollVideoTask, saveRemoteVideo, type ProviderImage } from "../lib/providers";
 import { modelCost, videoCost } from "../lib/cost";
-import { analyzeAllImagesSequentially } from "../lib/safety";
+import { analyzeAllImagesSequentially, moderationRequested } from "../lib/safety";
+import { getVisionConfig } from "../lib/keys";
 import { getStorage } from "../lib/storage";
 import { initObservability, captureError } from "../lib/observability";
 import { bakeWatermark } from "../lib/watermark";
@@ -86,7 +87,11 @@ async function processImageJob(job: {
         ? await generateImages({
             model: job.model,
             quality: job.quality as "low" | "medium" | "high",
-            count: remaining,
+            // laneCountFor: "both" owes 2N images from TWO lanes, so it takes
+            // N per lane — passing `remaining` (always the full 2N here, the
+            // lanes are the one non-checkpointing path) made every "both" job
+            // produce and store 4N images for the 2N the caller was charged.
+            count: laneCountFor(job.model, remaining),
             prompt: job.prompt,
             imageBase64,
             imageBase64List,
@@ -299,6 +304,21 @@ async function tick(workerId: string): Promise<boolean> {
 
 async function main() {
   const workerId = `worker-${process.pid}`;
+  // Fail closed at BOOT, not per job: when an audit is requested but cannot be
+  // configured at all (IMAGE_MODERATION set and no vision config resolvable),
+  // every image job would be generated, billed to the provider, then thrown
+  // away and refunded by the audit gate. Refusing to start makes that a
+  // deploy-time error the operator sees in `docker compose ps` instead of a
+  // silent content-safety hole (the pre-pass-11 behaviour) or a queue that
+  // quietly eats provider spend. A detector that is *configured* but down is
+  // deliberately still a per-job failure — that one is transient.
+  if (moderationRequested() && !process.env.IMAGE_NSFW_ENDPOINT && !getVisionConfig()) {
+    console.error(
+      "[fatal] IMAGE_MODERATION asks for an image audit but no vision config resolves " +
+        "(set VISION_MODERATION_API_KEY + VISION_MODERATION_BASE_URL, or unset IMAGE_MODERATION / set it to 0)",
+    );
+    process.exit(1);
+  }
   console.log(`[worker] PixelDuo media worker started: ${workerId}`);
   let idle = 0;
   let sweep = 0;

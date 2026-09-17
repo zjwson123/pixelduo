@@ -16,14 +16,20 @@ interface CcProxyConfig {
 let cached: CcProxyConfig | null | undefined;
 
 export function loadCcProxyConfig(): CcProxyConfig | null {
-  if (cached !== undefined) return cached;
-  try {
+  if (cached !== undefined) return cached;  try {
     const p = path.join(os.homedir(), ".cc-proxy", "config.json");
     cached = JSON.parse(fs.readFileSync(p, "utf8")) as CcProxyConfig;
   } catch {
     cached = null;
   }
   return cached;
+}
+
+// Test hook: the config is read once per process, so a test that needs to
+// simulate "no config resolves" (the fail-closed moderation path) must be able
+// to drop the cached copy after pointing HOME somewhere empty.
+export function _resetKeysCacheForTests(): void {
+  cached = undefined;
 }
 
 function firstKey(gatewayName: string): string | undefined {

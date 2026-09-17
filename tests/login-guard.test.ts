@@ -6,6 +6,7 @@ import {
   MAX_EMAIL_HARD_FAILURES,
   isLoginBlocked,
   loginFailures,
+  reserveLoginAttempt,
   recordLoginFailure,
   clearLoginFailures,
   _resetLoginGuardForTests,
@@ -79,5 +80,31 @@ describe("login guard", () => {
     expect(await loginFailures(email)).toBeGreaterThanOrEqual(MAX_EMAIL_FAILURES);
     // The owner, from a clean address, is still allowed in.
     expect(await isLoginBlocked(email, "198.51.100.77")).toBe(false);
+  });
+
+  // With no resolvable source address (no x-forwarded-for and TRUST_X_REAL_IP
+  // off — a request straight to the app port, or a proxy that does not append
+  // it) the pair key used to ALIAS the email key, so each reservation
+  // incremented one counter twice. The pair brake (10) therefore fired after
+  // five requests and refused every further reservation for that address,
+  // owner included, for the rest of the window — one source locking out any
+  // known email in five attempts, at half the budget the per-email brake was
+  // deliberately raised to 100 to prevent.
+  it("does not double-count when no source address is known", async () => {
+    if (!redis) return;
+    const email = `guard-noip-${Date.now()}@test.dev`;
+    for (let i = 0; i < MAX_LOGIN_FAILURES; i++) {
+      expect(await reserveLoginAttempt(email)).toEqual({ allowed: true });
+    }
+    // One attempt, one count.
+    expect(await loginFailures(email)).toBe(MAX_LOGIN_FAILURES);
+    expect((await reserveLoginAttempt(email)).allowed).toBe(true);
+    // A known address is still stopped after MAX_LOGIN_FAILURES (unchanged).
+    for (let i = 0; i < MAX_LOGIN_FAILURES; i++) {
+      await reserveLoginAttempt(email, "203.0.113.99");
+    }
+    expect((await reserveLoginAttempt(email, "203.0.113.99")).allowed).toBe(false);
+    await clearLoginFailures(email, "203.0.113.99");
+    expect(await loginFailures(email)).toBe(0);
   });
 });

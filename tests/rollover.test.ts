@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { prisma } from "../lib/prisma";
-import { fulfillOrder, cycleUsage, ROLLOVER_RATE } from "../lib/ledger";
+import { fulfillOrder, cycleUsage, revokeOrderCreditsTx, ROLLOVER_RATE } from "../lib/ledger";
 import { createGenerationJob } from "../lib/queue";
 import { downgradeExpiredPlans } from "../lib/rollover";
 
@@ -58,7 +58,7 @@ describe("subscription carryover and downgrade", () => {
     // cycleUsage takes the cycle's ANCHOR (its end). The tests rewind
     // planRenewsAt into the past, so "now" is the anchor of the ended cycle.
     const usage = await cycleUsage(userId, new Date());
-    expect(usage).toEqual({ granted: 2000, spentNet: 482, revoked: 0 });
+    expect(usage).toEqual({ granted: 2000, spentNet: 482, revoked: 0, fundingRefId: first.id });
 
     const second = await makeOrder("plan", 2000, "pro");
     const before = (await prisma.user.findUniqueOrThrow({ where: { id: userId } })).credits;
@@ -67,11 +67,17 @@ describe("subscription carryover and downgrade", () => {
     const expectedRollover = Math.floor((2000 - 482) * ROLLOVER_RATE); // 455
     expect(after).toBe(before + 2000 + expectedRollover);
 
+    // Stamped with the order that funded the cycle the carryover was MEASURED
+    // from (the first), not with the incoming one: that provenance is what lets
+    // a refund of the first order take the carryover back with it.
     const grants = await prisma.creditGrant.findMany({
-      where: { userId, source: "ROLLOVER", refId: second.id },
+      where: { userId, source: "ROLLOVER", refId: first.id },
     });
     expect(grants).toHaveLength(1);
     expect(grants[0].amount).toBe(expectedRollover);
+    expect(
+      await prisma.creditGrant.count({ where: { userId, source: "ROLLOVER", refId: second.id } }),
+    ).toBe(0);
     const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
     expect(user.planRenewsAt!.getTime()).toBeGreaterThan(Date.now());
   });
@@ -93,6 +99,118 @@ describe("subscription carryover and downgrade", () => {
       where: { userId, source: "ROLLOVER", refId: order.id },
     });
     expect(rolloverGrants).toHaveLength(0);
+  });
+
+  // A carryover derived from a cycle the customer has since been refunded for
+  // is free money, and it used to be untouchable: the ROLLOVER grant carried
+  // the INCOMING order's id, while revokeOrderCreditsTx matches on the order
+  // that funded the credits. Refunding month 1 right after renewing into month
+  // 2 therefore left the customer holding month 2's quota PLUS 30% of the month
+  // they had just been refunded for — repeatable every cycle.
+  it("revokes the carryover when the order that funded it is refunded", async () => {
+    const first = await makeOrder("plan", 2000, "pro");
+    await fulfillOrder(userId, first.id, "plan", 2000, "pro");
+    await prisma.user.update({
+      where: { id: userId },
+      data: { planRenewsAt: new Date(Date.now() - 1000 * 60 * 60 * 24) },
+    });
+
+    const second = await makeOrder("plan", 2000, "pro");
+    await fulfillOrder(userId, second.id, "plan", 2000, "pro");
+    const rollover = await prisma.creditGrant.findFirstOrThrow({
+      where: { userId, source: "ROLLOVER", refId: first.id },
+    });
+    expect(rollover.amount).toBe(Math.floor(2000 * ROLLOVER_RATE));
+    expect(rollover.remaining).toBe(rollover.amount);
+
+    // Month 1 comes back: its quota AND the carryover it produced must go.
+    const creditsBefore = (await prisma.user.findUniqueOrThrow({ where: { id: userId } })).credits;
+    const revoked = await prisma.$transaction(async (tx) => {
+      await tx.order.update({ where: { id: first.id }, data: { status: "refunded" } });
+      const order = await tx.order.findUniqueOrThrow({ where: { id: first.id } });
+      return revokeOrderCreditsTx(tx, order);
+    });
+    expect(revoked).toBe(2000 + rollover.amount);
+
+    const after = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
+    expect(after.credits).toBe(creditsBefore - revoked);
+    const left = await prisma.creditGrant.aggregate({ where: { userId }, _sum: { remaining: true } });
+    expect(left._sum.remaining ?? 0).toBe(after.credits);
+  });
+
+  // Spend attribution: a cycle's spend is the spend that came out of ITS grant,
+  // not whatever the ledger clock happened to show in the last month. A
+  // customer whose cycle lapsed, who bought a pack and worked off that before
+  // renewing, used to lose the carryover they had earned — the pack spend fell
+  // inside the [anchor − 1 month, now] window and was subtracted from quota
+  // that had never been touched.
+  it("ignores spend made after the cycle ended when computing the carryover", async () => {
+    const gapUser = await prisma.user.create({
+      data: { email: `roll-gap-${Date.now()}@test.dev`, passwordHash: "x", name: "Gap" },
+    });
+    const plan = await prisma.order.create({
+      data: {
+        userId: gapUser.id,
+        kind: "plan",
+        provider: "mock",
+        amountUsd: 19,
+        credits: 100,
+        planId: "pro",
+        idempotencyKey: `roll-gap-plan-${Date.now()}`,
+      },
+    });
+    await fulfillOrder(gapUser.id, plan.id, "plan", 100, "pro");
+    // The cycle has ended, and its quota grant expires with it — that is what
+    // makes the quota unspendable, so everything below comes out of the pack.
+    // (The daily sweep would zero the grant; it has not run here.)
+    await prisma.user.update({
+      where: { id: gapUser.id },
+      data: { planRenewsAt: new Date(Date.now() - 1000 * 60 * 60 * 24) },
+    });
+    await prisma.creditGrant.updateMany({
+      where: { userId: gapUser.id, source: "SUBSCRIPTION" },
+      data: { expiresAt: new Date(Date.now() - 1000 * 60 * 60 * 24) },
+    });
+
+    const pack = await prisma.order.create({
+      data: {
+        userId: gapUser.id,
+        kind: "pack",
+        provider: "mock",
+        amountUsd: 9,
+        credits: 1000,
+        idempotencyKey: `roll-gap-pack-${Date.now()}`,
+      },
+    });
+    await fulfillOrder(gapUser.id, pack.id, "pack", 1000);
+    for (let i = 0; i < 8; i++) {
+      const { job } = await createGenerationJob({
+        userId: gapUser.id,
+        model: "gpt",
+        quality: "medium",
+        count: 4,
+        prompt: `gap ${i}`,
+      });
+      await prisma.job.update({ where: { id: job.id }, data: { status: "done" } });
+    }
+
+    // The ended cycle never touched its own quota, so 30% of it carries over.
+    const renewal = await prisma.order.create({
+      data: {
+        userId: gapUser.id,
+        kind: "plan",
+        provider: "mock",
+        amountUsd: 19,
+        credits: 2000,
+        planId: "pro",
+        idempotencyKey: `roll-gap-renew-${Date.now()}`,
+      },
+    });
+    await fulfillOrder(gapUser.id, renewal.id, "plan", 2000, "pro");
+    const carried = await prisma.creditGrant.findFirstOrThrow({
+      where: { userId: gapUser.id, source: "ROLLOVER", refId: plan.id },
+    });
+    expect(carried.amount).toBe(30);
   });
 
   it("downgrades expired plans to free and leaves active plans untouched", async () => {

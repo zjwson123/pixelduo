@@ -84,7 +84,9 @@ export async function sendVerificationEmail(to: string, rawToken: string): Promi
       "",
       `Verify your email to activate your 30 free credits: ${link}`,
       "",
-      "The link expires in 24 hours. If you didn't create this account, ignore this email.",
+      "You'll be asked for the password you chose at sign-up — that is what proves the account is yours.",
+      "",
+      "The link expires in 24 hours. If you didn't create this account, ignore this email and reset the password instead.",
     ].join("\n"),
     verificationHtml(link),
   );

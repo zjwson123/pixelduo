@@ -1,5 +1,4 @@
-import { NextResponse } from "next/server";
-import { ok, fail } from "@/lib/api";
+import { errorResponse, ok, fail } from "@/lib/api";
 import { rateLimit } from "@/lib/rate-limit";
 import { authenticateApiKey } from "@/lib/apikey";
 import { prisma } from "@/lib/prisma";
@@ -12,20 +11,20 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   const { id } = await params;
   try {
     const auth = await authenticateApiKey(req);
-    if (!auth) return new NextResponse(JSON.stringify({ ok: false, error: "unauthorized" }), { status: 401 });
+    if (!auth) return errorResponse({ ok: false, error: "unauthorized" }, { status: 401 });
     // The POST is capped per key; the poll was not. Under the S3 driver each
     // poll re-signs one presigned URL per image (HMAC work, and the URL is
     // never cacheable because it changes), so an uncapped poll loop is a CPU
     // pump. 120/min leaves a normal 2-5s polling client far below the ceiling.
     const r = await rateLimit(`apikey-status:${auth.keyId}`, 120, 60_000);
     if (!r.ok) {
-      return NextResponse.json(
+      return errorResponse(
         { ok: false, error: "rate-limited" },
         { status: 429, headers: { "Retry-After": String(r.retryAfterSec) } },
       );
     }
     const job = await prisma.job.findFirst({ where: { id: id, userId: auth.userId } });
-    if (!job) return new NextResponse(JSON.stringify({ ok: false, error: "job-not-found" }), { status: 404 });
+    if (!job) return errorResponse({ ok: false, error: "job-not-found" }, { status: 404 });
     let images: string[];
     try {
       images = (JSON.parse(job.images) as unknown[]).filter((k): k is string => typeof k === "string");

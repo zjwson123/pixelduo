@@ -103,6 +103,9 @@ web/worker 启动前会由 CI/部署流程执行 `npx prisma migrate deploy`（�
   ```
   `queued` 持续堆积而 worker 日志无输出 = worker 掉线（任务仍持有已预扣的额度，恢复 worker 后会继续跑）
 - `IMAGE_MODERATION=1` 时每张图过 vision 审核：命中即拦截 + 自动退款；**审核跑不起来（网关报错/超时/回复无法解析/未解析到 vision 配置）时同样不交付**——任务终态失败并全额退款，输出对象被删除。这是刻意的 fail-closed：否则任何能让审核失败的人都能拿到未过审的图。需要关闭审核就显式设置 `IMAGE_MODERATION=0`（并清空 `IMAGE_NSFW_ENDPOINT`），不要靠"审核坏了"来降级。超大输出会先缩放到 1024px 再审，不再按体积跳过；建议先小流量灰度观察误判率
+- **审核开关的取值**：除 `0` 以外任何非空值都视为"要审核"（`true`/`yes` 这类拼写不再等于关闭）。**审核开了却没有解析到 vision 配置时 worker 会直接拒绝启动**（日志 `[fatal] IMAGE_MODERATION asks for an image audit...`，容器反复重启）——这是刻意的：否则每张图都会先生成、被计费、再被丢弃退款，既漏审又烧钱。`docker-compose.prod.yml` 的 `VISION_MODERATION_API_KEY` 默认是空的，上线前必须填（或显式设 `IMAGE_MODERATION=0`）
+- **视频不审核**：目前没有任何视频检测器可调，`IMAGE_MODERATION` 只覆盖图片；视频的合规标记只有 UI 角标
+- `IMAGE_NSFW_ENDPOINT`（可选，优先级高于 vision 路径）：worker 以 `{"url": "<对象预签名 URL>"}` POST，检测方必须回 `{"flagged": <boolean>}`；其它 2xx 响应体一律视为"审核没跑成"（fail-closed），所以打分格式/错误信封不会被当成"通过"。检测方必须能访问对象存储：`STORAGE_DRIVER=local` 下对象只在站内 `/api/files` 可读，该路径会直接拒绝并让任务失败（而不是假装审过）
 
 ### 回滚
 

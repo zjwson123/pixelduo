@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { checkPrompt, parseModerationJson, analyzeImage } from "../lib/safety";
+import {
+  checkPrompt,
+  parseModerationJson,
+  parseExternalVerdict,
+  moderationRequested,
+  analyzeImage,
+} from "../lib/safety";
+import { getStorage, newStorageKey } from "../lib/storage";
+import { _resetKeysCacheForTests } from "../lib/keys";
 
 const origModeration = process.env.IMAGE_MODERATION;
 const origEndpoint = process.env.IMAGE_NSFW_ENDPOINT;
@@ -82,5 +90,69 @@ describe("analyzeImage gating", () => {
     const audit = await analyzeImage("img/x.png");
     expect(audit.checked).toBe(false);
     expect(audit.unavailable).toBe(true);
+  });
+});
+
+describe("an audit that was ASKED for can never report itself as not requested", () => {
+  it("treats every IMAGE_MODERATION spelling except 0 as a request", () => {
+    delete process.env.IMAGE_MODERATION;
+    delete process.env.IMAGE_NSFW_ENDPOINT;
+    expect(moderationRequested()).toBe(false);
+    process.env.IMAGE_MODERATION = "0";
+    expect(moderationRequested()).toBe(false);
+    process.env.IMAGE_MODERATION = "1";
+    expect(moderationRequested()).toBe(true);
+    // `IMAGE_MODERATION: true` in a compose file used to mean "no audit at all"
+    // (the check was `=== "1"`), i.e. a fail-open typo.
+    process.env.IMAGE_MODERATION = "true";
+    expect(moderationRequested()).toBe(true);
+    delete process.env.IMAGE_MODERATION;
+    process.env.IMAGE_NSFW_ENDPOINT = "https://example.com/moderate";
+    expect(moderationRequested()).toBe(true);
+  });
+
+  // IMAGE_MODERATION=1 with nothing resolvable behind it — which is exactly what
+  // docker-compose.prod.yml ships (the vision vars default to empty) — used to
+  // take the worker's "audit off by design" branch and DELIVER the image. The
+  // operator's explicit request has to fail closed instead.
+  it("is `unavailable` (not clean) when IMAGE_MODERATION is on and no vision config resolves", async () => {
+    const key = newStorageKey("png");
+    await getStorage().put(key, Buffer.from("not-really-a-png"), "image/png");
+    const origHome = process.env.HOME;
+    const origKey = process.env.VISION_MODERATION_API_KEY;
+    const origBase = process.env.VISION_MODERATION_BASE_URL;
+    process.env.IMAGE_MODERATION = "1";
+    delete process.env.IMAGE_NSFW_ENDPOINT;
+    delete process.env.VISION_MODERATION_API_KEY;
+    delete process.env.VISION_MODERATION_BASE_URL;
+    process.env.HOME = "/nonexistent-home-for-tests";
+    _resetKeysCacheForTests();
+    try {
+      const audit = await analyzeImage(key);
+      expect(audit.checked).toBe(false);
+      expect(audit.unavailable).toBe(true);
+    } finally {
+      if (origHome) process.env.HOME = origHome;
+      else delete process.env.HOME;
+      if (origKey) process.env.VISION_MODERATION_API_KEY = origKey;
+      if (origBase) process.env.VISION_MODERATION_BASE_URL = origBase;
+      _resetKeysCacheForTests();
+      await getStorage().delete(key).catch(() => undefined);
+    }
+  });
+});
+
+describe("external detector verdict parsing", () => {
+  it("accepts only an explicit boolean verdict", () => {
+    expect(parseExternalVerdict({ flagged: true })).toBe(true);
+    expect(parseExternalVerdict({ flagged: false })).toBe(false);
+    // A 200 with a score-shaped body, an error envelope or no verdict at all is
+    // NOT a pass — `Boolean(data.flagged)` recorded all three as `checked: true,
+    // flagged: false` and delivered the image as audited.
+    expect(parseExternalVerdict({ score: 0.98 })).toBeNull();
+    expect(parseExternalVerdict({ nsfw: true })).toBeNull();
+    expect(parseExternalVerdict({ flagged: "yes" })).toBeNull();
+    expect(parseExternalVerdict({})).toBeNull();
+    expect(parseExternalVerdict(null)).toBeNull();
   });
 });

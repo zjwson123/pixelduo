@@ -299,8 +299,10 @@ describe("carryover ignores clawed-back quota", () => {
     const after = (await prisma.user.findUniqueOrThrow({ where: { id: userId } })).credits;
     // 800 subscription + 600 carryover (30% of the untouched 2000 quota).
     expect(after).toBe(before + 800 + Math.floor(2000 * ROLLOVER_RATE));
+    // Stamped with the order that funded the measured cycle (the plan order),
+    // not the incoming one — see fulfillOrder.
     const rollover = await prisma.creditGrant.findMany({
-      where: { userId, source: "ROLLOVER", refId: renewal.id },
+      where: { userId, source: "ROLLOVER", refId: planOrder.id },
     });
     expect(rollover).toHaveLength(1);
     expect(rollover[0].amount).toBe(Math.floor(2000 * ROLLOVER_RATE));

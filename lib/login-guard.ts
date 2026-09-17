@@ -110,20 +110,35 @@ function pairKey(email: string, ip: string): string {
 // account locked forever), and the current TTL is returned so the caller can
 // tell the client when to come back. The per-email counter is only consulted
 // against the distributed brake — see the header comment.
+//
+// ARGV[4] says whether a source IP is known at all. Without this flag the
+// caller passed the EMAIL key as KEYS[2] when no IP could be resolved
+// (no x-forwarded-for, TRUST_X_REAL_IP off — a direct-to-app port, or a proxy
+// that does not append it), so a single INCR landed on the same counter twice:
+// ten attempts, five requests, and then the PAIR brake refused every further
+// reservation for that address for the rest of the window — including the
+// owner typing the correct password, because the reservation precedes the
+// compare. One source could lock any known address out, which is exactly what
+// the per-email brake was moved to 100 to stop. Without an IP there is nothing
+// to attribute the attempt to, so only the per-email brake applies (the
+// process-local fallback has always worked this way).
 const RESERVE_SCRIPT = `
+local hasIp = ARGV[4] == '1'
 local e = tonumber(redis.call('GET', KEYS[1]) or '0')
-local i = tonumber(redis.call('GET', KEYS[2]) or '0')
+local i = hasIp and tonumber(redis.call('GET', KEYS[2]) or '0') or 0
 local maxE = tonumber(ARGV[2])
 local maxI = tonumber(ARGV[3])
-if e >= maxE or i >= maxI then
+if e >= maxE or (hasIp and i >= maxI) then
   local ttl = redis.call('TTL', KEYS[1])
   if ttl < 0 then ttl = tonumber(ARGV[1]) end
   return {0, ttl}
 end
 e = redis.call('INCR', KEYS[1])
 if e == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end
-i = redis.call('INCR', KEYS[2])
-if i == 1 then redis.call('EXPIRE', KEYS[2], ARGV[1]) end
+if hasIp then
+  i = redis.call('INCR', KEYS[2])
+  if i == 1 then redis.call('EXPIRE', KEYS[2], ARGV[1]) end
+end
 return {1, -1}
 `;
 
@@ -137,7 +152,10 @@ export interface LoginAttempt {
 export async function reserveLoginAttempt(email: string, ip?: string): Promise<LoginAttempt> {
   const windowSec = Math.ceil(LOGIN_WINDOW_MS / 1000);
   const ek = emailKey(email);
-  const pk = ip ? pairKey(email, ip) : ek;
+  const hasIp = Boolean(ip);
+  // KEYS[2] is never read or written when hasIp is false (see the script), so
+  // aliasing it to KEYS[1] cannot double-count.
+  const pk = hasIp ? pairKey(email, ip as string) : ek;
   return withFallback(
     async () => {
       const r = (await client!.eval(
@@ -148,6 +166,7 @@ export async function reserveLoginAttempt(email: string, ip?: string): Promise<L
         windowSec,
         MAX_EMAIL_HARD_FAILURES,
         MAX_LOGIN_FAILURES,
+        hasIp ? "1" : "0",
       )) as [number, number];
       if (r[0] === 1) return { allowed: true };
       return { allowed: false, retryAfterSec: Math.max(1, r[1]) };

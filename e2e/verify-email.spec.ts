@@ -40,9 +40,13 @@ test("register → blocked until verified → verify → 30 credits unlocked", a
   await expect(page.locator(".toast")).toContainText("Verify your email first");
   await expect(page.locator(".balance")).toContainText("0");
 
-  // 3. Click the verification link from the dev mail file → verified
+  // 3. Click the verification link from the dev mail file. The page asks for the
+  // password chosen at sign-up: the link proves control of the mailbox, the
+  // password proves the registrant (see app/api/auth/verify-email/route.ts).
   const link = latestMailLink(email, "/verify-email?token=");
   await page.goto(link);
+  await page.fill("#verify-pw", password);
+  await page.click('button[type="submit"]');
   await expect(page.locator("h1", { hasText: "Email verified" })).toBeVisible();
 
   // 4. Back in the workbench: banner gone, 30 credits unlocked, generation works

@@ -126,8 +126,11 @@ function expectedStatus(msg: string): number | null {
 // Error responses carry no-store for the same reason ok() does: a 404/400 for
 // a URL-addressable resource is heuristically cacheable, so a shared cache in
 // front of /api/* could pin one user's error for every other visitor to that
-// path. Kept in one place so every error path inherits it.
-function errorResponse(body: Record<string, unknown>, init: ResponseInit) {
+// path. Kept in one place so every error path inherits it. Exported for the
+// routes that need their own status/headers (the /api/v1 family's 429s carry
+// Retry-After and RateLimit-*): a hand-rolled NextResponse missed both this
+// header and the JSON content type.
+export function errorResponse(body: Record<string, unknown>, init: ResponseInit) {
   const headers = new Headers(init.headers);
   if (!headers.has("Cache-Control")) headers.set("Cache-Control", "private, no-store");
   return NextResponse.json(body, { ...init, headers });

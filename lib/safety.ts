@@ -71,7 +71,17 @@ Be precise: ordinary photos of people, art, products, or mild action are fine.`;
 
 async function moderateWithVision(dataUrl: string): Promise<ImageAudit> {
   const cfg = getVisionConfig();
-  if (!cfg) return { checked: false };
+  // Reached only because IMAGE_MODERATION asked for an audit, so a config that
+  // does not resolve is a BROKEN audit, not an audit that was never requested.
+  // Returning `{checked:false}` here made the operator's explicit
+  // IMAGE_MODERATION=1 a silent no-op in exactly the deployment that ships it:
+  // both prod composes declare VISION_MODERATION_API_KEY/BASE_URL with empty
+  // defaults, so no vision config resolves, every job fell into the worker's
+  // "audit off by design" branch, and output was delivered unaudited while the
+  // docs promised otherwise. The worker turns `unavailable` into a terminal,
+  // refunded failure. Deployments that want no audit must unset
+  // IMAGE_MODERATION (or set it to 0) — see moderationRequested().
+  if (!cfg) return { checked: false, unavailable: true };
   try {
     // Timeout after 30s so moderation cannot stall the worker pipeline.
     const controller = new AbortController();
@@ -156,11 +166,48 @@ async function isSafeEndpointUrl(rawUrl: string): Promise<boolean> {
   }
 }
 
+// Is an image audit configured? Any non-empty IMAGE_MODERATION except the
+// literal "0" asks for one — `IMAGE_MODERATION=true` (or a typo like "yes")
+// used to mean "off", i.e. a fail-OPEN spelling in a compose file: the
+// operator believed an audit was running while the worker took the "off by
+// design" branch. Explicitly turning the audit off is `0` or unset.
+// Used by the worker's boot check so a requested-but-unconfigurable audit is a
+// deploy-time error instead of a per-job one.
+export function moderationRequested(env: NodeJS.ProcessEnv = process.env): boolean {
+  if (env.IMAGE_NSFW_ENDPOINT) return true;
+  const v = env.IMAGE_MODERATION;
+  return Boolean(v) && v !== "0";
+}
+
+// A 200 from the external detector is only a verdict if it carries one. The
+// old `Boolean(data.flagged)` read an error envelope, a score-shaped reply
+// ({"score":0.9}) or a bare 200 as "not flagged" and delivered the image as
+// audited — the same fail-open the vision path was fixed for. Mirrors
+// parseModerationJson, which has always required a boolean.
+export function parseExternalVerdict(data: unknown): boolean | null {
+  const flagged = (data as { flagged?: unknown } | null | undefined)?.flagged;
+  return typeof flagged === "boolean" ? flagged : null;
+}
+
 export async function analyzeImage(url: string): Promise<ImageAudit> {
   const endpoint = process.env.IMAGE_NSFW_ENDPOINT;
   if (endpoint) {
     // SSRF guard: only allow public http(s) endpoints for the external detector.
     if (!(await isSafeEndpointUrl(endpoint))) return { checked: false, unavailable: true };
+    // The detector has to fetch the object itself, so it needs an address it
+    // can reach. `url` is a bare storage key ("img/<uuid>.png") — neither
+    // fetchable nor even a URL — so the detector was structurally unable to
+    // inspect the bytes it was certifying. publicUrl() yields a presigned S3
+    // URL; the local driver can only produce a relative /api/files path, which
+    // no external service can fetch, so that combination fails closed instead
+    // of reporting a phantom "checked".
+    let target: string;
+    try {
+      target = await getStorage().publicUrl(url);
+    } catch {
+      return { checked: false, unavailable: true };
+    }
+    if (!/^https?:\/\//i.test(target)) return { checked: false, unavailable: true };
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), outboundTimeoutMs(30_000));
@@ -168,7 +215,7 @@ export async function analyzeImage(url: string): Promise<ImageAudit> {
         const res = (await pinnedFetch(endpoint, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ url }),
+          body: JSON.stringify({ url: target }),
           signal: controller.signal,
           redirect: "manual", // a detector endpoint has no business redirecting
           // Same DNS-pinned agent as fetchPublicBuffer: hostIsPublic above
@@ -182,8 +229,10 @@ export async function analyzeImage(url: string): Promise<ImageAudit> {
           await res.body?.cancel().catch(() => undefined);
           return { checked: false, unavailable: true };
         }
-        const data = (await readJsonCapped(res, 8 * 1024 * 1024)) as unknown as { flagged?: boolean };
-        return { checked: true, flagged: Boolean(data.flagged), provider: "external" };
+        const data = await readJsonCapped(res, 8 * 1024 * 1024);
+        const verdict = parseExternalVerdict(data);
+        if (verdict === null) return { checked: false, unavailable: true };
+        return { checked: true, flagged: verdict, provider: "external" };
       } finally {
         clearTimeout(timer);
       }
@@ -191,7 +240,10 @@ export async function analyzeImage(url: string): Promise<ImageAudit> {
       return { checked: false, unavailable: true };
     }
   }
-  if (process.env.IMAGE_MODERATION === "1") {
+  // Any non-empty value except "0" (see moderationRequested): the exact
+  // `=== "1"` test meant a compose file with `IMAGE_MODERATION: true` silently
+  // ran no audit at all.
+  if (moderationRequested()) {
     try {
       const buf = await getStorage().get(url);
       if (!buf) return { checked: false, unavailable: true };

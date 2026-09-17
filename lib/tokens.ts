@@ -40,6 +40,18 @@ export interface ConsumeResult {
   email?: string;
 }
 
+// Look a token up WITHOUT consuming it. The verification route has to check
+// the registrant's password before it spends the single use, so it needs the
+// owning email first; consumeToken still owns the atomic single-use CAS, and
+// the route therefore re-checks it after the password compare.
+export async function previewToken(purpose: TokenPurpose, rawToken: string): Promise<ConsumeResult> {
+  const token = await prisma.verificationToken.findFirst({
+    where: { purpose, tokenHash: sha256(rawToken), consumedAt: null },
+  });
+  if (!token || token.expiresAt <= new Date()) return { ok: false };
+  return { ok: true, email: token.email };
+}
+
 // Consume a raw token by its hash. Returns the owning email on success.
 // Tokens are single-use and expire (24h verify / 1h reset).
 export async function consumeToken(purpose: TokenPurpose, rawToken: string): Promise<ConsumeResult> {

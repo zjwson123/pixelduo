@@ -74,7 +74,9 @@ describe("registration → email verification", () => {
     expect(user0.credits).toBe(0);
 
     const raw = await createToken(email, "verify-email");
-    const ver = await verifyEmailPOST(jsonRequest("http://localhost/api/auth/verify-email", { token: raw }));
+    const ver = await verifyEmailPOST(
+      jsonRequest("http://localhost/api/auth/verify-email", { token: raw, password: "password123" }),
+    );
     const verBody = await ver.json();
     expect(verBody.verified).toBe(true);
     expect(verBody.credits).toBe(30);
@@ -84,8 +86,48 @@ describe("registration → email verification", () => {
     expect(user1.credits).toBe(30);
 
     // Same token cannot be reused.
-    const again = await verifyEmailPOST(jsonRequest("http://localhost/api/auth/verify-email", { token: raw }));
+    const again = await verifyEmailPOST(
+      jsonRequest("http://localhost/api/auth/verify-email", { token: raw, password: "password123" }),
+    );
     expect((await again.json()).ok).toBe(false);
+  });
+
+  // Pre-hijacking: POST /api/register takes any address and stores any
+  // password, so an attacker can pre-register a victim's address with a
+  // password they know. The mailed link alone used to be enough to activate
+  // that account, after which the OAuth guard no longer applied (the account
+  // was verified, so the victim's own Google sign-in landed in the attacker's
+  // account with the attacker's password still working). Verification now
+  // needs both halves: the link (mailbox) AND the password (registrant).
+  it("refuses to verify without the registrant's password", async () => {
+    const victim = `prehijack-${Date.now()}@authflow.test`;
+    const reg = await registerPOST(
+      jsonRequest("http://localhost/api/register", { email: victim, password: "attacker-pass", name: "?" }),
+    );
+    const regBody = await reg.json();
+    expect(regBody.pendingVerification).toBe(true);
+
+    // The victim clicks the link that arrived in their inbox…
+    const raw = await createToken(victim, "verify-email");
+    const noPw = await verifyEmailPOST(jsonRequest("http://localhost/api/auth/verify-email", { token: raw }));
+    expect((await noPw.json()).error).toBe("invalid-password");
+    const wrong = await verifyEmailPOST(
+      jsonRequest("http://localhost/api/auth/verify-email", { token: raw, password: "not-the-password" }),
+    );
+    expect((await wrong.json()).error).toBe("invalid-password");
+    // …and neither attempt activates the account or spends the link.
+    const still = await prisma.user.findUniqueOrThrow({ where: { email: victim } });
+    expect(still.emailVerified).toBeNull();
+    expect(still.credits).toBe(0);
+
+    // The registrant (who has the password but not the link) cannot activate it
+    // either without the token, and the mailbox owner can always take the
+    // account over properly through a password reset.
+    const ok = await verifyEmailPOST(
+      jsonRequest("http://localhost/api/auth/verify-email", { token: raw, password: "attacker-pass" }),
+    );
+    expect((await ok.json()).verified).toBe(true);
+    await prisma.user.deleteMany({ where: { email: victim } });
   });
 });
 
