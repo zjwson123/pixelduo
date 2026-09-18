@@ -1,9 +1,24 @@
 import { getServerSession } from "next-auth";
 import { NextResponse } from "next/server";
+import { z } from "zod";
 import { authOptions } from "./auth";
 import { prisma } from "./prisma";
 import { rateLimit, clientIp } from "./rate-limit";
 import { captureError } from "./observability";
+
+// Clients surface the error string verbatim, so a bare "invalid-input" told
+// the user nothing about which field failed (a 2-char prompt, an oversized
+// upload, …). Summarize the first issue instead; the "invalid-input:" prefix
+// keeps expectedStatus() mapping these to 400.
+export function zodMessage(e: z.ZodError): Error {
+  const issue = e.issues[0];
+  if (!issue) return new Error("invalid-input");
+  const field = issue.path.join(".") || "request body";
+  if (issue.code === "too_small") return new Error(`invalid-input: ${field} must be at least ${issue.minimum}`);
+  if (issue.code === "too_big") return new Error(`invalid-input: ${field} must be at most ${issue.maximum}`);
+  if (issue.code === "invalid_type") return new Error(`invalid-input: ${field} must be ${issue.expected}`);
+  return new Error(`invalid-input: ${field} is invalid`);
+}
 
 export async function sessionUser(): Promise<{ id: string; sv: number; totpPending: boolean }> {
   const session = await getServerSession(authOptions);

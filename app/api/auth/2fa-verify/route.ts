@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { requirePartialSession, ApiError, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
+import { zodMessage, requirePartialSession, ApiError, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { verifyTotp, useBackupCode, createPreAuthToken } from "@/lib/twofa";
 
@@ -38,7 +38,7 @@ export async function POST(req: Request) {
     const preAuthToken = await createPreAuthToken(user.email);
     return ok({ preAuthToken });
   } catch (e) {
-    if (e instanceof z.ZodError) return fail(new Error("invalid-input"));
+    if (e instanceof z.ZodError) return fail(zodMessage(e));
     return fail(e);
   }
 }

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
+import { zodMessage, requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { createApiKey } from "@/lib/apikey";
 import { verifyTotp, useBackupCode } from "@/lib/twofa";
@@ -74,7 +74,7 @@ export async function POST(req: Request) {
     });
     return ok({ ...key, note: "copy now — the full key is shown only once" });
   } catch (e) {
-    if (e instanceof z.ZodError) return fail(new Error("invalid-input"));
+    if (e instanceof z.ZodError) return fail(zodMessage(e));
     return fail(e);
   }
 }

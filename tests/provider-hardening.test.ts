@@ -98,6 +98,18 @@ describe("provider call hardening", () => {
     });
   });
 
+  // The 2.5 dispatch resolves its upstream model id from the registry — a typo
+  // in the catalog would otherwise send 2.0 prompts to the wrong endpoint tier.
+  it("routes seedance-2.5 with the registry's model id and duration", async () => {
+    const spy = fetchSpy(() => jsonResponse({ id: "cgt-2026-09-19-25" }));
+    await expect(
+      createVideoTask({ model: "seedance-2.5", prompt: "ok", durationSec: 30 }),
+    ).resolves.toMatchObject({ taskId: "cgt-2026-09-19-25", model: "seedance-2.5" });
+    const body = JSON.parse(String(spy.mock.calls[0][1]?.body));
+    expect(body.model).toBe("doubao-seedance-2-5-260628");
+    expect(body.duration).toBe(30);
+  });
+
   // The edit lane was the only image path that checkpointed nothing: a transient
   // failure after the paid edits call retried from zero and re-billed it, and a
   // job that finally failed left the generated object referenced by nothing

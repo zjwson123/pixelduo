@@ -51,6 +51,13 @@ export interface ModelInfo {
 //   ❌ wan2.7-* @ aliyun — 403 "Access denied by API-Key restrictions"
 //      (models exist in DashScope's catalog; our key lost model access).
 //      Re-enable after fixing the key's model restrictions in the DashScope console.
+//
+// Audit 2026-09-19: doubao-seedance-2-5-260628 @ ark → 404 "ModelNotOpen"
+// (model ID valid; the account has not activated the model). The ActivateModels
+// API needs AK/SK signing we don't have, so activation is a console action
+// (需要余额 >200 元或资源包). Once activated, flip `enabled` and re-verify the
+// duration range with a live call — the [4,30] range below is from the docs
+// ("30 秒视频连贯直出", reference-video input [2,30]s), not yet probed.
 
 export const MODELS: ModelInfo[] = [
   // === Image generation models ===
@@ -129,9 +136,26 @@ export const MODELS: ModelInfo[] = [
     costPerUnit: { credits: 14, usd: 0.14, label: "per second" },
     async: true,
     supportsImageInput: true, // image-to-video supported
-    durationSecRange: { min: 4, max: 15 }, // Ark: [4,15] or -1 (auto)
+    durationSecRange: { min: 4, max: 15 }, // Ark: any integer in [4,15] (3s rejected post-acceptance; -1 = auto)
     enabled: true,
     builtInWatermark: false, // video watermarking not implemented — see docs
+  },
+  {
+    id: "seedance-2.5",
+    displayName: "Seedance 2.5",
+    mediaType: "video",
+    gateway: "ark",
+    modelId: "doubao-seedance-2-5-260628",
+    defaultQuality: "standard",
+    supportsQuality: false,
+    description: "Newer Doubao video gen: up to 30s single-clip, audio-video sync, video extend. ~¥1.7/sec.",
+    // 720p 刊例 ~¥1.7/sec ≈ $0.24 → calibrate against the first real bill
+    costPerUnit: { credits: 24, usd: 0.24, label: "per second" },
+    async: true,
+    supportsImageInput: true, // image-to-video supported
+    durationSecRange: { min: 4, max: 30 }, // docs: 30s single-clip直出; re-probe after activation
+    enabled: false, // 404 ModelNotOpen until the model is activated in the Ark console — see audit note
+    builtInWatermark: false,
   },
   {
     id: "wan-t2v",

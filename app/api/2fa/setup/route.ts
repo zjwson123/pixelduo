@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
+import { zodMessage, requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { generateTwoFactorSetup } from "@/lib/twofa";
 import bcrypt from "bcryptjs";
@@ -31,7 +31,7 @@ export async function POST(req: Request) {
     await prisma.user.update({ where: { id: userId }, data: { totpPendingSecret: setup.secret } });
     return ok(setup);
   } catch (e) {
-    if (e instanceof z.ZodError) return fail(new Error("invalid-input"));
+    if (e instanceof z.ZodError) return fail(zodMessage(e));
     return fail(e);
   }
 }

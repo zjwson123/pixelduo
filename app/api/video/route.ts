@@ -1,17 +1,27 @@
 import { z } from "zod";
-import { requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
+import { zodMessage, requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
 import { checkPrompt } from "@/lib/safety";
 import { createMediaJob } from "@/lib/queue";
 import { getStorage, newStorageKey } from "@/lib/storage";
-import { enabledVideoModelIds, getModel, modelEnum } from "@/lib/model-registry";
+import { enabledVideoModelIds, getModel, getVideoModels, modelEnum } from "@/lib/model-registry";
 import { randomUUID } from "crypto";
 
 const VIDEO_MODEL_IDS = enabledVideoModelIds();
 
+// Loose sanity bound — the real gate is each model's durationSecRange below.
+// Derived from the registry so a future longer-duration model needs no route edit.
+const VIDEO_DURATION_MAX = getVideoModels().reduce(
+  (max, m) => Math.max(max, m.durationSecRange?.max ?? 0),
+  15,
+);
+
 const schema = z.object({
-  prompt: z.string().min(3).max(2000),
+  // min(1) not min(3): 2-char Chinese prompts ("小狗") are provider-valid and
+  // were rejected with a bare "invalid-input". trim() keeps whitespace-only
+  // prompts out. The public /api/v1 contract stays at 3–2000.
+  prompt: z.string().trim().min(1).max(2000),
   model: z.enum(modelEnum(VIDEO_MODEL_IDS)).default(VIDEO_MODEL_IDS[0] ?? "seedance"),
-  duration: z.number().int().min(2).max(15).default(5),
+  duration: z.number().int().min(2).max(VIDEO_DURATION_MAX).default(5),
   // For image-to-video models: reference image as base64 (nullish — some
   // clients send explicit null when unset)
   image: z.string().min(100).max(2_000_000).nullish(),
@@ -95,7 +105,7 @@ export async function POST(req: Request) {
     });
     return ok({ jobId: job.id, status: job.status, costCredits: job.costCredits, duplicate: !created });
   } catch (e) {
-    if (e instanceof z.ZodError) return fail(new Error("invalid-input"));
+    if (e instanceof z.ZodError) return fail(zodMessage(e));
     return fail(e);
   }
 }

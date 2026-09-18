@@ -1,6 +1,6 @@
 import bcrypt from "bcryptjs";
 import { z } from "zod";
-import { ok, fail, enforceRateLimit, readBodyCapped } from "@/lib/api";
+import { zodMessage, ok, fail, enforceRateLimit, readBodyCapped } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { consumeToken } from "@/lib/tokens";
 import { clearLoginFailures } from "@/lib/login-guard";
@@ -39,7 +39,7 @@ export async function POST(req: Request) {
     await clearLoginFailures(user.email);
     return ok({ reset: true });
   } catch (e) {
-    if (e instanceof z.ZodError) return fail(new Error("invalid-input"));
+    if (e instanceof z.ZodError) return fail(zodMessage(e));
     return fail(e);
   }
 }

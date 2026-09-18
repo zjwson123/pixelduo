@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { requireUserId, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
+import { zodMessage, requireUserId, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
 import { getPlan, getPack } from "@/lib/catalog";
 import { prisma } from "@/lib/prisma";
 import { fulfillOrder } from "@/lib/ledger";
@@ -73,7 +73,7 @@ export async function POST(req: Request) {
       checkoutUrl: session.checkoutUrl,
     });
   } catch (e) {
-    if (e instanceof z.ZodError) return fail(new Error("invalid-input"));
+    if (e instanceof z.ZodError) return fail(zodMessage(e));
     return fail(e);
   }
 }

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { requireUserId, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
+import { zodMessage, requireUserId, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { getStorage } from "@/lib/storage";
 import { checkpointKeys } from "@/lib/queue";
@@ -77,7 +77,7 @@ export async function POST(req: Request) {
     ]);
     return ok({ deleted: true });
   } catch (e) {
-    if (e instanceof z.ZodError) return fail(new Error("invalid-input"));
+    if (e instanceof z.ZodError) return fail(zodMessage(e));
     return fail(e);
   }
 }

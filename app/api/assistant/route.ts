@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
+import { zodMessage, requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
 import { improvePrompt, ASSISTANT_MODELS } from "@/lib/assistant";
 
 const schema = z.object({
@@ -24,7 +24,7 @@ export async function POST(req: Request) {
     const result = await improvePrompt(body.prompt, body.mode, body.model);
     return ok(result);
   } catch (e) {
-    if (e instanceof z.ZodError) return fail(new Error("invalid-input"));
+    if (e instanceof z.ZodError) return fail(zodMessage(e));
     return fail(e);
   }
 }

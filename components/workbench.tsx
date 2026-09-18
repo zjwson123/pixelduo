@@ -109,7 +109,9 @@ const VIDEO_MODEL_OPTIONS: Array<{ value: string; label: string }> = VIDEO_MODEL
   label: m.displayName,
 }));
 
-const DURATION_OPTIONS = [3, 5, 10, 15];
+// Superset of duration tiers; the Seg filters to the selected model's
+// durationSecRange (Seedance 2.0 accepts any integer 4-15, 2.5 4-30).
+const DURATION_OPTIONS = [4, 5, 6, 8, 10, 12, 15, 20, 25, 30];
 
 // Edit tab: enabled image models that accept a reference image
 const EDIT_MODEL_OPTIONS: Array<{ value: string; label: string }> = IMAGE_MODELS
@@ -196,8 +198,8 @@ const LOCALE_STRINGS: Record<Locale, {
     usePrompt: "✓ Use this prompt", writePrompt: "Write a prompt first", verifyFirst: "Verify your email first to start generating.",
     uploadImage: "Reference image", clickUpload: "Click to upload an image (max 5MB)",
     editInstruction: "Edit instruction", editModel: "Edit model", editImage: "Edit Image",
-    videoPrompt: "Prompt", duration: "Duration", refImage: "Reference image (first frame)", genVideo: "Generate Video", genVideoing: "Generating video… (1-3 min)",
-    videoCreating: "Creating video task…", videoPolling: "Polling video task…", videoWait: "This may take 1-3 minutes",
+    videoPrompt: "Prompt", duration: "Duration", refImage: "Reference image (first frame)", genVideo: "Generate Video", genVideoing: "Generating video… (1-10 min)",
+    videoCreating: "Creating video task…", videoPolling: "Polling video task…", videoWait: "This may take 1-10 minutes (long clips take longer)",
     emptyCreate: "Your canvas is empty", emptyCreateDesc: "Type a prompt, pick an engine, and press Generate.",
     emptyEdit: "Upload an image to start editing", emptyEditDesc: "Supported: GPT Image 2 edits, Seedream reference.",
     emptyVideo: "Create your first video", emptyVideoDesc: "Text-to-video or image-to-video.",
@@ -237,8 +239,8 @@ const LOCALE_STRINGS: Record<Locale, {
     usePrompt: "✓ 使用此提示词", writePrompt: "请先输入提示词", verifyFirst: "请先验证邮箱才能开始生成。",
     uploadImage: "参考图片", clickUpload: "点击上传图片（最大 5MB）",
     editInstruction: "编辑指令", editModel: "编辑模型", editImage: "编辑图片",
-    videoPrompt: "提示词", duration: "时长", refImage: "参考图（首帧）", genVideo: "生成视频", genVideoing: "视频生成中…（1-3 分钟）",
-    videoCreating: "正在创建视频任务…", videoPolling: "正在轮询视频任务…", videoWait: "预计需要 1-3 分钟",
+    videoPrompt: "提示词", duration: "时长", refImage: "参考图（首帧）", genVideo: "生成视频", genVideoing: "视频生成中…（1-10 分钟）",
+    videoCreating: "正在创建视频任务…", videoPolling: "正在轮询视频任务…", videoWait: "预计需要 1-10 分钟（长视频更久）",
     emptyCreate: "画布还是空的", emptyCreateDesc: "输入提示词，选择引擎，点击生成。",
     emptyEdit: "上传图片开始编辑", emptyEditDesc: "支持 GPT Image 2 编辑、Seedream 参考图。",
     emptyVideo: "创建你的第一个视频", emptyVideoDesc: "文生视频或图生视频。",
@@ -263,7 +265,9 @@ async function api<T>(url: string, init?: RequestInit): Promise<T> {
     ...init,
     headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
   });
-  const data = (await res.json()) as T & { ok?: boolean; error?: string };
+  // Some error paths answer plain text (e.g. the 413 "payload too large"),
+  // which would make res.json() throw and mask the real status.
+  const data = await res.json().catch(() => ({ ok: false, error: `HTTP ${res.status}` })) as (T & { ok?: boolean; error?: string });
   if (!data.ok) throw new Error(data.error ?? "request failed");
   return data;
 }
@@ -645,7 +649,9 @@ export function Workbench() {
         }),
       });
       await trackJob(data.jobId);
-      setToast("Video generation started — this may take 1-3 minutes");
+      setToast(videoDuration > 15
+        ? "Video generation started — long clips can take 5-15 minutes"
+        : "Video generation started — this may take 1-3 minutes");
     } catch (e) {
       setToast(friendlyError(e));
     } finally {
@@ -653,20 +659,49 @@ export function Workbench() {
     }
   };
 
+  // Server schemas cap the reference image near 2M base64 chars (~1.5MB binary),
+  // but phone photos run 2-4MB — a raw data URL died as a bare "invalid-input".
+  // Downscale oversized files to a 2048px JPEG so any camera upload fits.
+  // Alpha is lost on this path, an acceptable trade against a hard failure.
+  const compressImage = async (file: File): Promise<string> => {
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = () => reject(new Error("read failed"));
+      reader.readAsDataURL(file);
+    });
+    if (dataUrl.length <= 1_800_000) return dataUrl;
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = () => reject(new Error("decode failed"));
+      el.src = dataUrl;
+    });
+    const fit = (maxPx: number) => {
+      const scale = Math.min(1, maxPx / Math.max(img.naturalWidth, img.naturalHeight));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+      canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+      canvas.getContext("2d")!.drawImage(img, 0, 0, canvas.width, canvas.height);
+      return canvas;
+    };
+    const out = fit(2048).toDataURL("image/jpeg", 0.92);
+    return out.length <= 1_800_000 ? out : fit(1536).toDataURL("image/jpeg", 0.85);
+  };
+
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>, setter: (val: string) => void) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    if (file.size > 5 * 1024 * 1024) {
-      setToast("Image too large (max 5MB)");
+    if (file.size > 25 * 1024 * 1024) {
+      setToast("Image too large (max 25MB)");
       return;
     }
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = reader.result as string;
-      setter(result);
-      if (setter === setEditImage) setEditImageName(file.name);
-    };
-    reader.readAsDataURL(file);
+    compressImage(file)
+      .then((result) => {
+        setter(result);
+        if (setter === setEditImage) setEditImageName(file.name);
+      })
+      .catch(() => setToast("Could not read that image"));
   };
 
   const runSmartRoute = async () => {
@@ -1193,11 +1228,11 @@ export function Workbench() {
 
                 <div className="opt-row">
                   <span className="field-label">{t.duration}</span>
-                  <div style={{ width: 200 }}>
+                  <div style={{ flex: 1, maxWidth: 520 }}>
                     <Seg
                       options={
                         // Only offer durations the selected model accepts
-                        // (Seedance 2.0: 4-15s — a 3s request is provider-rejected)
+                        // (2.0: any integer 4-15s; 2.5: 4-30s — a 3s request is provider-rejected)
                         DURATION_OPTIONS
                           .filter((d) => {
                             const r = getModel(videoModel)?.durationSecRange;

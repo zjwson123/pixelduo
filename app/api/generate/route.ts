@@ -1,12 +1,12 @@
 import { z } from "zod";
-import { requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
+import { zodMessage, requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
 import { checkPrompt } from "@/lib/safety";
 import { createGenerationJob, createMediaJob } from "@/lib/queue";
 import { enabledImageModelIds, modelEnum } from "@/lib/model-registry";
 import { randomUUID } from "crypto";
 
 const schema = z.object({
-  prompt: z.string().min(3).max(2000),
+  prompt: z.string().trim().min(1).max(2000),
   model: z.enum(modelEnum([...enabledImageModelIds(), "both"])).default("gpt"),
   quality: z.enum(["low", "medium", "high"]).default("medium"),
   count: z.number().int().min(1).max(4).default(1),
@@ -60,7 +60,7 @@ export async function POST(req: Request) {
     });
     return ok({ jobId: job.id, status: job.status, costCredits: job.costCredits, duplicate: !created });
   } catch (e) {
-    if (e instanceof z.ZodError) return fail(new Error("invalid-input"));
+    if (e instanceof z.ZodError) return fail(zodMessage(e));
     return fail(e);
   }
 }

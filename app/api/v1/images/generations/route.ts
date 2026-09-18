@@ -1,18 +1,24 @@
 import { z } from "zod";
-import { errorResponse, fail, ok, readBodyCapped } from "@/lib/api";
+import { zodMessage, errorResponse, fail, ok, readBodyCapped } from "@/lib/api";
 import { rateLimit } from "@/lib/rate-limit";
 import { authenticateApiKey } from "@/lib/apikey";
 import { checkPrompt } from "@/lib/safety";
 import { createGenerationJob, createMediaJob } from "@/lib/queue";
-import { enabledImageModelIds, enabledVideoModelIds, getModel, modelEnum } from "@/lib/model-registry";
+import { enabledImageModelIds, enabledVideoModelIds, getVideoModels, getModel, modelEnum } from "@/lib/model-registry";
 import { randomUUID } from "crypto";
+
+// Loose sanity bound — each model's durationSecRange is the real gate below.
+const VIDEO_DURATION_MAX = getVideoModels().reduce(
+  (max, m) => Math.max(max, m.durationSecRange?.max ?? 0),
+  15,
+);
 
 const schema = z.object({
   prompt: z.string().min(3).max(2000),
   model: z.enum(modelEnum([...enabledImageModelIds(), "both", ...enabledVideoModelIds()])).default("gpt"),
   quality: z.enum(["low", "medium", "high"]).default("medium"),
   n: z.number().int().min(1).max(4).default(1),
-  duration: z.number().int().min(2).max(15).default(5),
+  duration: z.number().int().min(2).max(VIDEO_DURATION_MAX).default(5),
 });
 
 export const dynamic = "force-dynamic";
@@ -112,7 +118,7 @@ export async function POST(req: Request) {
     });
     return ok({ jobId: job.id, status: job.status, costCredits: job.costCredits, duplicate: !created });
   } catch (e) {
-    if (e instanceof z.ZodError) return fail(new Error("invalid-input"));
+    if (e instanceof z.ZodError) return fail(zodMessage(e));
     return fail(e);
   }
 }

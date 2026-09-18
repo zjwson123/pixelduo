@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
+import { zodMessage, requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
 import { checkPrompt } from "@/lib/safety";
 import { createMediaJob } from "@/lib/queue";
 import { getStorage, newStorageKey } from "@/lib/storage";
@@ -11,7 +11,7 @@ const EDITABLE_MODEL_IDS = getImageModels()
   .map((m) => m.id);
 
 const schema = z.object({
-  prompt: z.string().min(3).max(2000),
+  prompt: z.string().trim().min(1).max(2000),
   model: z.enum(modelEnum(EDITABLE_MODEL_IDS)).default("gpt"),
   quality: z.enum(["low", "medium", "high"]).default("medium"),
   // Reference image as base64 (data URL or raw base64)
@@ -83,7 +83,7 @@ export async function POST(req: Request) {
     }
     return ok({ jobId: result.job.id, status: result.job.status, costCredits: result.job.costCredits, duplicate: !result.created });
   } catch (e) {
-    if (e instanceof z.ZodError) return fail(new Error("invalid-input"));
+    if (e instanceof z.ZodError) return fail(zodMessage(e));
     return fail(e);
   }
 }

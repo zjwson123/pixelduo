@@ -20,6 +20,7 @@ describe("model-registry", () => {
     expect(ids).toContain("wan-image");
     expect(ids).toContain("wan-image-pro");
     expect(ids).toContain("seedance");
+    expect(ids).toContain("seedance-2.5");
     expect(ids).toContain("wan-t2v");
     expect(ids).toContain("wan-i2v");
   });
@@ -29,6 +30,7 @@ describe("model-registry", () => {
     for (const id of ["wan-image", "wan-image-pro", "wan-t2v", "wan-i2v"]) {
       expect(getModel(id)?.enabled).toBe(false);
     }
+    // seedance-2.5 disabled 2026-09-19: 404 ModelNotOpen until activated in the Ark console
     for (const id of ["gpt", "seedream", "seedance"]) {
       expect(getModel(id)?.enabled).toBe(true);
     }
@@ -59,6 +61,7 @@ describe("model-registry", () => {
 
   it("declares provider-enforced video duration ranges", () => {
     expect(getModel("seedance")?.durationSecRange).toEqual({ min: 4, max: 15 }); // Ark docs
+    expect(getModel("seedance-2.5")?.durationSecRange).toEqual({ min: 4, max: 30 }); // 30s single-clip直出 — re-probe after activation
   });
 
   it("flags pure i2v models as requiring a reference image", () => {
@@ -78,7 +81,7 @@ describe("model-registry", () => {
   });
 
   it("MODELS export still exposes the full catalog for record labels", () => {
-    expect(MODELS.length).toBe(7);
+    expect(MODELS.length).toBe(8);
   });
 });
 
@@ -108,6 +111,11 @@ describe("cost model", () => {
   it("seedance video cost", () => {
     const c = videoCost("seedance", 5);
     expect(c.credits).toBe(70); // 14/sec * 5
+  });
+
+  it("seedance-2.5 video cost scales to 30s", () => {
+    expect(videoCost("seedance-2.5", 5).credits).toBe(120); // 24/sec * 5
+    expect(videoCost("seedance-2.5", 30).credits).toBe(720); // 24/sec * 30
   });
 
   it("estimateModelCost for image models scales with count", () => {

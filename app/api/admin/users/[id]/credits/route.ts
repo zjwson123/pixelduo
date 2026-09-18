@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { requireAdmin } from "@/lib/admin";
-import { ok, fail, readBodyCapped, enforceRateLimit, enforceUserRateLimit } from "@/lib/api";
+import { zodMessage, ok, fail, readBodyCapped, enforceRateLimit, enforceUserRateLimit } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { adminGrantTx, adminClawbackTx } from "@/lib/ledger";
 
@@ -35,7 +35,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     const updated = await prisma.user.findUniqueOrThrow({ where: { id: user.id }, select: { credits: true } });
     return ok({ credits: updated.credits });
   } catch (e) {
-    if (e instanceof z.ZodError) return fail(new Error("invalid-input"));
+    if (e instanceof z.ZodError) return fail(zodMessage(e));
     return fail(e);
   }
 }

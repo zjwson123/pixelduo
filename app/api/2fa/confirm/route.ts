@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
+import { zodMessage, requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { verifyTotp, generateBackupCodes, hashBackupCode } from "@/lib/twofa";
 import { sendTwoFactorStateEmail } from "@/lib/mail";
@@ -65,7 +65,7 @@ export async function POST(req: Request) {
     await sendTwoFactorStateEmail(user.email, true);
     return ok({ enabled: true, backupCodes: codes });
   } catch (e) {
-    if (e instanceof z.ZodError) return fail(new Error("invalid-input"));
+    if (e instanceof z.ZodError) return fail(zodMessage(e));
     return fail(e);
   }
 }
