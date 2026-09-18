@@ -1199,7 +1199,7 @@ export function Workbench() {
                   <div className="prompt-box">
                     <textarea value={videoPrompt} onChange={(e) => setVideoPrompt(e.target.value)} placeholder={locale === "zh" ? "描述你想要的视频…" : "Describe the video you want…"} style={{ minHeight: 80 }} />
                     <div className="prompt-meta">
-                      <span>{videoPrompt.length} {t.chars}</span>
+                      <span style={videoPrompt.length > 4000 ? { color: "var(--red)" } : undefined}>{videoPrompt.length}/4000</span>
                       <span>{locale === "zh" ? "支持多镜头叙事" : "Multi-shot narrative supported"}</span>
                     </div>
                   </div>

@@ -18,8 +18,11 @@ const VIDEO_DURATION_MAX = getVideoModels().reduce(
 const schema = z.object({
   // min(1) not min(3): 2-char Chinese prompts ("小狗") are provider-valid and
   // were rejected with a bare "invalid-input". trim() keeps whitespace-only
-  // prompts out. The public /api/v1 contract stays at 3–2000.
-  prompt: z.string().trim().min(1).max(2000),
+  // prompts out. max(4000): Ark documents no hard text cap for Seedance — only
+  // a soft "≤500 中文字" quality suggestion — so 2000 needlessly rejected long
+  // narrative prompts; a provider rejection past creation refunds the hold.
+  // The public /api/v1 contract stays at 3–2000.
+  prompt: z.string().trim().min(1).max(4000),
   model: z.enum(modelEnum(VIDEO_MODEL_IDS)).default(VIDEO_MODEL_IDS[0] ?? "seedance"),
   duration: z.number().int().min(2).max(VIDEO_DURATION_MAX).default(5),
   // For image-to-video models: reference image as base64 (nullish — some
