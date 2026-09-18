@@ -168,6 +168,7 @@ const LOCALE_STRINGS: Record<Locale, {
   emptyCreate: string; emptyCreateDesc: string; emptyEdit: string; emptyEditDesc: string; emptyVideo: string; emptyVideoDesc: string;
   latestResults: string; recentImages: string; total: string; editResult: string; videoResult: string;
   genFailed: string; videoFailed: string; charged: string; download: string;
+  galManage: string; galDone: string; galSelectAll: string; galClear: string; galDelete: string; galDeleted: string;
   backToWorkbench: string; plansCredits: string; signup: string; checkin: string; dailyCheckin: string;
   topupPacks: string; validMonths: string; currentPlan: string; choose: string; free: string;
   checkoutTitle: string; item: string; creditsLabel: string; totalLabel: string; paymentMethod: string;
@@ -205,6 +206,7 @@ const LOCALE_STRINGS: Record<Locale, {
     emptyVideo: "Create your first video", emptyVideoDesc: "Text-to-video or image-to-video.",
     latestResults: "Latest results", recentImages: "Recent images", total: "total", editResult: "Edit result", videoResult: "Video result",
     genFailed: "Generation failed", videoFailed: "Video generation failed", charged: "Charged", download: "Download",
+    galManage: "Manage", galDone: "Done", galSelectAll: "Select all", galClear: "Clear", galDelete: "Delete", galDeleted: "items deleted",
     backToWorkbench: "← Back to workbench", plansCredits: "Plans & credits",
     signup: "Signup bonus", checkin: "Daily check-in", dailyCheckin: "daily check-in +2",
     topupPacks: "Top-up packs", validMonths: "valid 12 months", currentPlan: "Current plan", choose: "Choose", free: "Free",
@@ -246,6 +248,7 @@ const LOCALE_STRINGS: Record<Locale, {
     emptyVideo: "创建你的第一个视频", emptyVideoDesc: "文生视频或图生视频。",
     latestResults: "最新结果", recentImages: "最近图片", total: "共", editResult: "编辑结果", videoResult: "视频结果",
     genFailed: "生成失败", videoFailed: "视频生成失败", charged: "已扣", download: "下载",
+    galManage: "管理", galDone: "完成", galSelectAll: "全选", galClear: "取消全选", galDelete: "删除所选", galDeleted: "项已删除",
     backToWorkbench: "← 返回工作台", plansCredits: "定价与积分",
     signup: "注册奖励", checkin: "每日签到", dailyCheckin: "每日签到 +2",
     topupPacks: "积分包", validMonths: "12 个月有效", currentPlan: "当前套餐", choose: "选择", free: "免费",
@@ -361,6 +364,9 @@ export function Workbench() {
   const [tmplTotal, setTmplTotal] = useState(0);
   const [showFeaturedOnly, setShowFeaturedOnly] = useState(false);
   const [gallery, setGallery] = useState<GalleryImage[]>([]);
+  // Gallery manage mode: multi-select ids for batch deletion.
+  const [galManaging, setGalManaging] = useState(false);
+  const [galSelected, setGalSelected] = useState<Set<string>>(new Set());
   const [ledger, setLedger] = useState<LedgerRow[]>([]);
   const [orders, setOrders] = useState<OrderRow[]>([]);
   const [expiring, setExpiring] = useState<ExpiringCredit[]>([]);
@@ -412,6 +418,38 @@ export function Workbench() {
       setGallery(data.images);
     } catch {}
   }, []);
+
+  const toggleGalItem = (id: string) => {
+    setGalSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const deleteGallerySelected = async () => {
+    if (galSelected.size === 0) return;
+    const confirmed = window.confirm(
+      locale === "zh"
+        ? `确定删除选中的 ${galSelected.size} 项吗？删除后无法恢复。`
+        : `Delete ${galSelected.size} selected item(s)? This cannot be undone.`,
+    );
+    if (!confirmed) return;
+    try {
+      const data = await api<{ deleted: number }>("/api/gallery", {
+        method: "DELETE",
+        body: JSON.stringify({ ids: [...galSelected] }),
+      });
+      const gone = galSelected;
+      setGallery((prev) => prev.filter((g) => !gone.has(g.id)));
+      setGalSelected(new Set());
+      setGalManaging(false);
+      setToast(`${data.deleted} ${t.galDeleted}`);
+    } catch (e) {
+      setToast(friendlyError(e));
+    }
+  };
 
   const refreshLedger = useCallback(async () => {
     try {
@@ -741,7 +779,7 @@ export function Workbench() {
   const isVideoModel = (model: string) => getModel(model)?.mediaType === "video" || model === "seedance" || model === "wan-t2v" || model === "wan-i2v";
 
   // Render a media element (image or video) for a gallery/recent item
-  const renderMedia = (url: string, model: string, prompt: string, onZoom?: () => void) => {
+  const renderMedia = (url: string, model: string, prompt: string, onZoom?: React.MouseEventHandler) => {
     if (isVideoModel(model)) {
       return <video src={url} controls style={{ width: "100%", borderRadius: 8 }} />;
     }
@@ -1408,21 +1446,40 @@ export function Workbench() {
                 <h1>{t.pageHead.gallery.title}</h1>
                 <p>{t.pageHead.gallery.desc}</p>
               </div>
+              {gallery.length > 0 && (
+                galManaging ? (
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                    <button className="chip" onClick={() => setGalSelected(new Set(gallery.map((g) => g.id)))}>{t.galSelectAll}</button>
+                    <button className="chip" onClick={() => setGalSelected(new Set())}>{t.galClear}</button>
+                    <button className="chip" style={galSelected.size > 0 ? { background: "var(--red)", borderColor: "var(--red)", color: "#fff" } : undefined} disabled={galSelected.size === 0} onClick={deleteGallerySelected}>
+                      {t.galDelete}{galSelected.size > 0 ? ` (${galSelected.size})` : ""}
+                    </button>
+                    <button className="chip" onClick={() => { setGalManaging(false); setGalSelected(new Set()); }}>{t.galDone}</button>
+                  </div>
+                ) : (
+                  <button className="chip" onClick={() => setGalManaging(true)}>{t.galManage}</button>
+                )
+              )}
             </div>
             {gallery.length === 0 ? (
               <div className="card"><div className="empty"><span className="serif">Nothing here yet</span><span>{locale === "zh" ? "生成的图片会出现在这里。" : "Generated images will appear here."}</span></div></div>
             ) : (
               <div className="gallery-grid">
                 {gallery.map((g) => (
-                  <div key={g.id} className="card gal-card">
-                    {renderMedia(g.url, g.model, g.prompt)}
+                  <div
+                    key={g.id}
+                    className={`card gal-card${galManaging ? " manage" : ""}${galSelected.has(g.id) ? " sel" : ""}`}
+                    onClick={galManaging ? () => toggleGalItem(g.id) : undefined}
+                  >
+                    {galManaging && <span className="gal-check">{galSelected.has(g.id) ? "✓" : ""}</span>}
+                    {renderMedia(g.url, g.model, g.prompt, galManaging ? (e) => { e.stopPropagation(); toggleGalItem(g.id); } : undefined)}
                     <div className="gal-body">
                       <div className="prompt">{g.prompt}</div>
                       <div className="gal-meta">
                         <ModelPill model={g.model} />
                         <span className="gal-credits">{g.credits} {t.credits}</span>
                         <span className="spacer"></span>
-                        <a className="dl-link" href={`${g.url}?download=1`} download>{t.download}</a>
+                        <a className="dl-link" href={`${g.url}?download=1`} download onClick={(e) => e.stopPropagation()}>{t.download}</a>
                       </div>
                       <div className="gal-time" title={new Date(g.createdAt).toLocaleString()}>
                         {new Date(g.createdAt).toLocaleString(undefined, { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}
