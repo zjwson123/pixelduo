@@ -26,7 +26,12 @@ export async function POST(req: Request) {
     const body = schema.parse(JSON.parse(bodyRaw.raw));
     const item = body.kind === "pack" ? getPack(body.itemId) : getPlan(body.itemId);
     if (!item) return fail(new Error("item-not-found"));
-    if (body.kind === "plan" && item.price === 0) return fail(new Error("free-plan-not-payable"));
+    // Prefixed `invalid-` so fail() classifies it as a 400: the previous bare
+    // message matched no branch, so a rejected free-plan checkout answered 500
+    // and reported itself to Sentry as an unexpected incident.
+    if (body.kind === "plan" && item.price === 0) {
+      return fail(new Error("invalid-input: the free plan is not purchasable"));
+    }
 
     const idempotencyKey = `${userId}:${body.kind}:${body.itemId}:${randomUUID()}`;
     const order = await prisma.order.create({

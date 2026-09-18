@@ -16,7 +16,8 @@ interface CcProxyConfig {
 let cached: CcProxyConfig | null | undefined;
 
 export function loadCcProxyConfig(): CcProxyConfig | null {
-  if (cached !== undefined) return cached;  try {
+  if (cached !== undefined) return cached;
+  try {
     const p = path.join(os.homedir(), ".cc-proxy", "config.json");
     cached = JSON.parse(fs.readFileSync(p, "utf8")) as CcProxyConfig;
   } catch {
@@ -134,13 +135,22 @@ export function getVisionConfig(): VisionConfig | null {
   // no-op that still reported itself as configured.
   const envKey = process.env.VISION_MODERATION_API_KEY || undefined;
   const envBase = process.env.VISION_MODERATION_BASE_URL || undefined;
-  if (envKey && envBase) {
-    return { baseUrl: envBase, apiKey: envKey, model };
+  // The env pair is ATOMIC: half of it must never be paired with half of the
+  // cc-proxy config. Doing that sent one gateway's credential to another
+  // host — with only VISION_MODERATION_BASE_URL set, the ModelVerse API key
+  // from ~/.cc-proxy/config.json was handed to that third-party host; with only
+  // VISION_MODERATION_API_KEY set (and a modelverse gateway present, which is
+  // the documented dev setup), the operator's moderation key was sent to
+  // api.modelverse.cn. A partial override is a misconfiguration, not a request
+  // to mix sources: return null so the worker's boot gate reports it.
+  if (envKey || envBase) {
+    if (envKey && envBase) return { baseUrl: envBase, apiKey: envKey, model };
+    return null;
   }
   const cfg = loadCcProxyConfig();
   const gw = cfg?.gateways?.modelverse;
-  const apiKey = envKey ?? gw?.api_keys?.find((k) => k.length > 0);
-  const baseUrl = envBase ?? gw?.base_url;
+  const apiKey = gw?.api_keys?.find((k) => k.length > 0);
+  const baseUrl = gw?.base_url;
   if (!baseUrl || !apiKey) return null;
   const fallbackModel = (cfg?.vision_fallback as { model?: string } | undefined)?.model ?? "gpt-5.6-luna";
   return {

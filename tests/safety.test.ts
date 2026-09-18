@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
+import fs from "fs";
+import os from "os";
+import path from "path";
 import {
   checkPrompt,
   parseModerationJson,
@@ -7,7 +10,7 @@ import {
   analyzeImage,
 } from "../lib/safety";
 import { getStorage, newStorageKey } from "../lib/storage";
-import { _resetKeysCacheForTests } from "../lib/keys";
+import { _resetKeysCacheForTests, getVisionConfig } from "../lib/keys";
 
 const origModeration = process.env.IMAGE_MODERATION;
 const origEndpoint = process.env.IMAGE_NSFW_ENDPOINT;
@@ -139,6 +142,71 @@ describe("an audit that was ASKED for can never report itself as not requested",
       _resetKeysCacheForTests();
       await getStorage().delete(key).catch(() => undefined);
     }
+  });
+});
+
+// The env pair is atomic. Reading each half from an independent fallback meant
+// a half-set env pair crossed a credential to the wrong host: with only
+// VISION_MODERATION_BASE_URL set, the ModelVerse key from ~/.cc-proxy/config.json
+// was sent to that operator-specified host; with only VISION_MODERATION_API_KEY
+// set, that moderation key was sent to api.modelverse.cn. A partial override is
+// a misconfiguration, not a licence to mix sources.
+describe("vision config sources", () => {
+  const orig = {
+    HOME: process.env.HOME,
+    key: process.env.VISION_MODERATION_API_KEY,
+    base: process.env.VISION_MODERATION_BASE_URL,
+  };
+  afterEach(() => {
+    if (orig.HOME) process.env.HOME = orig.HOME;
+    else delete process.env.HOME;
+    if (orig.key) process.env.VISION_MODERATION_API_KEY = orig.key;
+    else delete process.env.VISION_MODERATION_API_KEY;
+    if (orig.base) process.env.VISION_MODERATION_BASE_URL = orig.base;
+    else delete process.env.VISION_MODERATION_BASE_URL;
+    _resetKeysCacheForTests();
+  });
+
+  it("uses the env pair when both halves are set", () => {
+    process.env.VISION_MODERATION_API_KEY = "mod-key";
+    process.env.VISION_MODERATION_BASE_URL = "https://vision.example.com/v1";
+    _resetKeysCacheForTests();
+    expect(getVisionConfig()).toMatchObject({
+      apiKey: "mod-key",
+      baseUrl: "https://vision.example.com/v1",
+    });
+  });
+
+  it("treats a half-set env pair as unconfigured instead of pairing it with another source", () => {
+    // A cc-proxy config that DOES provide a modelverse gateway, so the old
+    // `envKey ?? gw?.api_keys` / `envBase ?? gw?.base_url` pairing had something
+    // to fall back to (and something to leak to / from).
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "pd-keys-"));
+    fs.mkdirSync(path.join(home, ".cc-proxy"), { recursive: true });
+    fs.writeFileSync(
+      path.join(home, ".cc-proxy", "config.json"),
+      JSON.stringify({
+        gateways: { modelverse: { api_keys: ["modelverse-secret"], base_url: "https://api.modelverse.cn/v1" } },
+      }),
+    );
+    process.env.HOME = home;
+
+    delete process.env.VISION_MODERATION_API_KEY;
+    process.env.VISION_MODERATION_BASE_URL = "https://vision.example.com/v1";
+    _resetKeysCacheForTests();
+    expect(getVisionConfig()).toBeNull();
+
+    process.env.VISION_MODERATION_API_KEY = "mod-key";
+    delete process.env.VISION_MODERATION_BASE_URL;
+    _resetKeysCacheForTests();
+    expect(getVisionConfig()).toBeNull();
+
+    // With neither half set the config file is the documented fallback.
+    delete process.env.VISION_MODERATION_API_KEY;
+    _resetKeysCacheForTests();
+    expect(getVisionConfig()).toMatchObject({ apiKey: "modelverse-secret" });
+
+    fs.rmSync(home, { recursive: true, force: true });
   });
 });
 

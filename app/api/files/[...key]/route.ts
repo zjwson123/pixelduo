@@ -88,6 +88,14 @@ export async function GET(req: Request, { params }: { params: Promise<{ key: str
   // Stream the object: the old full-buffer get() materialized up to 100 MB
   // per request in heap. Pull the first chunk to sniff the content type from
   // magic bytes, then replay it ahead of the rest of the stream.
+  //
+  // The consumer drives the read (pull, one chunk per call). A `start()` loop
+  // that enqueues every chunk as fast as the reader produces them is NOT a
+  // streaming fix: controller.enqueue never blocks, so the whole object sits in
+  // the stream's internal queue within milliseconds of the response being
+  // created — the same N × object-size heap as the get() it replaced, held
+  // until the socket drains (Node's requestTimeout caps that at 300s). ~100
+  // concurrent slow reads of 2-5 MB objects is a 512 MB container's OOM.
   const obj = await getStorage().getStream(key);
   if (!obj) return new NextResponse("not found", { status: 404, headers: NO_STORE });
   const reader = obj.stream.getReader();
@@ -114,16 +122,26 @@ export async function GET(req: Request, { params }: { params: Promise<{ key: str
     headers["Content-Disposition"] = `attachment; filename="${baseName}"`;
   }
 
+  let headSent = false;
   const body = new ReadableStream<Uint8Array>({
-    async start(controller) {
+    async pull(controller) {
       try {
-        if (head.byteLength > 0) controller.enqueue(head);
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (value) controller.enqueue(value);
+        // The sniffed first chunk is replayed first; every later pull hands out
+        // exactly one chunk, so at most one chunk plus the socket's own buffer
+        // is ever resident.
+        if (!headSent) {
+          headSent = true;
+          if (head.byteLength > 0) {
+            controller.enqueue(head);
+            return;
+          }
         }
-        controller.close();
+        const { done, value } = await reader.read();
+        if (done) {
+          controller.close();
+          return;
+        }
+        if (value) controller.enqueue(value);
       } catch (e) {
         controller.error(e);
       }

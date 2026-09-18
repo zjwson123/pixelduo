@@ -16,14 +16,23 @@ const schema = z.object({
   quality: z.enum(["low", "medium", "high"]).default("medium"),
   // Reference image as base64 (data URL or raw base64)
   image: z.string().min(100).max(2_000_000), // up to ~2MB base64
-  // For multi-image editing (image-input capable models): up to 9 images
-  extraImages: z.array(z.string().min(100).max(2_000_000)).max(8).optional(),
   idempotencyKey: z.string().max(128).optional(),
 });
 
-// 1 primary + 8 extra images × 2M base64 chars is the legal maximum (~18MB
-// of JSON) — cap just above it so oversized bodies are cut before buffering.
-const EDIT_MAX_BYTES = 20 * 1024 * 1024;
+// One 2 MB base64 reference plus JSON overhead. This used to be 20 MB to fit
+// `extraImages` — a field nothing ever read (the handler only ever used
+// element 0, so a client sending 9 images was billed for and received a
+// single-image edit while the server buffered ~18 MB of them). Dropping the
+// dead field lets the cap come down with it, which is the whole point: this is
+// the largest authenticated body in the app.
+const EDIT_MAX_BYTES = 4 * 1024 * 1024;
+
+// Data URL prefix, if present. The class must accept "+" (image/svg+xml) and
+// friends: with `[a-z]+` a legitimate `data:image/svg+xml;base64,…` did not
+// match, so the ENTIRE data URL fell through as "raw base64" and was decoded
+// into garbage bytes that were then stored as the reference image (the
+// workbench accepts image/*, so an SVG upload is a normal user action).
+const DATA_URL_RE = /^data:image\/[\w.+-]+;base64,(.+)$/i;
 
 export async function POST(req: Request) {
   try {
@@ -40,13 +49,8 @@ export async function POST(req: Request) {
     const safety = checkPrompt(body.prompt);
     if (!safety.ok) return fail(new Error(`blocked:${safety.reason}`));
 
-    // Store the reference image(s) and get storage key(s)
-    const allImages = [body.image, ...(body.extraImages ?? [])];
-    // Strip data URL prefix if present
-    const cleanedImages = allImages.map((img) => {
-      const match = img.match(/^data:image\/[a-z]+;base64,(.+)$/);
-      return match ? match[1] : img;
-    });
+    // Strip the data URL prefix if present.
+    const cleaned = body.image.match(DATA_URL_RE)?.[1] ?? body.image;
 
     // Store the primary reference image. The write happens BEFORE job creation
     // (the job row must not reference a file that may not exist yet), so any
@@ -56,7 +60,7 @@ export async function POST(req: Request) {
     const storage = getStorage();
     let result: Awaited<ReturnType<typeof createMediaJob>>;
     try {
-      await storage.put(refKey, Buffer.from(cleanedImages[0], "base64"), "image/png");
+      await storage.put(refKey, Buffer.from(cleaned, "base64"), "image/png");
       const key = body.idempotencyKey || `${userId}:edit:${randomUUID()}`;
       result = await createMediaJob({
         userId,

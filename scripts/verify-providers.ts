@@ -13,7 +13,7 @@ import {
   pollVideoTask,
   saveRemoteVideo,
 } from "../lib/providers";
-import { analyzeImage } from "../lib/safety";
+import { analyzeImage, moderationRequested } from "../lib/safety";
 import { getStorage } from "../lib/storage";
 import { getVisionConfig } from "../lib/keys";
 
@@ -26,8 +26,13 @@ import { getVisionConfig } from "../lib/keys";
 // feature outage. Auditing the image generated above makes that failure mode
 // visible here, for free, instead of in production.
 async function verifyModeration(imageKey: string): Promise<void> {
-  const requested = process.env.IMAGE_MODERATION === "1" || Boolean(process.env.IMAGE_NSFW_ENDPOINT);
-  if (!requested) {
+  // moderationRequested(), NOT a local `=== "1"`: the worker and the boot gate
+  // treat any non-empty value except "0" as "an audit was asked for", so an
+  // operator who set IMAGE_MODERATION=true would have this script report "off
+  // by design" and skip the check entirely — while the worker either refused to
+  // start (no vision config) or failed and refunded every job (gateway down).
+  // The whole point of this pre-flight is to surface that here instead.
+  if (!moderationRequested()) {
     console.log("[3/4] moderation not configured (IMAGE_MODERATION / IMAGE_NSFW_ENDPOINT unset) — off by design");
     return;
   }

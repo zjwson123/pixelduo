@@ -74,6 +74,12 @@ through `queued → polling → done` (async provider task, typically 1–3 min)
 
 ## Key management
 
-- `POST /api/account/keys` `{ "name": "prod" }` → `{ id, key, prefix }`
+Creating a key requires re-authentication — a hijacked session alone must not be
+able to mint a long-lived credential. The account password goes in the body, and
+accounts with 2FA enabled must also pass a current `token` (TOTP) or `backupCode`.
+
+- `POST /api/account/keys` `{ "name": "prod", "password": "…" }` → `{ id, key, prefix }`
+  (add `"token": "123456"` or `"backupCode": "…"` when 2FA is enabled; without it:
+  `400 2fa-code-required`)
 - `GET /api/account/keys` → list (no raw keys)
 - `POST /api/account/keys/:id/revoke` → revoke immediately

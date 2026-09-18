@@ -60,6 +60,10 @@ export async function routePrompt(prompt: string): Promise<RoutingResult> {
           thinking: { type: "disabled" },
         }),
         signal: controller.signal,
+        // No redirects — see callWithKeys in providers/index.ts. A gateway that
+        // answers 307 would otherwise pick the address this request (and its
+        // Authorization header) is re-sent to.
+        redirect: "manual",
       });
       // The body read stays inside the armed-timer window: clearing the
       // timeout as soon as the headers arrive leaves the stream unbounded
@@ -74,7 +78,13 @@ export async function routePrompt(prompt: string): Promise<RoutingResult> {
           const parsed = JSON.parse(cleaned.slice(start, end + 1)) as { model?: string; reason?: string };
           const validModels = getImageModels().map((m) => m.id);
           if (parsed.model && validModels.includes(parsed.model)) {
-            return { recommendedModel: parsed.model, reason: parsed.reason ?? "smart routing", offline: false };
+            // Bounded like every other provider-supplied string that reaches a
+            // client (see errText in providers/index.ts): the gateway can return
+            // up to the 8 MB body cap here, and an unbounded `reason` would be
+            // relayed straight to the workbench.
+            const reason =
+              typeof parsed.reason === "string" && parsed.reason ? parsed.reason.slice(0, 240) : "smart routing";
+            return { recommendedModel: parsed.model, reason, offline: false };
           }
         }
       } else {

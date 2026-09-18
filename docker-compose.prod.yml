@@ -30,6 +30,9 @@ x-appenv: &appenv
   SENTRY_ENVIRONMENT: production
   IMAGE_MODERATION: ${IMAGE_MODERATION:-1}
   VISION_MODERATION_MODEL: ${VISION_MODERATION_MODEL:-gpt-5.4}
+  # Set BOTH or NEITHER — the pair is atomic (see getVisionConfig): setting only
+  # one is treated as "no vision config", and since IMAGE_MODERATION defaults to
+  # on, the worker then refuses to boot rather than delivering unaudited output.
   VISION_MODERATION_BASE_URL: ${VISION_MODERATION_BASE_URL:-}
   VISION_MODERATION_API_KEY: ${VISION_MODERATION_API_KEY:-}
   MODELVERSE_IMAGE_API_KEY: ${MODELVERSE_IMAGE_API_KEY:-}

@@ -49,7 +49,10 @@ export async function POST(req: Request) {
 
     let refImageKey: string | undefined;
     if (body.image) {
-      const cleaned = body.image.match(/^data:image\/[a-z]+;base64,(.+)$/)?.[1] ?? body.image;
+      // Data URL prefix, if present. The class must accept "+" (image/svg+xml):
+      // with `[a-z]+` such a payload did not match, so the whole data URL was
+      // decoded as base64 into garbage bytes and stored as the reference frame.
+      const cleaned = body.image.match(/^data:image\/[\w.+-]+;base64,(.+)$/i)?.[1] ?? body.image;
       // Same orphan-guard as /api/edit: the upload precedes job creation, so
       // every path that doesn't attach the key to a job must delete it.
       const storage = getStorage();

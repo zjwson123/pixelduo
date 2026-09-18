@@ -112,6 +112,19 @@ export async function createGenerationJob(input: CreateJobInput) {
 
 // New: create media job (supports all models including video and edit)
 export async function createMediaJob(input: CreateMediaJobInput) {
+  // estimateModelCost multiplies by count, but these two paths can only ever
+  // deliver ONE output: createVideoTask takes no count (it creates a single
+  // upstream task) and the gpt edit lane returns exactly one image. A future
+  // caller passing count > 1 would be charged N× the per-unit price for a
+  // single delivery, so reject it here instead. Every current caller passes 1.
+  if (input.count !== 1) {
+    if (input.mediaType === "video") {
+      throw new Error("invalid-input: video jobs deliver a single output (count must be 1)");
+    }
+    if (input.model === "gpt" && input.refImageKey) {
+      throw new Error("invalid-input: image edits deliver a single output (count must be 1)");
+    }
+  }
   const cost = estimateModelCost(input.model, input.count, input.quality, input.durationSec ?? 5);
   const idemKey = scopedIdempotencyKey(input.userId, input.idempotencyKey);
   // Fast path: a replayed idempotency key returns the existing job without
@@ -216,7 +229,6 @@ export async function failJob(jobId: string, error: string, opts?: { terminal?: 
   return prisma.$transaction(async (tx) => {
     const job = await tx.job.findUnique({ where: { id: jobId } });
     if (!job || job.status === "failed" || job.status === "done") return;
-    const wasActive = job.status === "running" || job.status === "queued" || job.status === "polling";
     const nextAttempts = job.attempts + 1;
 
     if (!opts?.terminal && nextAttempts < job.maxAttempts) {
@@ -250,7 +262,7 @@ export async function failJob(jobId: string, error: string, opts?: { terminal?: 
         heartbeatAt: null,
       },
     });
-    if (claim.count === 1 && wasActive) {
+    if (claim.count === 1) {
       const consumption = (job.consumption ?? null) as unknown as SpendConsumption[] | null;
       await refundCreditsTx(
         tx,
@@ -334,6 +346,34 @@ export async function completeJob(jobId: string, images: JobImage[]) {
   return prisma.$transaction(async (tx) => {
     const job = await tx.job.findUnique({ where: { id: jobId } });
     if (!job || (job.status !== "running" && job.status !== "polling")) throw new Error("job-not-runnable");
+    // A refund or chargeback that lands while this job is in flight returns the
+    // money — and this is the one place that can still refuse to hand over the
+    // goods. revokeOrderCreditsTx cannot: an in-flight job holds its pre-auth as
+    // remaining = 0 for as long as it runs (up to the video hard timeout), so a
+    // revoke finds nothing to take while the job finishes normally and delivers,
+    // leaving the customer with a full refund AND the output. Re-check the order
+    // that funded this job's credits at the single delivery point; the worker
+    // classifies the error as permanent, so the job fails without retrying (a
+    // retry would re-bill the provider for output we would refuse again) and the
+    // refund path deliberately declines to restore the clawed-back grants.
+    const consumption = (job.consumption ?? null) as unknown as SpendConsumption[] | null;
+    if (consumption?.length) {
+      const grants = await tx.creditGrant.findMany({
+        where: { id: { in: consumption.map((c) => c.grantId) } },
+        select: { refType: true, refId: true },
+      });
+      const orderIds = [
+        ...new Set(grants.filter((g) => g.refType === "order" && g.refId).map((g) => g.refId as string)),
+      ];
+      if (orderIds.length) {
+        const refunded = await tx.order.count({ where: { id: { in: orderIds }, status: "refunded" } });
+        if (refunded > 0) {
+          throw new Error(
+            "job-cancelled-refunded-order: the payment for this job was refunded while it was in flight",
+          );
+        }
+      }
+    }
     // CAS to "done" from the observed status: a concurrent failJob (e.g. a
     // recovery sweep reaping the same job) must not end up overwritten after
     // it already refunded — exactly one terminal transition delivers images.

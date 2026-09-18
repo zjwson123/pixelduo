@@ -13,8 +13,12 @@ export class MockProvider implements PaymentProvider {
   name = "mock";
 
   async createCheckout(input: CreateCheckoutInput): Promise<CheckoutSession> {
+    // /api/checkout fulfills mock orders inline and never calls this, so the URL
+    // is not on any live path — it must not point at a route that does not
+    // exist (/api/payments/mock/checkout has never been one, so any future flow
+    // that did use it would hand the buyer a 404).
     return {
-      checkoutUrl: `/api/payments/mock/checkout?orderId=${input.orderId}`,
+      checkoutUrl: `/studio?paid=1&mockOrder=${input.orderId}`,
       providerSessionId: `mock_${input.orderId}`,
     };
   }

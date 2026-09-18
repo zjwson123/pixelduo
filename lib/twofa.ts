@@ -80,10 +80,19 @@ const encoder = new TextEncoder();
 function secretKey(): Uint8Array {
   const secret = process.env.NEXTAUTH_SECRET;
   if (!secret) {
-    // A fixed fallback secret in production would let anyone forge pre-auth
-    // tickets and complete the 2FA login step. Dev keeps it for convenience.
-    if (process.env.NODE_ENV === "production") {
-      throw new Error("NEXTAUTH_SECRET must be set in production");
+    // The pre-auth ticket is the second factor's only proof of the first step,
+    // so its signing key must never be a value that ships in this repository.
+    // Keying on `NODE_ENV === "production"` made the fallback reachable from
+    // every OTHER value — an entrypoint or compose override that sets
+    // NODE_ENV=staging, "Production", or nothing at all left the process
+    // signing tickets with the public constant below, and anyone holding just a
+    // password could mint {"purpose":"2fa","sub":<victim>,…} to walk straight
+    // past TOTP. Default to production: only a runtime that explicitly declares
+    // itself development or test gets the constant.
+    if (process.env.NODE_ENV !== "development" && process.env.NODE_ENV !== "test") {
+      throw new Error(
+        "NEXTAUTH_SECRET must be set — refusing to sign 2FA tickets with the public development fallback",
+      );
     }
     return encoder.encode("pixelduo-dev-secret-change-me");
   }

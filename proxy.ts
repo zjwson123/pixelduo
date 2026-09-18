@@ -53,7 +53,10 @@ export function proxy(req: NextRequest) {
   if (retry !== null) {
     return NextResponse.json(
       { ok: false, error: "rate-limited" },
-      { status: 429, headers: { "Retry-After": String(retry) } },
+      // Same no-store as lib/api.ts stamps on every other /api/* response: a
+      // cache in front of /api/* would otherwise be free to pin one source's
+      // rate-limit for a whole URL.
+      { status: 429, headers: { "Retry-After": String(retry), "Cache-Control": "private, no-store" } },
     );
   }
   return NextResponse.next();

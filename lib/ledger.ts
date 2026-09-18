@@ -37,11 +37,15 @@ export interface CycleUsage {
   // can be stamped with — and therefore revoked with — that order rather than
   // with the incoming one. See fulfillOrder.
   fundingRefId: string | null;
+  // When the measured cycle's own quota ran out. fulfillOrder uses it to decide
+  // whether a cycle has actually ended, because planRenewsAt is NOT durable
+  // evidence: the daily downgrade sweep (rollover.ts) nulls it, so a renewal
+  // that lands more than one sweep after the cycle end had no anchor left to
+  // measure and the advertised carryover silently became 0. The SUBSCRIPTION
+  // grant carries the same instant and survives the sweep (it is zeroed, not
+  // deleted).
+  fundingExpiresAt: Date | null;
 }
-
-// Free credits are consumed first so paid credits can never be diluted by
-// free ones (anti-abuse: free pool cannot be hoarded while burning paid).
-const FREE_SOURCES = new Set<string>(["SIGNUP_BONUS", "CHECKIN", "ADMIN"]);
 
 export async function addCreditsTx(
   tx: Prisma.TransactionClient,
@@ -97,10 +101,17 @@ export async function grantCreditsTx(
 // Canonical grant-lock order. EVERY statement that locks CreditGrant rows must
 // acquire them in this sequence: two transactions locking the same rows in
 // opposite orders deadlock, and Postgres resolves that by aborting one (a 500
-// on a webhook or an admin action). It matches the FIFO spend order, so
-// spendCreditsTx can take the rows in the order they come back.
+// on a webhook or an admin action). It matches the FIFO spend order — free
+// sources (SIGNUP_BONUS/CHECKIN) first, then earliest expiry — so
+// spendCreditsTx can take the rows in the order they come back; ADMIN is
+// deliberately NOT in the free class here, so admin compensation is consumed
+// last like any other paid credit. The trailing id is what makes this a TOTAL
+// order: fulfillOrder mints a SUBSCRIPTION and a ROLLOVER grant in one
+// transaction with the same expiresAt and the same (millisecond) createdAt, and
+// on a full tie the ordering was left to the planner — two statements could
+// then lock the same pair in opposite orders and deadlock.
 const GRANT_LOCK_ORDER = Prisma.sql`ORDER BY CASE WHEN source IN ('SIGNUP_BONUS', 'CHECKIN') THEN 0 ELSE 1 END,
-               "expiresAt" ASC NULLS LAST, "createdAt" ASC`;
+               "expiresAt" ASC NULLS LAST, "createdAt" ASC, "id" ASC`;
 export { GRANT_LOCK_ORDER };
 
 // Credits granted, pre-authed and refunded inside one billing cycle, used to
@@ -137,7 +148,7 @@ export async function cycleUsageTx(
   const funding = await tx.creditGrant.findFirst({
     where: { userId, source: "SUBSCRIPTION" },
     orderBy: { createdAt: "desc" },
-    select: { id: true, amount: true, refId: true, createdAt: true },
+    select: { id: true, amount: true, refId: true, createdAt: true, expiresAt: true },
   });
   const cycleOrderIds = new Set(funding?.refId ? [funding.refId] : []);
   const granted = funding?.amount ?? 0;
@@ -208,6 +219,7 @@ export async function cycleUsageTx(
     spentNet: Math.max(0, preAuth - refund),
     revoked,
     fundingRefId: funding?.refId ?? null,
+    fundingExpiresAt: funding?.expiresAt ?? null,
   };
 }
 
@@ -450,11 +462,24 @@ export async function fulfillOrder(
       // 30% of the unused quota from a just-ended cycle carries into the new
       // one. Only when the previous cycle has actually ended — early renewals
       // keep their remaining quota and wait until the next cycle boundary.
+      //
+      // "Ended" is read from the cycle's ANCHOR (when its quota ran out), from
+      // TWO sources because neither is sufficient alone. planRenewsAt is the
+      // anchor while the plan is still on the books; the daily downgrade sweep
+      // (downgradeExpiredPlans) NULLs it for exactly the same condition — the
+      // same moment the renewal below is processing — so a customer who renews
+      // after the sweep has run (i.e. any renewal more than ~a day after the
+      // cycle end, the normal shape of a lapsed subscription) found no anchor,
+      // `unused` came out 0, and the 30% carryover the plan page advertises was
+      // never granted while the leftover quota was still swept. The
+      // SUBSCRIPTION grant the cycle was funded with carries the same instant
+      // and survives the sweep, so it is the fallback anchor.
       let rollover = 0;
       let unused = 0;
       let rolloverRef: string = orderId;
-      if (user.planRenewsAt && user.planRenewsAt <= now) {
-        const usage = await cycleUsageTx(client, userId, user.planRenewsAt);
+      const usage = await cycleUsageTx(client, userId, user.planRenewsAt ?? now);
+      const anchor = user.planRenewsAt ?? usage.fundingExpiresAt;
+      if (anchor && anchor <= now) {
         unused = Math.max(0, usage.granted - usage.spentNet - usage.revoked);
         rollover = Math.floor(unused * ROLLOVER_RATE);
         // Stamp the carryover with the order that funded the MEASURED cycle,

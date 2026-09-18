@@ -105,6 +105,12 @@ async function moderateWithVision(dataUrl: string): Promise<ImageAudit> {
           max_tokens: 120,
         }),
         signal: controller.signal,
+        // No redirects: a compromised moderation gateway answering 307 would
+        // otherwise make us re-issue this request (with the operator's
+        // moderation key in the header on a same-origin hop, and the request
+        // body — i.e. the image under audit — anywhere the Location points) to
+        // an address we never validated. Same rule as every provider call.
+        redirect: "manual",
       });
       // Read the body while the timer is still armed: clearing it as soon as
       // the headers land leaves the stream unbounded (see callWithKeys).

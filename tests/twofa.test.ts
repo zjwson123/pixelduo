@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { authenticator } from "otplib";
+import { SignJWT } from "jose";
 import Redis from "ioredis";
 import { prisma } from "../lib/prisma";
 import {
@@ -88,5 +89,50 @@ describe("two-factor helpers", () => {
     }
     expect(await verifyPreAuthToken(token, "other@test.dev")).toBe(false);
     expect(await verifyPreAuthToken("garbage.token.here", email)).toBe(false);
+  });
+
+  // The ticket's signing key is the whole proof of the first factor. Keying the
+  // fallback on `NODE_ENV === "production"` left it reachable from every other
+  // value: an entrypoint or compose override that set NODE_ENV=staging ("prod",
+  // "Production", or nothing at all) signed tickets with a constant that ships
+  // in this repository, so anyone holding just a password could mint
+  // {"purpose":"2fa","sub":<victim>} and walk straight past TOTP. Only an
+  // explicit development/test runtime may fall back now.
+  it("refuses to sign or accept pre-auth tickets with the public fallback outside dev/test", async () => {
+    // Node types declare NODE_ENV as a read-only literal union; the point of
+    // this case is the spellings outside it.
+    const env = process.env as Record<string, string | undefined>;
+    const origNodeEnv = env.NODE_ENV;
+    const origSecret = process.env.NEXTAUTH_SECRET;
+    try {
+      delete process.env.NEXTAUTH_SECRET;
+      // Forged with the exact constant the fallback used to use.
+      const forged = await new SignJWT({ purpose: "2fa" })
+        .setProtectedHeader({ alg: "HS256" })
+        .setSubject("victim@test.dev")
+        .setJti("forged-pass12")
+        .setIssuedAt()
+        .setExpirationTime("5m")
+        .sign(new TextEncoder().encode("pixelduo-dev-secret-change-me"));
+
+      for (const spelling of ["production", "staging", "prod", "Production", ""]) {
+        env.NODE_ENV = spelling;
+        await expect(createPreAuthToken("victim@test.dev")).rejects.toThrow(/NEXTAUTH_SECRET/);
+        // Nor may a ticket forged with the public constant verify: verify()
+        // swallows the signing failure and answers false.
+        expect(await verifyPreAuthToken(forged, "victim@test.dev")).toBe(false);
+      }
+
+      // The explicitly-declared development/test runtime keeps working.
+      env.NODE_ENV = "test";
+      const dev = await createPreAuthToken("dev@test.dev");
+      _resetTwoFaForTests();
+      expect(await verifyPreAuthToken(dev, "dev@test.dev")).toBe(true);
+    } finally {
+      if (origNodeEnv !== undefined) env.NODE_ENV = origNodeEnv;
+      else delete env.NODE_ENV;
+      if (origSecret !== undefined) process.env.NEXTAUTH_SECRET = origSecret;
+      _resetTwoFaForTests();
+    }
   });
 });

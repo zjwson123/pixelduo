@@ -44,11 +44,30 @@ describe("production config assertions", () => {
     expect(() => assertProductionConfig({ ...base, NEXTAUTH_SECRET: "a".repeat(40) })).not.toThrow();
   });
 
-  it("accepts a fully configured deployment and ignores non-production environments", () => {
+  it("accepts a fully configured deployment and ignores development/test environments", () => {
     expect(() => assertProductionConfig(base)).not.toThrow();
     expect(() =>
       assertProductionConfig({ NODE_ENV: "development", NEXTAUTH_SECRET: "change-me" } as NodeJS.ProcessEnv),
     ).not.toThrow();
+    expect(() =>
+      assertProductionConfig({ NODE_ENV: "test", NEXTAUTH_SECRET: "change-me" } as NodeJS.ProcessEnv),
+    ).not.toThrow();
+  });
+
+  // Skipping these assertions must be something a runtime ASKS for. Testing only
+  // for the exact lowercase string "production" meant an entrypoint or compose
+  // override that spelled it "staging"/"prod"/"Production", or set nothing at
+  // all, silently skipped every check below — and, in lib/twofa.ts, the 2FA
+  // ticket signing key with it.
+  it("does not exempt any other NODE_ENV spelling", () => {
+    for (const spelling of ["staging", "prod", "Production", "PRODUCTION", "", undefined]) {
+      // Node types declare NODE_ENV as a read-only literal union; the point of
+      // this case is the spellings outside it.
+      const unconfigured = { NODE_ENV: spelling } as NodeJS.ProcessEnv;
+      expect(() => assertProductionConfig(unconfigured)).toThrow(/NEXTAUTH_SECRET/);
+      // A fully configured deployment passes regardless of the spelling.
+      expect(() => assertProductionConfig({ ...base, NODE_ENV: spelling } as NodeJS.ProcessEnv)).not.toThrow();
+    }
   });
 
   // next-auth derives the cookie's Secure flag and __Secure- prefix from this

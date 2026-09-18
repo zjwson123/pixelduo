@@ -3,6 +3,7 @@ import { prisma } from "../lib/prisma";
 import { fulfillOrder, cycleUsage, revokeOrderCreditsTx, ROLLOVER_RATE } from "../lib/ledger";
 import { createGenerationJob } from "../lib/queue";
 import { downgradeExpiredPlans } from "../lib/rollover";
+import { runExpiry } from "../lib/expiry";
 
 let userId: string;
 let seq = 0;
@@ -58,7 +59,11 @@ describe("subscription carryover and downgrade", () => {
     // cycleUsage takes the cycle's ANCHOR (its end). The tests rewind
     // planRenewsAt into the past, so "now" is the anchor of the ended cycle.
     const usage = await cycleUsage(userId, new Date());
-    expect(usage).toEqual({ granted: 2000, spentNet: 482, revoked: 0, fundingRefId: first.id });
+    expect(usage).toMatchObject({ granted: 2000, spentNet: 482, revoked: 0, fundingRefId: first.id });
+    // The anchor's second source: the funding grant's own expiry, which is what
+    // a renewal reads once the daily downgrade sweep has nulled planRenewsAt
+    // (see the swept-cycle case below).
+    expect(usage.fundingExpiresAt!.getTime()).toBeGreaterThan(Date.now());
 
     const second = await makeOrder("plan", 2000, "pro");
     const before = (await prisma.user.findUniqueOrThrow({ where: { id: userId } })).credits;
@@ -211,6 +216,69 @@ describe("subscription carryover and downgrade", () => {
       where: { userId: gapUser.id, source: "ROLLOVER", refId: plan.id },
     });
     expect(carried.amount).toBe(30);
+  });
+
+  // The renewal path that production actually takes. downgradeExpiredPlans runs
+  // daily and NULLs planRenewsAt (and the expiry sweep zeroes the leftover
+  // quota), so a customer who renews more than a sweep-interval after their
+  // cycle ended — the normal shape of a lapsed subscription — had no anchor left
+  // for the carryover: it computed to 0 while the sweep still took the leftovers.
+  // The cycle's own SUBSCRIPTION grant carries the same instant and survives it,
+  // which is why the anchor now falls back to that grant's expiry.
+  it("still carries 30% of the unused quota when the daily sweeps already ran", async () => {
+    const swept = await prisma.user.create({
+      data: { email: `roll-swept-${Date.now()}@test.dev`, passwordHash: "x", name: "Swept" },
+    });
+    try {
+      const endedAt = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const plan = await prisma.order.create({
+        data: {
+          userId: swept.id,
+          kind: "plan",
+          provider: "mock",
+          amountUsd: 19,
+          credits: 1000,
+          planId: "pro",
+          idempotencyKey: `roll-swept-plan-${Date.now()}`,
+        },
+      });
+      await fulfillOrder(swept.id, plan.id, "plan", 1000, "pro");
+      // The cycle ends: its quota grant expires at the same instant the plan
+      // does (fulfillOrder stamps both with `renew`).
+      await prisma.user.update({ where: { id: swept.id }, data: { planRenewsAt: endedAt } });
+      await prisma.creditGrant.updateMany({
+        where: { userId: swept.id, source: "SUBSCRIPTION" },
+        data: { expiresAt: endedAt },
+      });
+      // Both cron passes run before the customer comes back.
+      await downgradeExpiredPlans();
+      await runExpiry();
+      const lapsed = await prisma.user.findUniqueOrThrow({ where: { id: swept.id } });
+      expect(lapsed.plan).toBe("free");
+      expect(lapsed.planRenewsAt).toBeNull();
+
+      const renewal = await prisma.order.create({
+        data: {
+          userId: swept.id,
+          kind: "plan",
+          provider: "mock",
+          amountUsd: 19,
+          credits: 2000,
+          planId: "pro",
+          idempotencyKey: `roll-swept-renew-${Date.now()}`,
+        },
+      });
+      await fulfillOrder(swept.id, renewal.id, "plan", 2000, "pro");
+      const carried = await prisma.creditGrant.findFirst({
+        where: { userId: swept.id, source: "ROLLOVER", refId: plan.id },
+      });
+      expect(carried?.amount).toBe(Math.floor(1000 * ROLLOVER_RATE));
+      expect(
+        await prisma.creditGrant.count({ where: { userId: swept.id, source: "ROLLOVER", refId: renewal.id } }),
+      ).toBe(0);
+    } finally {
+      await prisma.user.deleteMany({ where: { id: swept.id } });
+    }
   });
 
   it("downgrades expired plans to free and leaves active plans untouched", async () => {

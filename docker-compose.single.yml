@@ -31,7 +31,11 @@ x-appenv: &appenv
   SENTRY_ENVIRONMENT: production
   IMAGE_MODERATION: "1"
   VISION_MODERATION_MODEL: ${VISION_MODERATION_MODEL:-gpt-5.4}
-  VISION_MODERATION_BASE_URL: ${VISION_MODERATION_BASE_URL:-}
+  # The pair is atomic: an audit needs BOTH, and half of one must never be
+  # paired with half of another source (see getVisionConfig). Left empty this
+  # used to guarantee the worker refused to boot — IMAGE_MODERATION is hardcoded
+  # to "1" above, so the moderation gate is requested and unresolvable.
+  VISION_MODERATION_BASE_URL: ${VISION_MODERATION_BASE_URL:?set VISION_MODERATION_BASE_URL (e.g. https://api.modelverse.cn/v1)}
   VISION_MODERATION_API_KEY: ${VISION_MODERATION_API_KEY:?set VISION_MODERATION_API_KEY}
   MODELVERSE_IMAGE_API_KEY: ${MODELVERSE_IMAGE_API_KEY:?set MODELVERSE_IMAGE_API_KEY}
   ARK_IMAGE_API_KEY: ${ARK_IMAGE_API_KEY:?set ARK_IMAGE_API_KEY}

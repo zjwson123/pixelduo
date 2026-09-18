@@ -1,5 +1,5 @@
 import { claimNextJob, completeJob, failJob, heartbeat, recoverStuckJobs, setJobPolling, schedulePoll } from "../lib/queue";
-import { generateImages, laneCountFor, createVideoTask, pollVideoTask, saveRemoteVideo, type ProviderImage } from "../lib/providers";
+import { generateImages, laneCountFor, createVideoTask, pollVideoTask, saveRemoteVideo, mockImageProviderEnabled, type ProviderImage } from "../lib/providers";
 import { modelCost, videoCost } from "../lib/cost";
 import { analyzeAllImagesSequentially, moderationRequested } from "../lib/safety";
 import { getVisionConfig } from "../lib/keys";
@@ -317,6 +317,17 @@ async function main() {
       "[fatal] IMAGE_MODERATION asks for an image audit but no vision config resolves " +
         "(set VISION_MODERATION_API_KEY + VISION_MODERATION_BASE_URL, or unset IMAGE_MODERATION / set it to 0)",
     );
+    process.exit(1);
+  }
+  // Same fail-closed reasoning as the moderation gate above: MOCK_IMAGE_PROVIDER
+  // in a production deployment serves 1×1 stub PNGs for real credits (and
+  // instantly "succeeds" every video). mockImageProviderEnabled() throws in
+  // exactly that configuration, so refusing at boot beats finding out from a
+  // customer's broken images.
+  try {
+    mockImageProviderEnabled();
+  } catch (e) {
+    console.error(`[fatal] ${e instanceof Error ? e.message : String(e)}`);
     process.exit(1);
   }
   console.log(`[worker] PixelDuo media worker started: ${workerId}`);

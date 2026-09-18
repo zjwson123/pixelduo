@@ -54,6 +54,39 @@ async function readJsonCapped(res: Response, maxBytes = MAX_PROVIDER_RESPONSE_BY
   return JSON.parse(await readTextCapped(res, maxBytes)) as Record<string, unknown>;
 }
 
+// Provider task ids come from the provider's own JSON and are stored, logged
+// and interpolated into poll URLs every 10s for up to 30 minutes. A hostile or
+// compromised gateway answering `{"id": "<40 MB string>"}` would otherwise put
+// that string in Job.providerTaskId (an unbounded text column), in ~180 log
+// lines and in a URL rebuilt on every poll — amplification with no useful
+// effect, since a real task id is a UUID. Bounded like errText() bounds every
+// other provider string that reaches us.
+const TASK_ID_MAX = 200;
+function boundedTaskId(raw: unknown, label: string): string {
+  const id = typeof raw === "string" ? raw : "";
+  if (!id || id.length > TASK_ID_MAX) {
+    throw new Error(`${label} returned an unusable task id`);
+  }
+  return id;
+}
+
+// Mock mode is for tests and demos: it returns stub output for real credits, so
+// it must never be reachable from a production deployment by accident. Same
+// gate (and same escape hatch) as lib/payments/index.ts's provider selection:
+// CI and ci-local.sh mark themselves with PAYMENT_ALLOW_MOCK=1. Throwing rather
+// than returning false keeps a misconfigured deployment loud — silently taking
+// the paid path instead would bill the operator for what the operator believed
+// was mock traffic.
+export function mockImageProviderEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  if (env.MOCK_IMAGE_PROVIDER !== "1") return false;
+  if (env.NODE_ENV === "production" && env.PAYMENT_ALLOW_MOCK !== "1") {
+    throw new Error(
+      "mock-image-provider-not-allowed: MOCK_IMAGE_PROVIDER=1 is not allowed in production — it would serve stub images for real credits",
+    );
+  }
+  return true;
+}
+
 // === Image generation ===
 
 async function callWithKeys(
@@ -76,6 +109,15 @@ async function callWithKeys(
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}`, ...(opts?.headers ?? {}) },
         body: JSON.stringify(body),
         signal: controller.signal,
+        // No provider endpoint legitimately redirects, and following one turns a
+        // compromised gateway into a blind SSRF primitive: the follow-up
+        // request is issued from inside our network to an address we never
+        // validated (any host, any port — the isPublicPort allowlist applies to
+        // provider-returned artifact URLs, not here). undici drops the
+        // Authorization header on a cross-origin redirect, so this is SSRF and
+        // internal port probing rather than key theft — still not something a
+        // 307 should be able to trigger. A 3xx now simply fails the call.
+        redirect: "manual",
       });
       // The abort timer must stay armed until the BODY is read, not just until
       // the headers arrive. Disarming it here left the body read unbounded:
@@ -129,7 +171,12 @@ export async function generateWithGpt(
 }
 
 // GPT Image 2 — Edit (image-to-image)
-export async function editWithGpt(prompt: string, imageBase64: string, quality: Quality): Promise<ProviderImage[]> {
+export async function editWithGpt(
+  prompt: string,
+  imageBase64: string,
+  quality: Quality,
+  onImage?: ImageProgress,
+): Promise<ProviderImage[]> {
   const keys = [getModelVerseKey()].filter((k): k is string => Boolean(k));
   if (!keys.length) throw new Error("modelverse key missing");
   // ModelVerse's edits endpoint only accepts multipart/form-data with an
@@ -153,13 +200,24 @@ export async function editWithGpt(prompt: string, imageBase64: string, quality: 
       headers: { Authorization: `Bearer ${key}` },
       body: fd,
       signal: controller.signal,
+      // Same no-redirect rule as callWithKeys.
+      redirect: "manual",
     });
     if (!res.ok) throw new Error(`${res.status}: ${errText(await readTextCapped(res, 64 * 1024))}`);
     const data = await readJsonCapped(res);
     const items = (data.data as Array<Record<string, unknown>> | undefined) ?? [];
     const b64 = items[0]?.b64_json as string | undefined;
     if (!b64) throw new Error("gpt-image-2 edit returned no b64_json");
-    return [{ key: await saveBase64Image(b64), model: "gpt" }];
+    const img = { key: await saveBase64Image(b64), model: "gpt" };
+    // Checkpoint the result like every other image lane. Without this the edit
+    // path was the only one that remembered nothing: a transient failure after
+    // the paid edits call (a watermark bake, a storage read, a lost
+    // completeJob CAS) retried from zero and called the billed endpoint again —
+    // up to maxAttempts paid edits for one charge — and a job that finally
+    // failed for good left the generated object referenced by nothing, since
+    // failJob only reclaims what Job.images checkpointed.
+    if (onImage) await onImage(img);
+    return [img];
   } finally {
     clearTimeout(timer);
   }
@@ -223,7 +281,9 @@ export async function generateWithWanImage(
       content.push({ image: img.startsWith("data:") ? img : `data:image/png;base64,${img}` });
     }
   }
-  const size = modelId === "wan2.7-image-pro" ? "2K" : "2K";
+  // Both wan image models are billed at 2K; `n` is the only size-ish knob the
+  // caller controls.
+  const size = "2K";
   const data = await callWithKeys(
     getAliyunBaseUrl("multimodal-generation"),
     {
@@ -235,9 +295,15 @@ export async function generateWithWanImage(
   );
   // Response format: { output: { choices: [{ message: { content: [{ image: "url" }] }] }] } }
   const choices = (data.output as { choices?: Array<{ message?: { content?: Array<{ image?: string }> } }> } | undefined)?.choices ?? [];
-  for (const choice of choices) {
+  // The loop is bounded by `count`: it walks a provider-supplied array, so a
+  // hostile or garbled response carrying 10^5 items would otherwise drive 10^5
+  // downloads, storage writes and DB rows (each re-serializing Job.images) for
+  // a job the caller was charged `count` images for. Latent while wan is
+  // disabled, live the moment DashScope access is restored.
+  outer: for (const choice of choices) {
     const contentItems = choice.message?.content ?? [];
     for (const item of contentItems) {
+      if (out.length >= count) break outer;
       if (item.image) {
         // Download the image from the temporary URL and store it
         const img = {
@@ -282,12 +348,21 @@ export async function generateImages(input: {
   onImage?: ImageProgress; // checkpoint after each persisted image
 }): Promise<ProviderImage[]> {
   // Mock mode for tests / demos
-  if (process.env.MOCK_IMAGE_PROVIDER === "1") {
+  if (mockImageProviderEnabled()) {
     const tinyPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
     const out: ProviderImage[] = [];
-    const list = [input.model];
+    // Tag each stub with a CONCRETE model, mirroring the real dispatcher. The
+    // mock used to tag them with the requested id, so a "both" job produced
+    // images labelled "both" — and the worker maps every image through
+    // modelCost(img.model), which throws unknown-model:both. Every "both" job
+    // under MOCK_IMAGE_PROVIDER therefore died terminally and refunded, which
+    // is also why the 4N-for-2N over-delivery in the real "both" branch went
+    // unnoticed for so long: the one configuration CI runs could not complete a
+    // "both" job at all. "both" fans out to two lanes, so it emits `count` per
+    // lane exactly like the real branch.
+    const models = input.model === "both" ? ["gpt", "seedream"] : [input.model];
     for (let i = 0; i < input.count; i++) {
-      for (const m of list) {
+      for (const m of models) {
         const img = { key: await saveBase64Image(tinyPng), model: m };
         out.push(img);
         if (input.onImage) await input.onImage(img);
@@ -326,7 +401,7 @@ export async function generateImages(input: {
   switch (input.model) {
     case "gpt":
       if (input.imageBase64) {
-        return editWithGpt(input.prompt, input.imageBase64, input.quality);
+        return editWithGpt(input.prompt, input.imageBase64, input.quality, input.onImage);
       }
       return generateWithGpt(input.prompt, input.quality, input.count, input.onImage);
     case "seedream":
@@ -367,7 +442,7 @@ export async function createVideoTask(input: {
   const model = getModel(input.model);
   if (!model || model.mediaType !== "video") throw new Error(`not-a-video-model:${input.model}`);
 
-  if (process.env.MOCK_IMAGE_PROVIDER === "1") {
+  if (mockImageProviderEnabled()) {
     // Mock: return a fake task id
     return { taskId: `mock-task-${Date.now()}`, model: input.model };
   }
@@ -406,8 +481,7 @@ async function createSeedanceTask(prompt: string, durationSec: number, imageBase
     },
     keys,
   );
-  const taskId = (data as { id?: string }).id;
-  if (!taskId) throw new Error("seedance returned no task id");
+  const taskId = boundedTaskId((data as { id?: unknown }).id, "seedance");
   return { taskId, model: "seedance" };
 }
 
@@ -441,6 +515,8 @@ async function createWanVideoTask(
         parameters: { duration: durationSec, resolution: "720P" },
       }),
       signal: controller.signal,
+      // Same no-redirect rule as callWithKeys.
+      redirect: "manual",
     });
     const data = (await readJsonCapped(res, 1024 * 1024)) as { output?: { task_id?: string }; code?: string; message?: string };
     if (!res.ok || !data.output?.task_id) {
@@ -448,7 +524,8 @@ async function createWanVideoTask(
         `wan video task creation failed: ${errText(String(data.code ?? res.status))} ${errText(data.message ?? "")}`,
       );
     }
-    return { taskId: data.output.task_id, model: modelId === "wan2.7-t2v-2026-06-12" ? "wan-t2v" : "wan-i2v" };
+    const taskId = boundedTaskId(data.output.task_id, "wan video");
+    return { taskId, model: modelId === "wan2.7-t2v-2026-06-12" ? "wan-t2v" : "wan-i2v" };
   } finally {
     clearTimeout(timer);
   }
@@ -462,7 +539,7 @@ export interface VideoTaskStatus {
 }
 
 export async function pollVideoTask(model: string, taskId: string): Promise<VideoTaskStatus> {
-  if (process.env.MOCK_IMAGE_PROVIDER === "1") {
+  if (mockImageProviderEnabled()) {
     // Mock: simulate succeeded after first poll
     return { status: "succeeded", videoUrl: "mock://video.mp4" };
   }
@@ -501,7 +578,7 @@ async function pollSeedanceTask(taskId: string): Promise<VideoTaskStatus> {
     // within the provider host.
     const res = await fetch(
       `https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks/${encodeURIComponent(taskId)}`,
-      { headers: { Authorization: `Bearer ${key}` }, signal: controller.signal },
+      { headers: { Authorization: `Bearer ${key}` }, signal: controller.signal, redirect: "manual" },
     );
     // Cancel the body before returning: an undici response whose body is never
     // read keeps its socket out of the pool until GC. This runs every
@@ -542,7 +619,7 @@ async function pollWanVideoTask(taskId: string): Promise<VideoTaskStatus> {
     // Percent-encoded for the same reason as pollSeedanceTask above.
     const res = await fetch(
       `https://dashscope.aliyuncs.com/api/v1/tasks/${encodeURIComponent(taskId)}`,
-      { headers: { Authorization: `Bearer ${key}` }, signal: controller.signal },
+      { headers: { Authorization: `Bearer ${key}` }, signal: controller.signal, redirect: "manual" },
     );
     if (!res.ok) {
       await res.body?.cancel().catch(() => undefined);
@@ -570,8 +647,12 @@ async function pollWanVideoTask(taskId: string): Promise<VideoTaskStatus> {
 // (scheme, IP-literal + DNS validation per hop, manual redirects, size cap)
 // lives in fetchPublicBuffer — identical hardening to saveRemoteImage.
 export async function saveRemoteVideo(url: string): Promise<string> {
-  // Mock provider URLs (e2e/CI) — store a stub instead of fetching.
-  if (url.startsWith("mock://")) {
+  // Mock provider URLs (e2e/CI) — store a stub instead of fetching. Gated on the
+  // LOCAL mock flag, not on the URL: keying this on a provider-supplied string
+  // let a hostile or compromised gateway answer a poll with "mock://x" and have
+  // us store 10 bytes of junk under a real key while charging the caller for a
+  // video (the worker then completes the job and delivers a broken file).
+  if (mockImageProviderEnabled() && url.startsWith("mock://")) {
     const { getStorage, newStorageKey } = await import("../storage");
     const key = newStorageKey("mp4");
     await getStorage().put(key, Buffer.from("mock-video"), "video/mp4");

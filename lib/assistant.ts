@@ -91,13 +91,18 @@ async function callAssistantModel(prompt: string, mode: string, modelId: string)
           ...extraBody,
         }),
         signal: controller.signal,
+        // No redirects — see callWithKeys in providers/index.ts.
+        redirect: "manual",
       });
       // Body read inside the armed-timer window — see callWithKeys in
       // providers/index.ts for why clearing it after the headers is not enough.
       if (res.ok) {
         const data = (await readJsonCapped(res, 8 * 1024 * 1024)) as unknown as { choices?: Array<{ message?: { content?: string } }> };
         const text = data.choices?.[0]?.message?.content?.trim();
-        if (text) return { text, offline: false, model: modelId };
+        // Bound what a gateway can hand back: max_tokens is a request, not a
+        // guarantee, and the response body is read up to 8 MB. A real reply is
+        // a prompt expansion (a few hundred tokens), so this is generous.
+        if (text) return { text: text.slice(0, 4000), offline: false, model: modelId };
       } else {
         // Cancel the unread body — see lib/router.ts for why.
         await res.body?.cancel().catch(() => undefined);

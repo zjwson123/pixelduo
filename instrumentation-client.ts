@@ -1,7 +1,13 @@
 import * as Sentry from "@sentry/nextjs";
 
-// Client-side DSN must be public-safe (NEXT_PUBLIC_*); server DSN fallback.
-const dsn = process.env.NEXT_PUBLIC_SENTRY_DSN ?? process.env.SENTRY_DSN;
+// Client-side DSN must be public-safe, i.e. NEXT_PUBLIC_*. There used to be a
+// `?? process.env.SENTRY_DSN` fallback here, which cannot work: Next only
+// inlines NEXT_PUBLIC_* into the browser bundle (the others are property lookups
+// on an env shim that is empty in the browser), so a deployment that set only
+// SENTRY_DSN — which is what docs/deploy.md and both prod composes do — got a
+// client SDK that silently never initialised. Set NEXT_PUBLIC_SENTRY_DSN for
+// browser-side reporting; SENTRY_DSN still covers the server.
+const dsn = process.env.NEXT_PUBLIC_SENTRY_DSN;
 
 export const isSentryEnabled = Boolean(dsn);
 

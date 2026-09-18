@@ -17,6 +17,10 @@ export function isPermanentProviderError(msg: string): boolean {
     /model not exist/i.test(msg) ||
     /safety system|content (policy|moderation)|flagged.*moderation/i.test(msg) ||
     /unknown-model|model-not-supported|not-a-video-model|model-disabled/i.test(msg) ||
+    // Delivery refused because the funding order was refunded mid-flight (see
+    // completeJob): retrying re-bills the provider for output that will be
+    // refused again.
+    /job-cancelled-refunded-order/i.test(msg) ||
     /fetch failed|blocked-internal|blocked-port|invalid-url|download-too-large|too-many-redirects|download failed/i.test(
       msg,
     )

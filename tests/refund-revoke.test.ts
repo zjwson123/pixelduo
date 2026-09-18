@@ -7,7 +7,7 @@ import {
   cycleUsage,
   ROLLOVER_RATE,
 } from "../lib/ledger";
-import { createGenerationJob, createMediaJob, failJob } from "../lib/queue";
+import { createGenerationJob, createMediaJob, completeJob, failJob } from "../lib/queue";
 import { videoCost } from "../lib/cost";
 
 // Regression cover for the order-refund ↔ job-refund interaction. A job holds
@@ -306,5 +306,73 @@ describe("carryover ignores clawed-back quota", () => {
     });
     expect(rollover).toHaveLength(1);
     expect(rollover[0].amount).toBe(Math.floor(2000 * ROLLOVER_RATE));
+  });
+});
+
+// The other half of the in-flight window. revokeOrderCreditsTx can only take
+// credits that are still `remaining`, and a job holds its own pre-auth as
+// remaining = 0 for as long as it runs — so a refund that lands while the job is
+// in flight leaves nothing to claw back, and the job would then complete and
+// deliver: money returned AND the output kept, for work the operator was billed
+// for after the refund. completeJob is the single delivery point and re-checks
+// the funding order there.
+describe("delivery is refused when the funding order was refunded mid-flight", () => {
+  it("fails a job whose pre-auth came from a refunded order", async () => {
+    const userId = await makeUser("refund-gate");
+    created.push(userId);
+    const order = await makePaidPackOrder(userId, 500);
+    const { job } = await createMediaJob({
+      userId,
+      model: "gpt",
+      mediaType: "image",
+      quality: "medium",
+      count: 1,
+      prompt: "deliver me after the chargeback",
+      maxAttempts: 1,
+    });
+    // The worker picks the job up.
+    await prisma.job.update({
+      where: { id: job.id },
+      data: { status: "running", heartbeatAt: new Date() },
+    });
+    // Chargeback lands while the provider call is still running.
+    await prisma.$transaction(async (tx) => {
+      await tx.order.update({ where: { id: order.id }, data: { status: "refunded" } });
+      await revokeOrderCreditsTx(tx, order);
+    });
+
+    await expect(
+      completeJob(job.id, [
+        { url: "img/x.png", model: "gpt", quality: "medium", credits: 8, prompt: "deliver me" },
+      ]),
+    ).rejects.toThrow(/job-cancelled-refunded-order/);
+
+    const after = await prisma.job.findUniqueOrThrow({ where: { id: job.id } });
+    expect(after.status).toBe("running"); // nothing was delivered
+    expect(await prisma.image.count({ where: { jobId: job.id } })).toBe(0);
+  });
+
+  it("still delivers a job funded by an order that is still paid", async () => {
+    const userId = await makeUser("refund-gate-ok");
+    created.push(userId);
+    await makePaidPackOrder(userId, 500);
+    const { job } = await createMediaJob({
+      userId,
+      model: "gpt",
+      mediaType: "image",
+      quality: "medium",
+      count: 1,
+      prompt: "normal delivery",
+      maxAttempts: 1,
+    });
+    await prisma.job.update({
+      where: { id: job.id },
+      data: { status: "running", heartbeatAt: new Date() },
+    });
+    await completeJob(job.id, [
+      { url: "img/y.png", model: "gpt", quality: "medium", credits: 8, prompt: "normal delivery" },
+    ]);
+    expect((await prisma.job.findUniqueOrThrow({ where: { id: job.id } })).status).toBe("done");
+    expect(await prisma.image.count({ where: { jobId: job.id } })).toBe(1);
   });
 });

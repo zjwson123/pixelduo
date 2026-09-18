@@ -18,7 +18,14 @@ const PLACEHOLDER_SECRETS = [
 ];
 
 export function assertProductionConfig(env: NodeJS.ProcessEnv = process.env): void {
-  if (env.NODE_ENV !== "production") return;
+  // Fail closed on the ENVIRONMENT SPELLING, not on one exact string. These
+  // assertions used to run only when NODE_ENV was exactly "production", so a
+  // deployment that spelled it any other way — "staging", "prod", or left it
+  // unset in a custom entrypoint — skipped every check below silently, taking
+  // NEXTAUTH_SECRET/SMTP_URL/NEXTAUTH_URL enforcement with it (and, in
+  // lib/twofa.ts, the 2FA ticket signing key). Skipping is now something a
+  // runtime must ASK for by declaring itself development or test.
+  if (env.NODE_ENV === "development" || env.NODE_ENV === "test") return;
 
   // NEXTAUTH_SECRET signs every session JWT and the 2FA pre-auth ticket, so a
   // placeholder (public knowledge — it ships in .env.example) or a low-entropy

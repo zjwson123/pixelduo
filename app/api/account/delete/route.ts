@@ -6,16 +6,14 @@ import { checkpointKeys } from "@/lib/queue";
 import { verifyTotp, useBackupCode } from "@/lib/twofa";
 import bcrypt from "bcryptjs";
 
-const schema = z
-  .object({
-    confirm: z.literal(true),
-    // Irreversible erasure requires re-authentication: a hijacked cookie alone
-    // must not destroy the account (2FA-enabled accounts need the 2nd factor).
-    password: z.string().min(1).max(100),
-    token: z.string().min(6).max(20).optional(),
-    backupCode: z.string().min(8).max(40).optional(),
-  })
-  .refine((v) => v.token || v.backupCode, { message: "invalid-input" });
+const schema = z.object({
+  confirm: z.literal(true),
+  // Irreversible erasure requires re-authentication: a hijacked cookie alone
+  // must not destroy the account (2FA-enabled accounts need the 2nd factor).
+  password: z.string().min(1).max(100),
+  token: z.string().min(6).max(20).optional(),
+  backupCode: z.string().min(8).max(40).optional(),
+});
 
 // GDPR / PIPL erasure: deletes the account and all related data + stored image files.
 export async function POST(req: Request) {
@@ -35,7 +33,15 @@ export async function POST(req: Request) {
       select: { passwordHash: true, totpSecret: true, totpEnabled: true },
     });
     if (!(await bcrypt.compare(body.password, user.passwordHash))) return fail(new Error("invalid-password"));
+    // The second factor is demanded only from accounts that have one, and it is
+    // demanded HERE rather than in the schema because the schema cannot see the
+    // account. Requiring it unconditionally was worse than useless: for a
+    // non-2FA account the token was never verified (this branch is not taken),
+    // so any 6+ character string passed — while the documented erasure body
+    // (`{confirm,password}`, docs/compliance/privacy.md) was rejected as
+    // invalid input, making the documented call impossible for those users.
     if (user.totpEnabled && user.totpSecret) {
+      if (!body.token && !body.backupCode) return fail(new Error("2fa-code-required"));
       const ok2 = body.token
         ? verifyTotp(user.totpSecret, body.token)
         : await useBackupCode(userId, body.backupCode!);
