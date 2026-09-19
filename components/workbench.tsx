@@ -169,6 +169,7 @@ const LOCALE_STRINGS: Record<Locale, {
   latestResults: string; recentImages: string; total: string; editResult: string; videoResult: string;
   genFailed: string; videoFailed: string; charged: string; download: string;
   galManage: string; galDone: string; galSelectAll: string; galClear: string; galDelete: string; galDeleted: string;
+  galAll: string; galImages: string; galVideos: string; galNewest: string; galOldest: string;
   backToWorkbench: string; plansCredits: string; signup: string; checkin: string; dailyCheckin: string;
   topupPacks: string; validMonths: string; currentPlan: string; choose: string; free: string;
   checkoutTitle: string; item: string; creditsLabel: string; totalLabel: string; paymentMethod: string;
@@ -207,6 +208,7 @@ const LOCALE_STRINGS: Record<Locale, {
     latestResults: "Latest results", recentImages: "Recent images", total: "total", editResult: "Edit result", videoResult: "Video result",
     genFailed: "Generation failed", videoFailed: "Video generation failed", charged: "Charged", download: "Download",
     galManage: "Manage", galDone: "Done", galSelectAll: "Select all", galClear: "Clear", galDelete: "Delete", galDeleted: "items deleted",
+    galAll: "All", galImages: "Images", galVideos: "Videos", galNewest: "Newest", galOldest: "Oldest",
     backToWorkbench: "← Back to workbench", plansCredits: "Plans & credits",
     signup: "Signup bonus", checkin: "Daily check-in", dailyCheckin: "daily check-in +2",
     topupPacks: "Top-up packs", validMonths: "valid 12 months", currentPlan: "Current plan", choose: "Choose", free: "Free",
@@ -249,6 +251,7 @@ const LOCALE_STRINGS: Record<Locale, {
     latestResults: "最新结果", recentImages: "最近图片", total: "共", editResult: "编辑结果", videoResult: "视频结果",
     genFailed: "生成失败", videoFailed: "视频生成失败", charged: "已扣", download: "下载",
     galManage: "管理", galDone: "完成", galSelectAll: "全选", galClear: "取消全选", galDelete: "删除所选", galDeleted: "项已删除",
+    galAll: "全部", galImages: "图片", galVideos: "视频", galNewest: "最新", galOldest: "最早",
     backToWorkbench: "← 返回工作台", plansCredits: "定价与积分",
     signup: "注册奖励", checkin: "每日签到", dailyCheckin: "每日签到 +2",
     topupPacks: "积分包", validMonths: "12 个月有效", currentPlan: "当前套餐", choose: "选择", free: "免费",
@@ -367,6 +370,12 @@ export function Workbench() {
   // Gallery manage mode: multi-select ids for batch deletion.
   const [galManaging, setGalManaging] = useState(false);
   const [galSelected, setGalSelected] = useState<Set<string>>(new Set());
+  // Gallery list filters. refreshGallery's identity must stay stable (it sits
+  // in the mount effect's dep array alongside other one-shot refreshes), so
+  // the current filter lives in a ref the callback reads at call time.
+  const [galType, setGalType] = useState<"all" | "image" | "video">("all");
+  const [galSort, setGalSort] = useState<"newest" | "oldest">("newest");
+  const galFilterRef = useRef<{ type: "all" | "image" | "video"; sort: "newest" | "oldest" }>({ type: "all", sort: "newest" });
   const [ledger, setLedger] = useState<LedgerRow[]>([]);
   const [orders, setOrders] = useState<OrderRow[]>([]);
   const [expiring, setExpiring] = useState<ExpiringCredit[]>([]);
@@ -414,10 +423,24 @@ export function Workbench() {
 
   const refreshGallery = useCallback(async () => {
     try {
-      const data = await api<{ images: GalleryImage[] }>("/api/gallery");
+      const { type, sort } = galFilterRef.current;
+      const params = new URLSearchParams();
+      if (type !== "all") params.set("type", type);
+      if (sort !== "newest") params.set("sort", sort);
+      const qs = params.toString();
+      const data = await api<{ images: GalleryImage[] }>(`/api/gallery${qs ? `?${qs}` : ""}`);
       setGallery(data.images);
     } catch {}
   }, []);
+
+  const setGalleryFilter = (patch: Partial<{ type: "all" | "image" | "video"; sort: "newest" | "oldest" }>) => {
+    galFilterRef.current = { ...galFilterRef.current, ...patch };
+    setGalType(galFilterRef.current.type);
+    setGalSort(galFilterRef.current.sort);
+    // The visible set changes, so any selection may reference hidden items.
+    setGalSelected(new Set());
+    refreshGallery();
+  };
 
   const toggleGalItem = (id: string) => {
     setGalSelected((prev) => {
@@ -1446,21 +1469,41 @@ export function Workbench() {
                 <h1>{t.pageHead.gallery.title}</h1>
                 <p>{t.pageHead.gallery.desc}</p>
               </div>
-              {gallery.length > 0 && (
-                galManaging ? (
-                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
+            </div>
+            {gallery.length > 0 && (
+              <div className="gal-toolbar">
+                <Seg
+                  options={[
+                    { value: "all", label: t.galAll },
+                    { value: "image", label: t.galImages },
+                    { value: "video", label: t.galVideos },
+                  ]}
+                  value={galType}
+                  onChange={(v) => setGalleryFilter({ type: v })}
+                />
+                <Seg
+                  options={[
+                    { value: "newest", label: t.galNewest },
+                    { value: "oldest", label: t.galOldest },
+                  ]}
+                  value={galSort}
+                  onChange={(v) => setGalleryFilter({ sort: v })}
+                />
+                <span className="spacer"></span>
+                {galManaging ? (
+                  <>
                     <button className="chip" onClick={() => setGalSelected(new Set(gallery.map((g) => g.id)))}>{t.galSelectAll}</button>
                     <button className="chip" onClick={() => setGalSelected(new Set())}>{t.galClear}</button>
                     <button className="chip" style={galSelected.size > 0 ? { background: "var(--red)", borderColor: "var(--red)", color: "#fff" } : undefined} disabled={galSelected.size === 0} onClick={deleteGallerySelected}>
                       {t.galDelete}{galSelected.size > 0 ? ` (${galSelected.size})` : ""}
                     </button>
                     <button className="chip" onClick={() => { setGalManaging(false); setGalSelected(new Set()); }}>{t.galDone}</button>
-                  </div>
+                  </>
                 ) : (
                   <button className="chip" onClick={() => setGalManaging(true)}>{t.galManage}</button>
-                )
-              )}
-            </div>
+                )}
+              </div>
+            )}
             {gallery.length === 0 ? (
               <div className="card"><div className="empty"><span className="serif">Nothing here yet</span><span>{locale === "zh" ? "生成的图片会出现在这里。" : "Generated images will appear here."}</span></div></div>
             ) : (

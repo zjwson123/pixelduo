@@ -3,18 +3,38 @@ import { requireUserId, ok, fail, enforceRateLimit, enforceUserRateLimit, readBo
 import { prisma } from "@/lib/prisma";
 import { serveUserUrl } from "@/lib/store";
 import { getStorage } from "@/lib/storage";
+import { getAllModels } from "@/lib/model-registry";
 
-export async function GET() {
+const listSchema = z.object({
+  type: z.enum(["all", "image", "video"]).default("all"),
+  sort: z.enum(["newest", "oldest"]).default("newest"),
+});
+
+export async function GET(req: Request) {
   try {
     const userId = await requireUserId();
+    const params = new URL(req.url).searchParams;
+    const { type, sort } = listSchema.parse({ type: params.get("type") ?? undefined, sort: params.get("sort") ?? undefined });
+    // Registry-derived, including disabled models: history keeps rows from
+    // models that have since been turned off. Unknown legacy model ids fall
+    // into "image" (notIn), which keeps them visible under the default view.
+    const videoModelIds = getAllModels().filter((m) => m.mediaType === "video").map((m) => m.id);
     const rows = await prisma.image.findMany({
-      where: { userId },
-      orderBy: { createdAt: "desc" },
+      where: {
+        userId,
+        ...(type === "video"
+          ? { model: { in: videoModelIds } }
+          : type === "image"
+            ? { model: { notIn: videoModelIds } }
+            : {}),
+      },
+      orderBy: { createdAt: sort === "oldest" ? "asc" : "desc" },
       take: 60,
     });
     const served = rows.map((i) => ({ ...i, url: serveUserUrl(i.url) }));
     return ok({ images: served });
   } catch (e) {
+    if (e instanceof z.ZodError) return fail(zodMessage(e));
     return fail(e);
   }
 }

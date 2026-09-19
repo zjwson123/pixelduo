@@ -331,6 +331,8 @@ img { display: block; }
 .gallery-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 16px; }
 .gal-card { overflow: hidden; }
 .gal-card img { width: 100%; aspect-ratio: 1; object-fit: cover; }
+.gal-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+.gal-toolbar .seg button { flex: 0 0 auto; padding: 6px 12px; }
 /* Manage (multi-select delete) mode */
 .gal-card.manage { position: relative; cursor: pointer; }
 .gal-card.sel { outline: 2px solid var(--indigo); outline-offset: -2px; }
