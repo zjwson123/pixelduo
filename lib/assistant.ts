@@ -49,7 +49,10 @@ async function callAssistantModel(prompt: string, mode: string, modelId: string)
     case "deepseek": {
       apiKey = getDeepSeekKey();
       apiUrl = `${getDeepSeekBaseUrl()}/chat/completions`;
-      modelName = "deepseek-v4-flash";
+      // "deepseek-flash" is the official id for v4.1-flash — the /models
+      // list (probed 2026-09-19) exposes deepseek-flash + deepseek-v4-pro;
+      // the old "deepseek-v4-flash" id is gone.
+      modelName = "deepseek-flash";
       extraBody = { thinking: { type: "disabled" } };
       break;
     }

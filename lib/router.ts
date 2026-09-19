@@ -50,7 +50,7 @@ export async function routePrompt(prompt: string): Promise<RoutingResult> {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
         body: JSON.stringify({
-          model: "deepseek-v4-flash",
+          model: "deepseek-flash",
           messages: [
             { role: "system", content: buildSystemPrompt() },
             { role: "user", content: prompt },
