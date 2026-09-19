@@ -24,7 +24,10 @@ const origRedisUrl = process.env.REDIS_URL;
 let redisUp = false;
 
 describe("production config assertions", () => {
-  const secret = "5c1f8e2a94b7d03f6ae4c81d2795bf30e6a1c47d8b92f650";
+  // Deliberately NOT the literal CI/ci-local.sh use: that value is published in
+  // this repository and assertProductionConfig now rejects it for a real
+  // deployment (tests/pass13-hardening.test.ts covers that case).
+  const secret = "3f9c1d47a8b25e60c7d1f4a9b3e85c20d6f71a4e9c8b2350";
   // A production deployment that satisfies every startup check.
   const base = {
     NODE_ENV: "production",

@@ -1,3 +1,9 @@
+# Build-context security boundary. `next build` resolves its trace root to the
+# WHOLE project root — lib/storage.ts builds a cwd-relative path from
+# LOCAL_STORAGE_DIR — so .next/standalone (and the web image built from it) picks
+# up everything sitting next to the source, and the worker image gets the same
+# tree verbatim via `COPY . .`. Anything present here at build time ships in the
+# image unless it is excluded in THIS file: keep it tight.
 node_modules
 .next
 .git
@@ -19,3 +25,12 @@ playwright-report
 coverage
 research/darktest
 designs/pixelduo/preview
+# Generated user content (rendered images, cached outputs): runtime output, not
+# source. `.gitignore` lists it for the same reason — one deployment's users'
+# images must not be baked into an image that ships anywhere else.
+public/generated
+# Build/test output, regenerated on every build.
+*.log
+*.tsbuildinfo
+out
+dist

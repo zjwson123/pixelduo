@@ -1,5 +1,5 @@
 import { requireUserId, ok, fail } from "@/lib/api";
-import { getJobForUser } from "@/lib/queue";
+import { deliveredVideoSeconds, getJobForUser } from "@/lib/queue";
 import { serveUserUrl } from "@/lib/store";
 
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -27,7 +27,9 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
         count: job.count,
         prompt: job.prompt,
         costCredits: job.costCredits,
-    durationSec: job.durationSec,
+        // Delivered length for extend jobs (original + chained segments) — the
+        // client's 30s-cap arithmetic reads this field, not the segment length.
+        durationSec: job.extendOfJobId ? await deliveredVideoSeconds(job.id) : job.durationSec,
         images: served,
         error: job.error,
         createdAt: job.createdAt,

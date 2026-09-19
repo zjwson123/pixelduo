@@ -206,8 +206,23 @@ export async function cycleUsageTx(
   // counted in `granted`) did the same — both in the customer's disfavour.
   // Scoping to the order that actually funded this cycle's quota keeps the
   // refunded-plan protection while dropping the collateral damage.
+  //
+  // The REVOKE rows are NOT a sufficient witness for "this cycle was clawed
+  // back": revokeOrderCreditsTx only writes one when a spendable remainder was
+  // still there to take, and the daily expiry sweep zeroes the remainder
+  // (remaining: 0) while leaving `amount` untouched. A subscription refunded
+  // after its cycle lapsed — the natural shape of "refund the month I forgot
+  // to cancel" — therefore recorded NO REVOKE row at all, and this measurement
+  // read the swept remainder as untouched, unspent quota: the next purchase
+  // paid out 30% carryover on a cycle the merchant was never paid for, every
+  // cycle. Read the funding order's status instead, which is the durable fact.
   let revoked = 0;
-  if (cycleOrderIds.size) {
+  const fundingOrder = funding?.refId
+    ? await tx.order.findUnique({ where: { id: funding.refId }, select: { status: true } })
+    : null;
+  if (fundingOrder?.status === "refunded") {
+    revoked = granted;
+  } else if (cycleOrderIds.size) {
     const revokedRows = await tx.ledgerEntry.findMany({
       where: { userId, type: "REVOKE", refId: { in: [...cycleOrderIds] } },
       select: { creditsDelta: true },
@@ -288,6 +303,8 @@ export async function spendCreditsTx(
 // window is real — a job holds its credits as remaining=0 for as long as it is
 // queued/running (up to the video hard timeout), so revokeOrderCreditsTx finds
 // nothing to revoke and the later failure refund used to hand it all back.
+// The replacement grant minted for the expired portion inherits the ref of the
+// grant it replaces, so that protection survives the sweep too (see below).
 export async function refundCreditsTx(
   tx: Prisma.TransactionClient,
   userId: string,
@@ -332,20 +349,34 @@ export async function refundCreditsTx(
         ).map((o) => o.id)
       : [],
   );
-  let expiredTotal = 0;
+  // The expired/vanished portion is replaced by a fresh non-expiring grant,
+  // and it must carry the PROVENANCE OF THE GRANT IT REPLACES rather than the
+  // job's own ref. Stamping it with the job (refType "job", refId jobId) made
+  // the replacement invisible to revokeOrderCreditsTx, which matches on
+  // refId = order.id: credits from a failed job whose funding grant expired
+  // while the job sat in retries became permanently order-detached, so a later
+  // chargeback on the order that funded them found nothing to take — money
+  // refunded, credits kept. One grant per distinct source ref keeps the amount
+  // attributable: a job that straddled two orders' credits must not collapse
+  // them into a single lump that only one of the refunds can reach.
+  const expiredByRef = new Map<string, { refType: string | null; refId: string | null; amount: number }>();
   let revokedTotal = 0;
   for (const c of consumption) {
     const row = rows.find((r) => r.id === c.grantId);
-    if (!row) {
-      expiredTotal += c.amount;
-      continue;
-    }
-    if (row.refType === "order" && row.refId && refundedOrders.has(row.refId)) {
+    // A vanished grant has no provenance left to inherit — fall back to the
+    // caller's ref (the job), which is all that is known.
+    const ref = row
+      ? { refType: row.refType ?? null, refId: row.refId ?? null }
+      : { refType: refType ?? null, refId: refId ?? null };
+    if (row && row.refType === "order" && row.refId && refundedOrders.has(row.refId)) {
       revokedTotal += c.amount;
       continue;
     }
-    if (row.expiresAt && row.expiresAt.getTime() <= Date.now()) {
-      expiredTotal += c.amount;
+    if (!row || (row.expiresAt && row.expiresAt.getTime() <= Date.now())) {
+      const key = `${ref.refType ?? ""}|${ref.refId ?? ""}`;
+      const bucket = expiredByRef.get(key) ?? { ...ref, amount: 0 };
+      bucket.amount += c.amount;
+      expiredByRef.set(key, bucket);
       continue;
     }
     await tx.creditGrant.update({
@@ -353,16 +384,16 @@ export async function refundCreditsTx(
       data: { remaining: { increment: c.amount } },
     });
   }
-  if (expiredTotal > 0) {
+  for (const bucket of expiredByRef.values()) {
     await tx.creditGrant.create({
       data: {
         userId,
         source: "REFUND",
-        amount: expiredTotal,
-        remaining: expiredTotal,
+        amount: bucket.amount,
+        remaining: bucket.amount,
         expiresAt: null,
-        refType: refType ?? null,
-        refId: refId ?? null,
+        refType: bucket.refType,
+        refId: bucket.refId,
       },
     });
   }

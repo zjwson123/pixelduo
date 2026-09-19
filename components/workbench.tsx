@@ -875,7 +875,17 @@ export function Workbench() {
       refreshLedger();
       refreshOrders();
     } catch (e) {
-      setToast(e instanceof Error ? e.message : "Checkout failed");
+      const raw = e instanceof Error ? e.message : "";
+      // Checkout now requires a verified mailbox (it mints an order row and a
+      // provider checkout session per call), so the bare string from the API
+      // needs saying properly here.
+      setToast(
+        raw === "verify-email-required"
+          ? locale === "zh"
+            ? "请先完成邮箱验证，再购买积分（验证邮件已发送）"
+            : "Verify your email before buying credits — check your inbox."
+          : raw || "Checkout failed",
+      );
     } finally {
       setCheckoutBusy(false);
     }

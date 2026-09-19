@@ -2,18 +2,25 @@ import type { PaymentProvider } from "./types";
 import { MockProvider } from "./mock";
 import { StripeProvider } from "./stripe";
 import { PaddleProvider } from "./paddle";
+import { isProductionRuntime } from "../runtime-env";
 
 let cached: PaymentProvider | null | undefined;
 
 // Production must never silently fall back to the unsigned mock provider.
-// If PAYMENT_PROVIDER is unset or "mock" while NODE_ENV=production, throw
+// If PAYMENT_PROVIDER is unset or "mock" in a production runtime, throw
 // instead of allowing unauthenticated webhook fulfillment. CI (ci-local.sh)
 // sets PAYMENT_ALLOW_MOCK=1 to test the checkout flow against a production
 // build without a real provider.
+//
+// "Production" is the shared runtime predicate (lib/runtime-env.ts), not an
+// exact `NODE_ENV === "production"` string test: a deployment that spelled it
+// "staging" — or left it unset in a custom entrypoint — failed that test, took
+// .env.example's shipped PAYMENT_PROVIDER default, and fulfilled orders inline
+// with no payment at all.
 function resolvePaymentProviderName(): string {
   const name = process.env.PAYMENT_PROVIDER ?? "";
   if (!name || name === "mock") {
-    if (process.env.NODE_ENV === "production" && process.env.PAYMENT_ALLOW_MOCK !== "1") {
+    if (isProductionRuntime() && process.env.PAYMENT_ALLOW_MOCK !== "1") {
       throw new Error(
         "PAYMENT_PROVIDER=mock is not allowed in production — set to 'stripe' or 'paddle'",
       );

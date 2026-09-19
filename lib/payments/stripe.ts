@@ -1,4 +1,5 @@
 import Stripe from "stripe";
+import { isProductionRuntime } from "../runtime-env";
 import {
   IGNORED_WEBHOOK,
   type CheckoutSession,
@@ -21,16 +22,19 @@ export class StripeProvider implements PaymentProvider {
     if (!opts?.stripe && !key) {
       throw new Error("STRIPE_SECRET_KEY is required when PAYMENT_PROVIDER=stripe");
     }
-    // A test-mode key in production would let test-card payments (4242…)
-    // fulfill real credits through genuinely signed webhooks — fail closed.
-    if (process.env.NODE_ENV === "production" && !opts?.stripe && key && !key.startsWith("sk_live_")) {
-      throw new Error("STRIPE_SECRET_KEY must be a live-mode key (sk_live_…) when NODE_ENV=production");
+    // A test-mode key in a production deployment would let test-card payments
+    // (4242…) fulfill real credits through genuinely signed webhooks — fail
+    // closed. The predicate is the shared runtime one (lib/runtime-env.ts), not
+    // an exact "production" string test that a differently-spelled NODE_ENV
+    // slipped past.
+    if (isProductionRuntime() && !opts?.stripe && key && !key.startsWith("sk_live_")) {
+      throw new Error("STRIPE_SECRET_KEY must be a live-mode key (sk_live_…) in production");
     }
     // A missing webhook secret makes every verification fail (forgery-safe),
     // but checkout would keep accepting real money whose orders can never
     // fulfill — same fail-at-boot policy as the live-key check above.
     const secret = opts?.webhookSecret ?? process.env.STRIPE_WEBHOOK_SECRET;
-    if (process.env.NODE_ENV === "production" && !opts?.stripe && !secret) {
+    if (isProductionRuntime() && !opts?.stripe && !secret) {
       throw new Error("STRIPE_WEBHOOK_SECRET is required when PAYMENT_PROVIDER=stripe in production");
     }
     this.webhookSecret = secret ?? "";

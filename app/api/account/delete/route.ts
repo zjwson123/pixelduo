@@ -30,9 +30,20 @@ export async function POST(req: Request) {
     const body = schema.parse(JSON.parse(bodyRaw.raw));
     const user = await prisma.user.findUniqueOrThrow({
       where: { id: userId },
-      select: { passwordHash: true, totpSecret: true, totpEnabled: true },
+      select: { passwordHash: true, totpSecret: true, totpEnabled: true, role: true },
     });
     if (!(await bcrypt.compare(body.password, user.passwordHash))) return fail(new Error("invalid-password"));
+    // The last admin may not erase itself: /admin would become unreachable by
+    // anyone (both admin-side mutations refuse to target the caller, so no
+    // in-app path could mint a replacement) and recovery would need the
+    // operator script. The invariant is enforced in three other places —
+    // admin/users/[id] DELETE, the role route, and scripts/promote-admin.ts —
+    // and self-service erasure is the fourth way to delete a User row. The
+    // `cannot-` prefix is what fail() maps to a 400 (api-status.test.ts).
+    if (user.role === "admin") {
+      const admins = await prisma.user.count({ where: { role: "admin" } });
+      if (admins <= 1) return fail(new Error("cannot-delete-last-admin: promote another admin first"));
+    }
     // The second factor is demanded only from accounts that have one, and it is
     // demanded HERE rather than in the schema because the schema cannot see the
     // account. Requiring it unconditionally was worse than useless: for a

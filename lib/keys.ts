@@ -43,6 +43,14 @@ export function getModelVerseKey(): string | undefined {
   return process.env.MODELVERSE_IMAGE_API_KEY || firstKey("modelverse");
 }
 
+// Ark (Volcengine) image edits. The credential may come from env or from the
+// cc-proxy "ark" gateway, while the endpoint can ONLY come from that same
+// operator-owned gateway — and only when it looks like an image endpoint; the
+// gateway's usual base_url is Ark's /api/coding/v1 (a chat endpoint), which is
+// why that gate exists. There is no cross-vendor pairing to fix here the way
+// there was for vision (where a name-matching heuristic picked the key up from
+// a DIFFERENT vendor's gateway): both halves are the operator's own Ark
+// configuration, and the fallback below is Ark's own host.
 export function getArkKey(): string | undefined {
   return process.env.ARK_IMAGE_API_KEY || firstKey("ark");
 }
@@ -95,27 +103,45 @@ export function getAliyunBaseUrl(service: "multimodal-generation" | "video-synth
 // modelverse key is deliberately NOT used: it is not valid on
 // api.deepseek.com, and modelverse delisted deepseek models anyway
 // (probed 2026-08-22: "model [deepseek-v4-flash] is offline").
-export function getDeepSeekKey(): string | undefined {
-  if (process.env.DEEPSEEK_API_KEY) return process.env.DEEPSEEK_API_KEY;
+//
+// Credential and endpoint are resolved as ONE pair, from ONE source. Reading
+// them independently — the key from the first name-matching gateway that has a
+// key, the base URL from the first that has a base_url, or an env override on
+// only one side — pairs halves that were never meant to travel together:
+// DEEPSEEK_BASE_URL=https://relay.partner.example/v1 (documented in
+// .env.example) with the key coming from ~/.cc-proxy/config.json, or two
+// differently-named deepseek gateways each supplying half, sends a live
+// credential to a host chosen by the other source. This is the same rule
+// getVisionConfig below enforces, and the same failure it was written for.
+function deepSeekSource(): { key: string; baseUrl: string } | null {
+  const trim = (u: string) => u.replace(/\/+$/, "");
+  const envKey = process.env.DEEPSEEK_API_KEY || undefined;
+  const envBase = process.env.DEEPSEEK_BASE_URL || undefined;
+  if (envKey || envBase) {
+    // Atomic, the way every other pair in this file is: a partial override is
+    // a misconfiguration, not an invitation to borrow the missing half.
+    if (envKey && envBase) return { key: envKey, baseUrl: trim(envBase) };
+    return null;
+  }
   const cfg = loadCcProxyConfig();
   for (const [name, gw] of Object.entries(cfg?.gateways ?? {})) {
-    if (/deepseek|ds-/i.test(name)) {
-      const k = gw.api_keys?.find((x) => x.length > 0);
-      if (k) return k;
-    }
+    if (!/deepseek|ds-/i.test(name)) continue;
+    const key = gw.api_keys?.find((k) => k.length > 0);
+    if (!key) continue;
+    // The same gateway supplies the endpoint when it declares one; otherwise
+    // the vendor default, which is still DeepSeek's own host.
+    return { key, baseUrl: gw.base_url ? trim(gw.base_url) : "https://api.deepseek.com" };
   }
-  return undefined;
+  return null;
+}
+
+export function getDeepSeekKey(): string | undefined {
+  return deepSeekSource()?.key;
 }
 
 // Chat-completions base for DeepSeek (no trailing slash, no path).
 export function getDeepSeekBaseUrl(): string {
-  const trim = (u: string) => u.replace(/\/+$/, "");
-  if (process.env.DEEPSEEK_BASE_URL) return trim(process.env.DEEPSEEK_BASE_URL);
-  const cfg = loadCcProxyConfig();
-  for (const [name, gw] of Object.entries(cfg?.gateways ?? {})) {
-    if (/deepseek|ds-/i.test(name) && gw.base_url) return trim(gw.base_url);
-  }
-  return "https://api.deepseek.com";
+  return deepSeekSource()?.baseUrl ?? "https://api.deepseek.com";
 }
 
 export interface VisionConfig {

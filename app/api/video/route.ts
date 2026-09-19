@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { zodMessage, requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
 import { checkPrompt } from "@/lib/safety";
-import { createMediaJob } from "@/lib/queue";
+import { createMediaJob, deliveredVideoSeconds } from "@/lib/queue";
 import { getStorage, newStorageKey } from "@/lib/storage";
 import { enabledVideoModelIds, getModel, getVideoModels, modelEnum } from "@/lib/model-registry";
 import { randomUUID } from "crypto";
@@ -70,7 +70,7 @@ export async function POST(req: Request) {
       if (!srcInfo || srcInfo.gateway !== "ark") {
         return fail(new Error("invalid-input: only Ark video models can be extended"));
       }
-      const srcDur = src.durationSec;
+      const srcDur = await deliveredVideoSeconds(src.id);
       if (!srcDur || srcDur < 1) return fail(new Error("invalid-input: source video duration unknown"));
       let srcKey: string | undefined;
       try {

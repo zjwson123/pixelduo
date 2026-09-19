@@ -1,8 +1,8 @@
 import { requireUserId, ok, fail } from "@/lib/api";
-import { getActiveJobsForUser } from "@/lib/queue";
+import { deliveredVideoSeconds, getActiveJobsForUser } from "@/lib/queue";
 import { serveUserUrl } from "@/lib/store";
 
-function serialize(job: Awaited<ReturnType<typeof getActiveJobsForUser>>[number]) {
+async function serialize(job: Awaited<ReturnType<typeof getActiveJobsForUser>>[number]) {
   let images: string[];
   try {
     images = (JSON.parse(job.images) as unknown[]).filter((k): k is string => typeof k === "string");
@@ -20,7 +20,10 @@ function serialize(job: Awaited<ReturnType<typeof getActiveJobsForUser>>[number]
     count: job.count,
     prompt: job.prompt,
     costCredits: job.costCredits,
-    durationSec: job.durationSec,
+    // For an extend job this is the DELIVERED length (original + chained
+    // segments), which is what the client's 30s-cap arithmetic needs. It costs
+    // one extra query only for the jobs that actually are extend jobs.
+    durationSec: job.extendOfJobId ? await deliveredVideoSeconds(job.id) : job.durationSec,
     images: images.map((k) => serveUserUrl(k)),
     error: job.error,
     createdAt: job.createdAt,
@@ -35,7 +38,7 @@ export async function GET() {
   try {
     const userId = await requireUserId();
     const jobs = await getActiveJobsForUser(userId);
-    return ok({ jobs: jobs.map(serialize) });
+    return ok({ jobs: await Promise.all(jobs.map(serialize)) });
   } catch (e) {
     return fail(e);
   }

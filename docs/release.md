@@ -37,8 +37,16 @@ Caddy 自动申请 Let's Encrypt 证书（80/443 需公网可达）。
 ## 3. 上线后冒烟（每项都应有明确输出）
 
 ```bash
-# 健康（db/redis/storage 全 up，rateLimiter=redis）
-curl -fsS https://pixelduo.ai/api/health
+# 健康：真实响应体只有 ok / service / db / redis / storage / queue.active / time
+# 这几个字段——既没有 rateLimiter，也没有队列深度（worker 心跳）：那是刻意不暴露
+# 的反侦察信息（lib/rate-limit.ts 里 getLimiterName() 没有任何调用方）。
+# 注意 ok:false 时这个路由照旧返回 200（只有探测本身抛异常才 503），
+# 所以 `curl -fsS` 只能证明"服务在响应"，必须看 JSON 内容：
+curl -sS https://pixelduo.ai/api/health \
+  | jq -e '.service == "pixelduo" and .ok and .db == "up" and .redis == "up" and .storage == "up"'
+# 没装 jq 就退化成 grep '"ok":true'（同样是粗判）；redis 字段在未配置 REDIS_URL
+# 时是 "unconfigured"，生产必须是 "up"（多实例全局限流）。
+# queue.active 只表示"此刻有没有任务在跑"：空闲与卡死都是 false，不能当 worker 存活信号。
 
 # SEO
 curl -fsS https://pixelduo.ai/robots.txt | grep Sitemap
@@ -66,6 +74,7 @@ curl -sI https://pixelduo.ai/ | grep -iE "content-security-policy|strict-transpo
 
 ## 6. 上线后第一周观察
 
-- 队列深度（`/api/health` 的 `queue.queued`）、worker 数量与实际吞吐：3 worker 下 queue 仍持续积压说明上游限流或配额不足
+- 队列深度（`/api/health` 刻意不暴露它，只有 `queue.active`）、worker 数量与实际吞吐：直接查库再对照，3 worker 下 `queued` 仍持续积压说明上游限流或配额不足
+  `psql "$DATABASE_URL" -c "SELECT status, count(*) FROM \"Job\" WHERE status IN ('queued','running','polling') GROUP BY status"`
 - 误审核率：`IMAGE_MODERATION=1` 命中拦截数量 vs 投诉
 - 成本损耗：退款/失败重试导致的 provider 成本 vs 收入

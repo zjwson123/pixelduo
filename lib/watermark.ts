@@ -16,8 +16,14 @@ function isRasterImage(buf: Buffer): boolean {
 }
 
 // Pixel-count cap: sharp's ~268MP default admits a ~1GB RGBA decompression
-// bomb; 100MP is far above any real generated image.
-const MAX_INPUT_PIXELS = 100_000_000;
+// bomb, and the 100MP ceiling this replaced was still 6× larger than anything a
+// provider can legitimately return (Seedream tops out at 4096² ≈ 16.7MP, and a
+// 100MP PNG of solid colour is ~200KB of deflate — far under the 25MB download
+// cap). One such image from a hostile or compromised provider made the bake
+// allocate ~400MB RGBA plus the output image and the PNG encoder in a worker
+// that never budgeted for it. 20MP stays above every real output and bounds the
+// allocation at ~80MB. lib/safety.ts shares this ceiling for the same reason.
+export const MAX_INPUT_PIXELS = 20_000_000;
 
 // Bake a visible "AI 生成" badge into an image (bottom-right).
 // Watermark is a plan perk: free plans get marked outputs, paid plans get

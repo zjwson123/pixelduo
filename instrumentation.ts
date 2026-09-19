@@ -1,3 +1,5 @@
+import { isProductionRuntime } from "./lib/runtime-env";
+
 // Boot-time configuration assertions. These run once per process, before the
 // app serves traffic, so a dangerous misconfiguration is a startup failure
 // instead of a silently exploitable deployment.
@@ -17,20 +19,26 @@ const PLACEHOLDER_SECRETS = [
   "nextauth-secret",
 ];
 
+// The CI/e2e secret is a real 48-hex string, so it passes the length floor and
+// contains no placeholder word — but it is published in .github/workflows/ci.yml
+// and in scripts/ci-local.sh, which makes it the most likely value for an
+// operator to copy into a deployment by accident, and anyone reading the public
+// repository can then mint a session JWT for any account, admin included.
+const PUBLISHED_CI_SECRET = "5c1f8e2a94b7d03f6ae4c81d2795bf30e6a1c47d8b92f650";
+
 export function assertProductionConfig(env: NodeJS.ProcessEnv = process.env): void {
-  // Fail closed on the ENVIRONMENT SPELLING, not on one exact string. These
-  // assertions used to run only when NODE_ENV was exactly "production", so a
-  // deployment that spelled it any other way — "staging", "prod", or left it
-  // unset in a custom entrypoint — skipped every check below silently, taking
-  // NEXTAUTH_SECRET/SMTP_URL/NEXTAUTH_URL enforcement with it (and, in
-  // lib/twofa.ts, the 2FA ticket signing key). Skipping is now something a
-  // runtime must ASK for by declaring itself development or test.
-  if (env.NODE_ENV === "development" || env.NODE_ENV === "test") return;
+  // Fail closed on the ENVIRONMENT SPELLING, not on one exact string — see
+  // lib/runtime-env.ts. These assertions used to run only when NODE_ENV was
+  // exactly "production", so a deployment that spelled it any other way —
+  // "staging", "prod", or left it unset in a custom entrypoint — skipped every
+  // check below silently, taking NEXTAUTH_SECRET/SMTP_URL/NEXTAUTH_URL
+  // enforcement with it (and, in lib/twofa.ts, the 2FA ticket signing key).
+  if (!isProductionRuntime(env)) return;
 
   // NEXTAUTH_SECRET signs every session JWT and the 2FA pre-auth ticket, so a
-  // placeholder (public knowledge — it ships in .env.example) or a low-entropy
-  // value (brute-forceable offline from one captured JWT) lets anyone mint a
-  // session for any account, admin included.
+  // placeholder (public knowledge — it ships in .env.example), a published CI
+  // value, or a low-entropy value (brute-forceable offline from one captured
+  // JWT) lets anyone mint a session for any account, admin included.
   const secret = env.NEXTAUTH_SECRET ?? "";
   const lower = secret.toLowerCase();
   if (secret.length < 32 || PLACEHOLDER_SECRETS.some((p) => lower.includes(p)) || lower === "secret") {
@@ -46,6 +54,15 @@ export function assertProductionConfig(env: NodeJS.ProcessEnv = process.env): vo
   // and ci-local.sh set it), so it is the escape hatch — reused below for the
   // two checks that a legitimate test deployment must be allowed to skip.
   const testDeployment = env.PAYMENT_ALLOW_MOCK === "1";
+  // The published CI secret is checked against testDeployment rather than
+  // against the placeholder list above: CI and ci-local.sh legitimately use it
+  // to boot a production build, so it may only be rejected where it would be a
+  // real deployment's signing key.
+  if (secret === PUBLISHED_CI_SECRET && !testDeployment) {
+    throw new Error(
+      "NEXTAUTH_SECRET is the value published in .github/workflows/ci.yml and scripts/ci-local.sh — it is public knowledge, so anyone could forge a session for any account. Generate a fresh one with `openssl rand -base64 32`",
+    );
+  }
   if (env.EMAIL_VERIFY_AUTO === "1" && !testDeployment) {
     throw new Error(
       "EMAIL_VERIFY_AUTO=1 is not allowed in production — it auto-verifies registrations and grants the signup bonus",

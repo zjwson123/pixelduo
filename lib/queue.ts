@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "./prisma";
 import { estimateGenerationCost, estimateModelCost, type ModelId, type Quality } from "./cost";
 import { addCreditsTx, spendCreditsTx, refundCreditsTx, type SpendConsumption } from "./ledger";
+import { getModel } from "./model-registry";
 import { getStorage } from "./storage";
 
 export interface CreateJobInput {
@@ -370,6 +371,16 @@ export async function completeJob(jobId: string, images: JobImage[]) {
         ...new Set(grants.filter((g) => g.refType === "order" && g.refId).map((g) => g.refId as string)),
       ];
       if (orderIds.length) {
+        // Lock the funding orders before reading their status. Unlocked, this
+        // gate is a plain read placed ~ms before its own delivery CAS while the
+        // refund path (the webhook) locks the Order row and then the grants: a
+        // refund committing inside that window takes nothing — the job holds
+        // its pre-auth at remaining = 0 — and then watches the job deliver the
+        // goods anyway. FOR UPDATE makes the two serialize, so whichever runs
+        // second sees the other's committed state.
+        await tx.$queryRaw(
+          Prisma.sql`SELECT id FROM "Order" WHERE id IN (${Prisma.join(orderIds)}) FOR UPDATE`,
+        );
         const refunded = await tx.order.count({ where: { id: { in: orderIds }, status: "refunded" } });
         if (refunded > 0) {
           throw new Error(
@@ -437,6 +448,38 @@ export async function schedulePoll(jobId: string, delayMs = POLL_INTERVAL_MS) {
 
 export async function getJobForUser(userId: string, jobId: string) {
   return prisma.job.findFirst({ where: { id: jobId, userId } });
+}
+
+// The length of the video a job delivers, derived from its extend CHAIN.
+// Extend jobs deliver original + every chained segment as one clip, and the
+// 30s total cap is what gates the next extension — but no column holds that
+// total any more: each job's durationSec is the immutable length it was
+// charged for (the segment, for an extend job), and the total is their sum
+// along extendOfJobId. The worker used to overwrite its own durationSec with
+// the running total, which compounded on a retried delivery (see worker.ts).
+//
+// A row whose durationSec exceeds its model's own duration range can only be
+// such a compounded total — the routes validate every segment against that
+// range, so no legitimate job can carry one. Such a row already includes its
+// ancestors, so the walk stops there instead of adding them twice; that is
+// what makes this read repair the rows the pre-fix worker left behind.
+export async function deliveredVideoSeconds(jobId: string, maxHops = 10): Promise<number> {
+  let total = 0;
+  let id: string | null = jobId;
+  for (let hop = 0; id && hop < maxHops; hop++) {
+    const row: { model: string; durationSec: number | null; extendOfJobId: string | null } | null =
+      await prisma.job.findUnique({
+        where: { id },
+        select: { model: true, durationSec: true, extendOfJobId: true },
+      });
+    if (!row) break;
+    const sec = row.durationSec ?? 0;
+    total += sec;
+    const cap = getModel(row.model)?.durationSecRange?.max;
+    if (cap && sec > cap) break;
+    id = row.extendOfJobId;
+  }
+  return total;
 }
 
 // All not-yet-finished jobs for a user (queued/running/polling), newest

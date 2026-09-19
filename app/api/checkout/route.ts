@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { zodMessage, requireUserId, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
+import { zodMessage, requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
 import { getPlan, getPack } from "@/lib/catalog";
 import { prisma } from "@/lib/prisma";
 import { fulfillOrder } from "@/lib/ledger";
@@ -13,7 +13,13 @@ const schema = z.object({
 
 export async function POST(req: Request) {
   try {
-    const userId = await requireUserId();
+    // Verified accounts only: this is the one spending-adjacent route that still
+    // accepted unverified registrations, and a throwaway account can mint
+    // unbounded pending Order rows (plus a provider-side checkout session per
+    // call) at the rate limit, which no sweep ever expires or dedupes. Every
+    // other route with a resource cost — generate, edit, video, assistant,
+    // checkin, keys — has been on requireVerifiedUser since the anti-abuse pass.
+    const userId = await requireVerifiedUser();
     const limited = await enforceRateLimit(req, "checkout", 10, 60_000);
     if (limited) return limited;
     // Every call mints a new pending order row AND a provider-side checkout

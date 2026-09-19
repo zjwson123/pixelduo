@@ -169,23 +169,35 @@ export async function sendRefundEmail(to: string, itemName: string, amountUsd: n
 // Two-factor state changes were silent, which makes a hostile enrollment
 // indistinguishable from a legitimate one: a password-only attacker (breached
 // or reused — no mailbox access needed) can sign in, bind 2FA to their own
-// authenticator, and the victim is locked out permanently, because the
-// self-service reset-password path revokes credentials but does NOT clear
-// totpEnabled. The operator script that clears it manually
-// (scripts/reset-2fa.ts) emails the owner on exactly this reasoning; the
-// self-service routes must too. Deliberately NOT sendSafely: a mail outage
+// authenticator, and lock the victim out, because the self-service
+// reset-password path deliberately does NOT clear totpEnabled — removing the
+// second factor is exactly what 2FA exists to prevent, so mailbox access alone
+// must not be able to strip it. The operator script that clears the binding
+// manually (scripts/reset-2fa.ts) emails the owner on exactly this reasoning;
+// the self-service routes must too. Deliberately NOT sendSafely: a mail outage
 // must not fail the 2FA change the user just made, only report it.
+//
+// The remedy named below is the one that actually works. It used to say
+// "reset your password immediately", which is false here in a way the owner
+// only discovers while locked out: a reset rotates the password and revokes
+// sessions + API keys (so the attacker is out — they do not know the new
+// password) but leaves their authenticator bound, so the owner still needs the
+// attacker's code to sign in and needs an operator to clear the binding.
 export async function sendTwoFactorStateEmail(to: string, enabled: boolean): Promise<void> {
   const body = enabled
     ? [
         "Two-factor authentication is now active on your account. You will need your authenticator app (or a backup code) each time you sign in.",
         "",
         "All other sessions and all API keys were signed out by this change.",
+        "",
+        "If this wasn't you, reset your password immediately (that signs the attacker out), then ask support to clear the authenticator that was added — resetting the password alone does NOT remove a second factor someone else bound.",
       ]
     : [
         "Two-factor authentication has been turned off on your account. Sign-in now requires only your password.",
         "",
         "All other sessions and all API keys were signed out by this change.",
+        "",
+        "If this wasn't you, reset your password immediately and contact support.",
       ];
   try {
     await getMailer().send(
@@ -193,14 +205,7 @@ export async function sendTwoFactorStateEmail(to: string, enabled: boolean): Pro
       enabled
         ? "Two-factor authentication was enabled on your PixelDuo account"
         : "Two-factor authentication was turned OFF on your PixelDuo account",
-      body
-        .concat([
-          "",
-          "If this wasn't you, reset your password immediately — someone may have your password.",
-          "",
-          `https://pixelduo.ai/login`,
-        ])
-        .join("\n"),
+      body.concat(["", `https://pixelduo.ai/login`]).join("\n"),
     );
   } catch (e) {
     captureError(e, { mailTo: to, mailSubject: "2fa-state-change" });

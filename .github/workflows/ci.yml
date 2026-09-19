@@ -6,6 +6,13 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Least privilege. PR-controlled code runs in these jobs (npm ci postinstall
+# scripts, next build, and the Playwright e2e suite), so the job token must not
+# be able to write to the repository; without this block it carries whatever the
+# repository default is. Read-only is all checkout/build/test need.
+permissions:
+  contents: read
+
 jobs:
   test-unit:
     runs-on: ubuntu-latest

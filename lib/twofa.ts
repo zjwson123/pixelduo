@@ -4,6 +4,7 @@ import { SignJWT, jwtVerify } from "jose";
 import { createHash, randomBytes } from "crypto";
 import Redis from "ioredis";
 import { prisma } from "./prisma";
+import { isProductionRuntime } from "./runtime-env";
 
 // ---- TOTP ---------------------------------------------------------------
 
@@ -88,8 +89,8 @@ function secretKey(): Uint8Array {
     // signing tickets with the public constant below, and anyone holding just a
     // password could mint {"purpose":"2fa","sub":<victim>,…} to walk straight
     // past TOTP. Default to production: only a runtime that explicitly declares
-    // itself development or test gets the constant.
-    if (process.env.NODE_ENV !== "development" && process.env.NODE_ENV !== "test") {
+    // itself development or test gets the constant (lib/runtime-env.ts).
+    if (isProductionRuntime()) {
       throw new Error(
         "NEXTAUTH_SECRET must be set — refusing to sign 2FA tickets with the public development fallback",
       );

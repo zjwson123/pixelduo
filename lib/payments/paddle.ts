@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from "crypto";
 import { Paddle, Environment } from "@paddle/paddle-node-sdk";
+import { isProductionRuntime } from "../runtime-env";
 import { IGNORED_WEBHOOK, type IgnoredWebhook, type PaymentWebhookEvent } from "./types";
 import type { CheckoutSession, CreateCheckoutInput, PaymentProvider } from "./types";
 
@@ -24,17 +25,15 @@ export class PaddleProvider implements PaymentProvider {
       throw new Error("PADDLE_API_KEY is required when PAYMENT_PROVIDER=paddle");
     }
     // Sandbox transactions complete with Paddle's public test instruments and
-    // sandbox-signed webhooks verify against the sandbox secret — in
-    // production that would fulfill real credits for fake payments.
-    if (
-      process.env.NODE_ENV === "production" &&
-      !opts?.client &&
-      process.env.PADDLE_ENVIRONMENT !== "production"
-    ) {
-      throw new Error("PADDLE_ENVIRONMENT must be 'production' when NODE_ENV=production");
+    // sandbox-signed webhooks verify against the sandbox secret — in a
+    // production deployment that would fulfill real credits for fake payments.
+    // Predicate from lib/runtime-env.ts: an exact "production" string test let
+    // a deployment spelling NODE_ENV=staging take the sandbox path silently.
+    if (isProductionRuntime() && !opts?.client && process.env.PADDLE_ENVIRONMENT !== "production") {
+      throw new Error("PADDLE_ENVIRONMENT must be 'production' in production");
     }
     const secret = opts?.webhookSecret ?? process.env.PADDLE_WEBHOOK_SECRET;
-    if (process.env.NODE_ENV === "production" && !opts?.client && !secret) {
+    if (isProductionRuntime() && !opts?.client && !secret) {
       throw new Error("PADDLE_WEBHOOK_SECRET is required when PAYMENT_PROVIDER=paddle in production");
     }
     this.webhookSecret = secret ?? "";

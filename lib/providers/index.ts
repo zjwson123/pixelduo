@@ -3,6 +3,7 @@
 //            doubao-seedance, wan2.7-t2v/i2v [video, async task-based]
 
 import { getModelVerseKey, getArkKey, getArkBaseUrl, getAliyunKey, getAliyunBaseUrl } from "../keys";
+import { isProductionRuntime } from "../runtime-env";
 import { saveBase64Image, saveRemoteImage, fetchPublicBuffer, readBodyCapped, outboundTimeoutMs } from "../store";
 import { getStorage } from "../storage";
 import { getModel, type ModelInfo } from "../model-registry";
@@ -79,7 +80,7 @@ function boundedTaskId(raw: unknown, label: string): string {
 // was mock traffic.
 export function mockImageProviderEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   if (env.MOCK_IMAGE_PROVIDER !== "1") return false;
-  if (env.NODE_ENV === "production" && env.PAYMENT_ALLOW_MOCK !== "1") {
+  if (isProductionRuntime(env) && env.PAYMENT_ALLOW_MOCK !== "1") {
     throw new Error(
       "mock-image-provider-not-allowed: MOCK_IMAGE_PROVIDER=1 is not allowed in production — it would serve stub images for real credits",
     );

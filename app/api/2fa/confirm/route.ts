@@ -33,9 +33,17 @@ export async function POST(req: Request) {
     if (!verifyTotp(user.totpPendingSecret, body.token)) return fail(new Error("invalid-code"));
 
     const codes = generateBackupCodes();
-    await prisma.$transaction(async (tx) => {
-      await tx.user.update({
-        where: { id: userId },
+    // The claim IS the write: whoever flips totpEnabled false→true owns this
+    // enrollment and is the only one that mints codes. Without the CAS, two
+    // concurrent confirms (a double-click, or a retried request — both pass the
+    // pre-read above and verify the same pending secret) each replaced the whole
+    // BackupCode set with its own ten codes: two different sets were returned
+    // with 200, only the last one was stored, and a user who copied the first
+    // response held recovery codes that never worked — discovered, typically, at
+    // the moment they needed them.
+    const claimed = await prisma.$transaction(async (tx) => {
+      const claim = await tx.user.updateMany({
+        where: { id: userId, totpEnabled: false },
         data: {
           totpSecret: user.totpPendingSecret,
           totpPendingSecret: null,
@@ -43,6 +51,7 @@ export async function POST(req: Request) {
           sessionVersion: { increment: 1 },
         },
       });
+      if (claim.count !== 1) return false;
       // Revoke API keys alongside the session bump. authenticateApiKey never
       // consults sessionVersion, so an attacker who trialled the password
       // before 2FA was on could mint a pd_live_ key that survived the very
@@ -58,10 +67,14 @@ export async function POST(req: Request) {
       await tx.backupCode.createMany({
         data: codes.map((c) => ({ userId, codeHash: hashBackupCode(c) })),
       });
+      return true;
     });
+    // The loser of the race reports the same shape as the pre-read branch: the
+    // enrollment is already on, and the codes belong to the request that won.
+    if (!claimed) return ok({ alreadyEnabled: true });
     // The owner must learn about an enrollment they did not perform: with only
     // a leaked password an attacker can bind 2FA here and lock the real owner
-    // out for good (reset-password does not clear totpEnabled).
+    // out (reset-password does not clear totpEnabled — see lib/mail.ts).
     await sendTwoFactorStateEmail(user.email, true);
     return ok({ enabled: true, backupCodes: codes });
   } catch (e) {

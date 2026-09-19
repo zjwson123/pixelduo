@@ -285,20 +285,15 @@ async function processVideoJob(job: {
         await getStorage().delete(segmentKey).catch(() => undefined);
       }
       const vc = videoCost(job.model, job.durationSec ?? 5);
-      // Record the DELIVERED duration on the extend job (original + segment):
-      // the pre-auth and the Image-row credits above stay segment-based — that
-      // is what the provider billed and what the user paid — but the total is
-      // what gates further extension (a 30s clip cannot be a reference again).
-      if (job.sourceVideoKey && videoKey !== segmentKey && job.extendOfJobId) {
-        const srcJob = await prisma.job.findUnique({
-          where: { id: job.extendOfJobId },
-          select: { durationSec: true },
-        });
-        const total = (srcJob?.durationSec ?? 0) + (job.durationSec ?? 0);
-        if (total > (job.durationSec ?? 0)) {
-          await prisma.job.update({ where: { id: job.id }, data: { durationSec: total } });
-        }
-      }
+      // NOTE: the delivered length is deliberately NOT written back here. An
+      // extend job's own durationSec is the SEGMENT length it was charged for,
+      // and `deliveredVideoSeconds()` derives the total (original + every
+      // chained segment) by walking extendOfJobId, so it needs no mutable
+      // column. The earlier version stored the running total in durationSec —
+      // a delivery that lost its race, was reaped, and retried (failJob
+      // requeues on a non-terminal error) then re-added the segment to the
+      // value the previous attempt had already written: 20s became 25s, 30s…
+      // and the 30s total cap began refusing paid extensions of a 20s clip.
       const rows = [{
         url: videoKey,
         model: job.model as "gpt" | "seedream" | "wan-image" | "wan-image-pro" | "seedance" | "wan-t2v" | "wan-i2v",

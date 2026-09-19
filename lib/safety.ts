@@ -1,6 +1,7 @@
 import sharp from "sharp";
 import { getStorage } from "./storage";
 import { getVisionConfig } from "./keys";
+import { MAX_INPUT_PIXELS } from "./watermark";
 import { hostIsPublic, isPublicPort, readJsonCapped, ssrfPinnedAgent, outboundTimeoutMs } from "./store";
 import { fetch as pinnedFetch } from "undici";
 
@@ -146,7 +147,10 @@ const MODERATION_EDGE = 1024;
 // while the job reported success and was billed. Downscaling to a reviewable
 // edge keeps every output inside the auditable range.
 async function shrinkForAudit(buf: Buffer): Promise<Buffer> {
-  return sharp(buf, { limitInputPixels: 100_000_000 })
+  // Same pixel ceiling as the watermark bake (lib/watermark.ts): the image
+  // being shrunk is provider-controlled, so an unbounded limit here is a
+  // decompression bomb on the audit path instead of the delivery path.
+  return sharp(buf, { limitInputPixels: MAX_INPUT_PIXELS })
     .resize({ width: MODERATION_EDGE, height: MODERATION_EDGE, fit: "inside", withoutEnlargement: true })
     .jpeg({ quality: 82 })
     .toBuffer();

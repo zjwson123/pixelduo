@@ -29,7 +29,7 @@
 - **落地页 FAQ**：计费/积分有效期/退款/内容安全/API/图片归属六问（双语折叠卡片）；品牌化 404/500 页（跟随语言偏好）
 - **内容安全**：前置关键词过滤 + 后置 vision 模型图像审核（`IMAGE_MODERATION=1`，默认 gpt-5.4，命中即拦截 + 自动退款 + 删图）
 - **AI 标识**：免费档 gpt-image-2 图片交付前烘焙 "PixelDuo · AI 生成" 水印（sharp，worker 容器含 Noto CJK 字体）
-- NextAuth v4（邮箱+密码 + **OAuth**，JWT 会话）、bcrypt；**邮箱验证 + 密码找回**（单次令牌存 SHA-256 哈希，24h/1h 过期；注册送 30 积分改为验证后发放，未验证账号禁止生图/签到——防薅羊毛）；**登录防爆破**（Redis 按账号 10 次失败/15 分钟锁定）；**会话吊销**（`User.sessionVersion`，重置密码或 `POST /api/auth/revoke-sessions` 后旧 JWT 全部失效）；**TOTP 双因素认证**（otplib + QR，10 个一次性备用码，两步登录，部分会话被 API/页面级拦截，5 分钟单次预认证票据换真会话）；邮件走 `lib/mail.ts`：未配 `SMTP_URL` 时开发模式打印到服务日志，生产接 SES/SendGrid/Resend 等 SMTP
+- NextAuth v4（邮箱+密码 + **OAuth**，JWT 会话）、bcrypt；**邮箱验证 + 密码找回**（单次令牌存 SHA-256 哈希，24h/1h 过期；注册送 30 积分改为验证后发放，未验证账号禁止生图/签到/下单——防薅羊毛）；**登录防爆破**（Redis 按账号 10 次失败/15 分钟锁定）；**会话吊销**（`User.sessionVersion`，重置密码或 `POST /api/auth/revoke-sessions` 后旧 JWT 全部失效）；**TOTP 双因素认证**（otplib + QR，10 个一次性备用码，两步登录，部分会话被 API/页面级拦截，5 分钟单次预认证票据换真会话）；邮件走 `lib/mail.ts`：未配 `SMTP_URL` 时开发模式打印到服务日志，生产接 SES/SendGrid/Resend 等 SMTP
 - 支付壳子：`PaymentProvider` 接口 + MockProvider / **Stripe** / **Paddle**（支付宝/微信待主体接入）
 - **存储抽象**：`STORAGE_DRIVER=local`（私有目录 + 鉴权路由）或 `s3`（MinIO/R2/S3 + 预签名 URL）
 - **限流**：路由级权威限制走 **Redis 全局计数**（`REDIS_URL`，生成 20/min、注册 10/h、结账 10/min、助手 30/min；无 Redis 自动回退单机内存）；中间件内存粗筛（auth 20/min、API 300/min per IP）
@@ -138,7 +138,7 @@ compose 全栈默认带 `backup-objects` 服务（每日镜像 + 保留 7 份；
 
 ### 健康检查
 
-`GET /api/health` 返回 `db` / `redis` / `storage` / `rateLimiter` / `queue`（排队与运行中任务数、worker 最近心跳），任一关键依赖异常时 `ok:false`（各检查带 2.5s 超时保护，不会拖垮探活）。
+`GET /api/health` 返回 `ok` / `service` / `db` / `redis` / `storage` / `queue.active`（仅"有没有在跑的任务"；队列深度与 worker 心跳属侦察信息，已刻意不暴露）/ `time`，任一关键依赖异常时 `ok:false`。**注意：`ok:false` 时该路由仍返回 200**，`curl -f` 判不出失败，探活要读 JSON（可复制的冒烟命令见 [docs/release.md](docs/release.md)）。
 
 ### 生产部署（Docker Compose）
 
@@ -196,8 +196,9 @@ PW_CHANNEL=chrome npx playwright test   # 本地用系统 Chrome；CI 用自带 
 - **公开 API 已上线**（`/api/v1/images/generations` + Key 管理 + 文档）；OAuth/支付等外部凭据就绪即启用
 - 图片对象备份：自托管已有 `backup-objects` 每日镜像 + 恢复演练；生产托管对象存储仍需开版本控制/跨区域复制
 - 内容安全：前置关键词过滤 + 后置 vision 审核（`IMAGE_MODERATION=1`，命中即拦截/退款/删图）
-- 水印：Seedream 自带"AI生成"合规标识；免费档 gpt 图交付前烘焙 "PixelDuo · AI 生成"（C2PA 元数据为后续项）
-- 限流：Redis 全局（`rateLimiter: redis`）+ 中间件内存粗筛；监控告警 Sentry 待 DSN 生效
+- 水印：Seedream 图自带"AI生成"合规标识；免费档 gpt/wan 图交付前烘焙 "PixelDuo · AI 生成"；**视频免费档目前只有 UI 标识、片内无水印**（产品决定，见"已知边界"）
+- 限流：Redis 全局 + 中间件内存粗筛；监控告警 Sentry 待 DSN 生效
+- 已知边界（有意保留）：视频输出不做内容审核（无视频审核通道）；免费档视频无水印；2FA 一旦被他人绑定，改密码不会清除该绑定（改密本身会踢掉攻击者的会话与 API Key），解绑需运维执行 `scripts/reset-2fa.ts`
 
 ## 目录
 
