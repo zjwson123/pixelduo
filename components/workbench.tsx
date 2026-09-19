@@ -924,11 +924,10 @@ export function Workbench() {
         <img src={src} alt={j.prompt} style={{ cursor: "zoom-in" }} onClick={() => setLightbox(src)} />
       )}
       {me?.plan === "free" && <div className="wm-badge">PixelDuo · AI 生成</div>}
-      <div className="result-actions">
-        <a className="result-btn" href={`${src}?download=1`} download aria-label={t.download} title={t.download}>↓</a>
-      </div>
       <div className="result-meta">
         <ModelPill model={j.model} />
+        <span className="spacer"></span>
+        <a className="dl-link" href={`${src}?download=1`} download aria-label={t.download} title={t.download}>{t.download}</a>
       </div>
     </div>
   );
@@ -1132,12 +1131,10 @@ export function Workbench() {
                           <div key={g.id} className="result-card">
                             {renderMedia(g.url, g.model, g.prompt)}
                             {me?.plan === "free" && <div className="wm-badge">PixelDuo · AI 生成</div>}
-                            <div className="result-actions">
-                              <a className="result-btn" href={`${g.url}?download=1`} download aria-label={t.download} title={t.download}>↓</a>
-                            </div>
                             <div className="result-meta">
                               <ModelPill model={g.model} />
                               <span style={{ marginLeft: "auto", whiteSpace: "nowrap" }}>{g.credits} {t.credits}</span>
+                              <a className="dl-link" href={`${g.url}?download=1`} download aria-label={t.download} title={t.download}>{t.download}</a>
                             </div>
                           </div>
                         ))}
