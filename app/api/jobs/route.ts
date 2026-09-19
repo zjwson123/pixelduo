@@ -20,6 +20,7 @@ function serialize(job: Awaited<ReturnType<typeof getActiveJobsForUser>>[number]
     count: job.count,
     prompt: job.prompt,
     costCredits: job.costCredits,
+    durationSec: job.durationSec,
     images: images.map((k) => serveUserUrl(k)),
     error: job.error,
     createdAt: job.createdAt,

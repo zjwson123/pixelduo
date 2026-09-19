@@ -25,6 +25,8 @@ export interface CreateMediaJobInput {
   maxAttempts?: number;
   durationSec?: number; // for video
   refImageKey?: string; // for image editing / image-to-video
+  sourceVideoKey?: string; // for extend: storage key of the original video
+  extendOfJobId?: string; // for extend: provenance job id
 }
 
 export interface JobImage {
@@ -156,6 +158,8 @@ export async function createMediaJob(input: CreateMediaJobInput) {
         maxAttempts: input.maxAttempts ?? 3,
         durationSec: input.durationSec,
         refImageKey: input.refImageKey,
+        sourceVideoKey: input.sourceVideoKey,
+        extendOfJobId: input.extendOfJobId,
       },
     });
     const consumption = await spendCreditsTx(

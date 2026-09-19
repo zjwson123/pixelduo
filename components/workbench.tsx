@@ -68,6 +68,7 @@ interface JobStatus {
   count: number;
   prompt: string;
   costCredits: number;
+  durationSec?: number | null;
   images: string[];
   error: string | null;
   createdAt: string;
@@ -166,6 +167,7 @@ const LOCALE_STRINGS: Record<Locale, {
   genFailed: string; videoFailed: string; charged: string; download: string;
   galManage: string; galDone: string; galSelectAll: string; galClear: string; galDelete: string; galDeleted: string;
   galAll: string; galImages: string; galVideos: string; galNewest: string; galOldest: string;
+  extendBtn: string; extendCancel: string;
   backToWorkbench: string; plansCredits: string; signup: string; checkin: string; dailyCheckin: string;
   topupPacks: string; validMonths: string; currentPlan: string; choose: string; free: string;
   checkoutTitle: string; item: string; creditsLabel: string; totalLabel: string; paymentMethod: string;
@@ -205,6 +207,7 @@ const LOCALE_STRINGS: Record<Locale, {
     genFailed: "Generation failed", videoFailed: "Video generation failed", charged: "Charged", download: "Download",
     galManage: "Manage", galDone: "Done", galSelectAll: "Select all", galClear: "Clear", galDelete: "Delete", galDeleted: "items deleted",
     galAll: "All", galImages: "Images", galVideos: "Videos", galNewest: "Newest", galOldest: "Oldest",
+    extendBtn: "Extend", extendCancel: "Exit extend",
     backToWorkbench: "← Back to workbench", plansCredits: "Plans & credits",
     signup: "Signup bonus", checkin: "Daily check-in", dailyCheckin: "daily check-in +2",
     topupPacks: "Top-up packs", validMonths: "valid 12 months", currentPlan: "Current plan", choose: "Choose", free: "Free",
@@ -248,6 +251,7 @@ const LOCALE_STRINGS: Record<Locale, {
     genFailed: "生成失败", videoFailed: "视频生成失败", charged: "已扣", download: "下载",
     galManage: "管理", galDone: "完成", galSelectAll: "全选", galClear: "取消全选", galDelete: "删除所选", galDeleted: "项已删除",
     galAll: "全部", galImages: "图片", galVideos: "视频", galNewest: "最新", galOldest: "最早",
+    extendBtn: "续写", extendCancel: "退出续写",
     backToWorkbench: "← 返回工作台", plansCredits: "定价与积分",
     signup: "注册奖励", checkin: "每日签到", dailyCheckin: "每日签到 +2",
     topupPacks: "积分包", validMonths: "12 个月有效", currentPlan: "当前套餐", choose: "选择", free: "免费",
@@ -372,6 +376,9 @@ export function Workbench() {
   const [galType, setGalType] = useState<"all" | "image" | "video">("all");
   const [galSort, setGalSort] = useState<"newest" | "oldest">("newest");
   const galFilterRef = useRef<{ type: "all" | "image" | "video"; sort: "newest" | "oldest" }>({ type: "all", sort: "newest" });
+  // Video extend (续写) mode: continue a finished Seedance clip up to 30s total.
+  const [extendSrc, setExtendSrc] = useState<{ jobId: string; durationSec: number } | null>(null);
+  const extendSegMax = extendSrc ? Math.min(15, 30 - extendSrc.durationSec) : 15;
   const [ledger, setLedger] = useState<LedgerRow[]>([]);
   const [orders, setOrders] = useState<OrderRow[]>([]);
   const [expiring, setExpiring] = useState<ExpiringCredit[]>([]);
@@ -684,12 +691,24 @@ export function Workbench() {
     }
   };
 
+  const startExtend = (j: JobStatus) => {
+    const srcDur = j.durationSec ?? 0;
+    if (srcDur + 4 > 30) return setToast(locale === "zh" ? "该视频已到 30 秒上限" : "Already at the 30s cap");
+    setExtendSrc({ jobId: j.id, durationSec: srcDur });
+    setVideoModel("seedance");
+    setVideoPrompt(j.prompt);
+    setVideoDuration(Math.min(15, 30 - srcDur));
+    setVideoImage(null);
+    setTab("video");
+    setToast(locale === "zh" ? `续写模式：原片 ${srcDur}s，成片最长 30s` : `Extend mode: source ${srcDur}s, up to 30s total`);
+  };
+
   const generateVideo = async () => {
     if (submitting) return;
     if (!videoPrompt.trim()) return setToast(t.writePrompt);
     if (me && !me.emailVerified) return setToast(t.verifyFirst);
     // Pure i2v models need a first frame; seedance-style models take one optionally
-    if (getModel(videoModel)?.requiresImageInput && !videoImage) return setToast(t.clickUpload);
+    if (!extendSrc && getModel(videoModel)?.requiresImageInput && !videoImage) return setToast(t.clickUpload);
     const vCost = estimateModelCost(videoModel, 1, "standard", videoDuration);
     if (me && me.credits < vCost.credits) return setToast(t.insufficient);
     setSubmitting("video");
@@ -702,9 +721,11 @@ export function Workbench() {
           duration: videoDuration,
           idempotencyKey: crypto.randomUUID(),
           ...(videoImage ? { image: videoImage } : {}),
+          ...(extendSrc ? { extendOf: extendSrc.jobId } : {}),
         }),
       });
       await trackJob(data.jobId);
+      setExtendSrc(null);
       setToast(videoDuration > 15
         ? "Video generation started — long clips can take 5-15 minutes"
         : "Video generation started — this may take 1-3 minutes");
@@ -926,6 +947,9 @@ export function Workbench() {
       {me?.plan === "free" && <div className="wm-badge">PixelDuo · AI 生成</div>}
       <div className="result-meta">
         <ModelPill model={j.model} />
+        {j.mediaType === "video" && (j.model === "seedance" || j.model === "seedance-2.5") && (j.durationSec ?? 0) + 4 <= 30 && (
+          <button className="dl-link" style={{ background: "none", border: "none", cursor: "pointer", padding: 0, font: "inherit" }} onClick={() => startExtend(j)}>{t.extendBtn}</button>
+        )}
         <span className="spacer"></span>
         <a className="dl-link" href={`${src}?download=1`} download aria-label={t.download} title={t.download}>{t.download}</a>
       </div>
@@ -1277,8 +1301,42 @@ export function Workbench() {
                   </div>
                 </div>
 
+                {extendSrc && (
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 12px", borderRadius: 10, background: "var(--surface-2)", border: "1px solid var(--indigo)" }}>
+                    <span style={{ fontSize: 13, color: "var(--ink)" }}>
+                      {locale === "zh"
+                        ? `续写模式：原片 ${extendSrc.durationSec}s + 续写 ${videoDuration}s → 成片 ${extendSrc.durationSec + videoDuration}s`
+                        : `Extend mode: source ${extendSrc.durationSec}s + ${videoDuration}s → ${extendSrc.durationSec + videoDuration}s total`}
+                    </span>
+                    <button className="chip" style={{ marginLeft: "auto", padding: "4px 10px" }} onClick={() => setExtendSrc(null)}>{t.extendCancel}</button>
+                  </div>
+                )}
+
+                {!extendSrc && (
+                <div>
+                  <div className="field-label" style={{ marginBottom: 8 }}>{t.model}</div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                    {VIDEO_MODEL_OPTIONS.map((m) => (
+                      <button key={m.value} className={`chip${videoModel === m.value ? " on" : ""}`} onClick={() => {
+                        setVideoModel(m.value);
+                        // Clamp duration to the new model's valid range
+                        const r = getModel(m.value)?.durationSecRange;
+                        if (r) setVideoDuration((d) => Math.max(r.min, Math.min(r.max, d)));
+                        // Clear uploaded reference image if the new model doesn't use one
+                        if (!getModel(m.value)?.supportsImageInput) setVideoImage(null);
+                      }}>
+                        {m.label}
+                      </button>
+                    ))}
+                  </div>
+                  <div style={{ marginTop: 6, fontSize: 12, color: "var(--ink-3)" }}>
+                    {VIDEO_MODELS.find((m) => m.id === videoModel)?.description ?? ""}
+                  </div>
+                </div>
+                )}
+
                 <div className="opt-row">
-                  <span className="field-label">{t.duration}</span>
+                  <span className="field-label">{extendSrc ? (locale === "zh" ? "续写时长" : "Extend by") : t.duration}</span>
                   <div style={{ flex: 1, maxWidth: 520 }}>
                     <Seg
                       options={
@@ -1289,6 +1347,7 @@ export function Workbench() {
                             const r = getModel(videoModel)?.durationSecRange;
                             return !r || (d >= r.min && d <= r.max);
                           })
+                          .filter((d) => !extendSrc || d <= extendSegMax)
                           .map((d) => ({ value: d, label: `${d}${t.sec}` }))
                       }
                       value={videoDuration}
@@ -1297,7 +1356,7 @@ export function Workbench() {
                   </div>
                 </div>
 
-                {VIDEO_MODELS.find((m) => m.id === videoModel)?.supportsImageInput && (
+                {!extendSrc && VIDEO_MODELS.find((m) => m.id === videoModel)?.supportsImageInput && (
                   <div>
                     <div className="field-label">{t.refImage}</div>
                     <input type="file" accept="image/*" style={{ display: "none" }} id="video-file-input" onChange={(e) => handleFileUpload(e, setVideoImage)} />
@@ -1313,7 +1372,9 @@ export function Workbench() {
 
                 <div className="costbar">
                   <span>
-                    {VIDEO_MODELS.find((m) => m.id === videoModel)?.displayName}
+                    {extendSrc
+                      ? (locale === "zh" ? `续写 ${videoDuration}s（成片 ${extendSrc.durationSec + videoDuration}s）` : `Extend ${videoDuration}s (→ ${extendSrc.durationSec + videoDuration}s total)`)
+                      : VIDEO_MODELS.find((m) => m.id === videoModel)?.displayName}
                     <span className="amount"> {estimateModelCost(videoModel, 1, "standard", videoDuration).credits} <small>{t.credits} ≈ ${estimateModelCost(videoModel, 1, "standard", videoDuration).usd.toFixed(2)}</small></span>
                   </span>
                   {me && me.credits >= estimateModelCost(videoModel, 1, "standard", videoDuration).credits ? (
@@ -1324,7 +1385,7 @@ export function Workbench() {
                 </div>
 
                 <button className="generate" disabled={submitting === "video"} onClick={generateVideo}>
-                  {submitting === "video" ? t.genVideoing : t.genVideo}
+                  {submitting === "video" ? t.genVideoing : extendSrc ? (locale === "zh" ? "生成续写" : "Generate extension") : t.genVideo}
                 </button>
               </div>
 

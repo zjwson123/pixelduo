@@ -3,7 +3,8 @@ import { generateImages, laneCountFor, createVideoTask, pollVideoTask, saveRemot
 import { modelCost, videoCost } from "../lib/cost";
 import { analyzeAllImagesSequentially, moderationRequested } from "../lib/safety";
 import { getVisionConfig } from "../lib/keys";
-import { getStorage } from "../lib/storage";
+import { getStorage, newStorageKey } from "../lib/storage";
+import { concatVideos } from "../lib/video-concat";
 import { initObservability, captureError } from "../lib/observability";
 import { bakeWatermark } from "../lib/watermark";
 import { getModel } from "../lib/model-registry";
@@ -186,6 +187,8 @@ async function processVideoJob(job: {
   userId: string;
   durationSec: number | null;
   refImageKey: string | null;
+  sourceVideoKey: string | null;
+  extendOfJobId: string | null;
   providerTaskId: string | null;
   status: string;
   startedAt: Date | null;
@@ -207,12 +210,21 @@ async function processVideoJob(job: {
         const refBuf = await getStorage().get(job.refImageKey);
         if (refBuf) imageBase64 = refBuf.toString("base64");
       }
-      console.log(`[worker ${workerId}] job ${job.id}: creating video task (${job.model})`);
+      let extendVideoUrl: string | undefined;
+      if (job.sourceVideoKey) {
+        // Ark fetches the reference video itself, so it needs a URL it can
+        // reach: the S3 driver's publicUrl is a presigned GET (1h). In local
+        // dev the endpoint is 127.0.0.1 and the upstream task will fail at
+        // fetch time — that fails and refunds the job instead of hanging.
+        extendVideoUrl = await getStorage().publicUrl(job.sourceVideoKey);
+      }
+      console.log(`[worker ${workerId}] job ${job.id}: creating video task (${job.model}${job.sourceVideoKey ? ", extend" : ""})`);
       const result = await createVideoTask({
         model: job.model,
         prompt: job.prompt,
         durationSec: job.durationSec ?? 5,
         imageBase64,
+        extendVideoUrl,
       });
       const recorded = await setJobPolling(job.id, result.taskId);
       if (!recorded) {
@@ -247,8 +259,46 @@ async function processVideoJob(job: {
     if (status.status === "succeeded" && status.videoUrl) {
       console.log(`[worker ${workerId}] job ${job.id}: video ready, downloading...`);
       // Download and store the video
-      const videoKey = await saveRemoteVideo(status.videoUrl);
+      const segmentKey = await saveRemoteVideo(status.videoUrl);
+      let videoKey = segmentKey;
+      if (job.sourceVideoKey) {
+        // Extend jobs deliver original + continuation as ONE clip. If the
+        // source is gone or ffmpeg fails, ship the segment alone: it is
+        // exactly what the provider billed for, and a delivery beat a refund.
+        const [srcBuf, segBuf] = await Promise.all([
+          getStorage().get(job.sourceVideoKey),
+          getStorage().get(segmentKey),
+        ]);
+        if (srcBuf && segBuf) {
+          const merged = await concatVideos(srcBuf, segBuf);
+          if (merged) {
+            const finalKey = newStorageKey("mp4");
+            await getStorage().put(finalKey, merged, "video/mp4");
+            videoKey = finalKey;
+            console.log(`[worker ${workerId}] job ${job.id}: extended video assembled (${videoKey})`);
+          } else {
+            console.warn(`[worker ${workerId}] job ${job.id}: concat failed — delivering segment only`);
+          }
+        } else {
+          console.warn(`[worker ${workerId}] job ${job.id}: source video missing — delivering segment only`);
+        }
+        await getStorage().delete(segmentKey).catch(() => undefined);
+      }
       const vc = videoCost(job.model, job.durationSec ?? 5);
+      // Record the DELIVERED duration on the extend job (original + segment):
+      // the pre-auth and the Image-row credits above stay segment-based — that
+      // is what the provider billed and what the user paid — but the total is
+      // what gates further extension (a 30s clip cannot be a reference again).
+      if (job.sourceVideoKey && videoKey !== segmentKey && job.extendOfJobId) {
+        const srcJob = await prisma.job.findUnique({
+          where: { id: job.extendOfJobId },
+          select: { durationSec: true },
+        });
+        const total = (srcJob?.durationSec ?? 0) + (job.durationSec ?? 0);
+        if (total > (job.durationSec ?? 0)) {
+          await prisma.job.update({ where: { id: job.id }, data: { durationSec: total } });
+        }
+      }
       const rows = [{
         url: videoKey,
         model: job.model as "gpt" | "seedream" | "wan-image" | "wan-image-pro" | "seedance" | "wan-t2v" | "wan-i2v",

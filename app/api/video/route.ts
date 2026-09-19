@@ -5,6 +5,7 @@ import { createMediaJob } from "@/lib/queue";
 import { getStorage, newStorageKey } from "@/lib/storage";
 import { enabledVideoModelIds, getModel, getVideoModels, modelEnum } from "@/lib/model-registry";
 import { randomUUID } from "crypto";
+import { prisma } from "@/lib/prisma";
 
 const VIDEO_MODEL_IDS = enabledVideoModelIds();
 
@@ -28,6 +29,11 @@ const schema = z.object({
   // For image-to-video models: reference image as base64 (nullish — some
   // clients send explicit null when unset)
   image: z.string().min(100).max(2_000_000).nullish(),
+  // Extend (续写): the finished video job whose clip should be continued.
+  // When present, `duration` is the SEGMENT length in seconds (4-15, capped
+  // so that source + segment <= 30) and the model/duration semantics switch
+  // to Ark's task_type=extend path.
+  extendOf: z.string().min(1).max(64).optional(),
   idempotencyKey: z.string().max(128).optional(),
 });
 
@@ -48,6 +54,55 @@ export async function POST(req: Request) {
     const body = schema.parse(JSON.parse(bodyRaw.raw));
     const safety = checkPrompt(body.prompt);
     if (!safety.ok) return fail(new Error(`blocked:${safety.reason}`));
+
+    // --- Extend (续写) path -------------------------------------------------
+    // The deliverable is original + new segment concatenated to one clip;
+    // Ark bills and we pre-auth the SEGMENT seconds only. Total is capped at
+    // 30s and the segment at the model's own range (4-15s for Seedance 2.0).
+    if (body.extendOf) {
+      const EXTEND_TOTAL_CAP = 30;
+      const src = await prisma.job.findFirst({
+        where: { id: body.extendOf, userId, mediaType: "video", status: "done" },
+        select: { id: true, model: true, durationSec: true, images: true },
+      });
+      if (!src) return fail(new Error("invalid-input: extendOf must be one of your finished video jobs"));
+      const srcInfo = getModel(src.model);
+      if (!srcInfo || srcInfo.gateway !== "ark") {
+        return fail(new Error("invalid-input: only Ark video models can be extended"));
+      }
+      const srcDur = src.durationSec;
+      if (!srcDur || srcDur < 1) return fail(new Error("invalid-input: source video duration unknown"));
+      let srcKey: string | undefined;
+      try {
+        srcKey = (JSON.parse(src.images) as string[])[0];
+      } catch {
+        srcKey = undefined;
+      }
+      if (!srcKey) return fail(new Error("invalid-input: source video file is missing"));
+      const srcRange = srcInfo.durationSecRange;
+      const segMax = Math.min(srcRange?.max ?? 15, EXTEND_TOTAL_CAP - srcDur);
+      const segMin = srcRange?.min ?? 4;
+      if (segMax < segMin) {
+        return fail(new Error(`invalid-input: source is ${srcDur}s — the ${EXTEND_TOTAL_CAP}s total cap leaves no room to extend`));
+      }
+      if (body.duration < segMin || body.duration > segMax) {
+        return fail(new Error(`invalid-input: extend segment must be ${segMin}-${segMax}s (source ${srcDur}s, total capped at ${EXTEND_TOTAL_CAP}s)`));
+      }
+      const key = body.idempotencyKey || `${userId}:video:${randomUUID()}`;
+      const { job, created } = await createMediaJob({
+        userId,
+        model: src.model,
+        mediaType: "video",
+        quality: "standard",
+        count: 1,
+        prompt: body.prompt.trim(),
+        idempotencyKey: key,
+        durationSec: body.duration,
+        sourceVideoKey: srcKey,
+        extendOfJobId: src.id,
+      });
+      return ok({ jobId: job.id, status: job.status, costCredits: job.costCredits, duplicate: !created });
+    }
 
     // Pure i2v models need a first frame; seedance-style models accept one optionally
     if (getModel(body.model)?.requiresImageInput && !body.image) {

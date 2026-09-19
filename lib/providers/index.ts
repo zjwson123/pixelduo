@@ -438,6 +438,7 @@ export async function createVideoTask(input: {
   prompt: string;
   durationSec: number;
   imageBase64?: string; // for image-to-video
+  extendVideoUrl?: string; // for extend: presigned web URL of the source video
 }): Promise<VideoTaskResult> {
   const model = getModel(input.model);
   if (!model || model.mediaType !== "video") throw new Error(`not-a-video-model:${input.model}`);
@@ -450,7 +451,7 @@ export async function createVideoTask(input: {
   switch (input.model) {
     case "seedance":
     case "seedance-2.5":
-      return createSeedanceTask(input.model, input.prompt, input.durationSec, input.imageBase64);
+      return createSeedanceTask(input.model, input.prompt, input.durationSec, input.imageBase64, input.extendVideoUrl);
     case "wan-t2v":
       return createWanVideoTask("wan2.7-t2v-2026-06-12", input.prompt, input.durationSec);
     case "wan-i2v":
@@ -460,11 +461,37 @@ export async function createVideoTask(input: {
   }
 }
 
-async function createSeedanceTask(appModel: string, prompt: string, durationSec: number, imageBase64?: string): Promise<VideoTaskResult> {
+async function createSeedanceTask(appModel: string, prompt: string, durationSec: number, imageBase64?: string, extendVideoUrl?: string): Promise<VideoTaskResult> {
   const info = getModel(appModel);
   if (!info || info.gateway !== "ark") throw new Error(`not-an-ark-video-model:${appModel}`);
   const keys = [getArkKey()].filter((k): k is string => Boolean(k));
   if (!keys.length) throw new Error("ark key missing for video generation");
+
+  // Live-probed 2026-09-19: task_type=extend returns ONLY the new segment
+  // (a 10s reference with duration=-1 yielded a 5.09s clip), and the
+  // reference video must arrive as a web URL — base64 is rejected. Explicit
+  // duration (15) is honored. Concatenation with the original is the
+  // worker's job (ffmpeg), which is what turns 15s+15s into a 30s deliverable.
+  if (extendVideoUrl) {
+    const content: Array<Record<string, unknown>> = [
+      { type: "video_url", video_url: { url: extendVideoUrl }, role: "reference_video" },
+      { type: "text", text: prompt },
+    ];
+    const data = await callWithKeys(
+      "https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks",
+      {
+        model: info.modelId,
+        task_type: "extend",
+        content,
+        ratio: "adaptive",
+        duration: durationSec,
+      },
+      keys,
+    );
+    const taskId = boundedTaskId((data as { id?: unknown }).id, "seedance");
+    return { taskId, model: appModel };
+  }
+
   const content: Array<Record<string, unknown>> = [{ type: "text", text: prompt }];
   if (imageBase64) {
     content.push({

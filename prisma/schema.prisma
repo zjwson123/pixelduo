@@ -150,6 +150,8 @@ model Job {
   providerTaskId String? // external task id from Ark/DashScope
   durationSec    Int? // video duration (for video jobs)
   refImageKey    String? // reference image storage key (for image editing / image-to-video)
+  sourceVideoKey String? // extend input: storage key of the original video being continued
+  extendOfJobId  String? // provenance: the finished video job this one extends
   createdAt      DateTime  @default(now())
   startedAt      DateTime?
   finishedAt     DateTime?

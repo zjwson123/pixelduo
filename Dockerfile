@@ -38,7 +38,7 @@ FROM node:24-alpine AS worker
 WORKDIR /app
 ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1
 # CJK fonts so sharp/SVG text (baked "AI 生成" watermark) renders in containers
-RUN apk add --no-cache fontconfig font-noto-cjk
+RUN apk add --no-cache fontconfig font-noto-cjk ffmpeg
 COPY --from=deps --chown=node:node /app/node_modules ./node_modules
 COPY --chown=node:node . .
 RUN npx prisma generate

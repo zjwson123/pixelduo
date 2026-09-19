@@ -27,6 +27,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
         count: job.count,
         prompt: job.prompt,
         costCredits: job.costCredits,
+    durationSec: job.durationSec,
         images: served,
         error: job.error,
         createdAt: job.createdAt,
