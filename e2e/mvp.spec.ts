@@ -24,7 +24,7 @@ test("MVP end-to-end: register → generate → template → checkout → ledger
   await page.locator("button.tab", { hasText: "Explore" }).click();
   await expect(page.locator(".tmpl-card").first()).toBeVisible({ timeout: 10_000 });
   await page.locator(".tmpl-body").first().click();
-  await expect(page.locator("button.tab", { hasText: "Create" })).toHaveClass(/active/);
+  await expect(page.locator("button.tab", { hasText: "Image" })).toHaveClass(/active/);
 
   // 4. Pricing → pack checkout (mock) → balance 24 + 1050 = 1074
   await page.locator("button.tab", { hasText: "Pricing" }).click();

@@ -6,7 +6,6 @@ import Link from "next/link";
 import { estimateGenerationCost, estimateModelCost, type Quality } from "@/lib/cost";
 import { PLANS, PACKS } from "@/lib/catalog";
 import { MODELS, getModel, getImageModels, getVideoModels } from "@/lib/model-registry";
-import { ASSISTANT_MODELS } from "@/lib/assistant-models";
 
 interface Me {
   credits: number;
@@ -78,7 +77,7 @@ interface JobStatus {
 type Tab = "create" | "edit" | "video" | "explore" | "gallery" | "ledger" | "orders" | "pricing";
 
 const TABS: Array<{ id: Tab; label: string }> = [
-  { id: "create", label: "Create" },
+  { id: "create", label: "Image" },
   { id: "edit", label: "Edit" },
   { id: "video", label: "Video" },
   { id: "explore", label: "Explore" },
@@ -118,9 +117,6 @@ const EDIT_MODEL_OPTIONS: Array<{ value: string; label: string }> = IMAGE_MODELS
   .filter((m) => m.supportsImageInput)
   .map((m) => ({ value: m.id, label: m.displayName }));
 
-const ASSISTANT_MODEL_OPTIONS: Array<{ value: string; label: string }> = ASSISTANT_MODELS.map(
-  (m) => ({ value: m.id, label: m.label }),
-);
 
 const STYLE_HINTS = [
   "soft studio lighting, high detail",
@@ -179,12 +175,12 @@ const LOCALE_STRINGS: Record<Locale, {
   noOrders: string; imagesVideo: string; videos: string; sec: string;
 }> = {
   en: {
-    tabs: { create: "Create", edit: "Edit", video: "Video", explore: "Explore", gallery: "Gallery", ledger: "Ledger", orders: "Orders", pricing: "Pricing" },
+    tabs: { create: "Image", edit: "Edit", video: "Video", explore: "Explore", gallery: "Gallery", ledger: "Ledger", orders: "Orders", pricing: "Pricing" },
     credits: "credits", topUp: "Top up", signOut: "Sign out", generate: "Generate", generating: "Generating…", beta: "Beta · free",
     orderStatus: { paid: "Paid", pending: "Pending", refunded: "Refunded" },
     ledgerLabels: { SIGNUP_BONUS: "Signup bonus", CHECKIN: "Daily check-in", PURCHASE: "Credit pack", SUBSCRIPTION: "Plan subscription", PRE_AUTH: "Generation (pre-auth)", SETTLE: "Generation settled", REFUND: "Refund (failure)", REVOKE: "Refund (payment)", EXPIRE: "Expired", ADMIN: "Adjustment" },
     pageHead: {
-      create: { title: "Create", desc: "Twin image engines — pick the best for your prompt. Cost shown before you commit." },
+      create: { title: "Image", desc: "Twin image engines — pick the best for your prompt. Cost shown before you commit." },
       edit: { title: "Edit", desc: "Upload a reference image and describe what to change." },
       video: { title: "Video", desc: "Text-to-video and image-to-video, powered by Seedance 2.0." },
       explore: { title: "Explore", desc: "Ready-made prompts with the exact model and parameters attached." },
@@ -222,12 +218,12 @@ const LOCALE_STRINGS: Record<Locale, {
     confirm: "Confirm",
   },
   zh: {
-    tabs: { create: "创作", edit: "编辑", video: "视频", explore: "灵感库", gallery: "画廊", ledger: "账本", orders: "订单", pricing: "定价" },
+    tabs: { create: "图片", edit: "编辑", video: "视频", explore: "灵感库", gallery: "画廊", ledger: "账本", orders: "订单", pricing: "定价" },
     credits: "积分", topUp: "充值", signOut: "退出", generate: "生成", generating: "生成中…", beta: "Beta · 免费",
     orderStatus: { paid: "已支付", pending: "待支付", refunded: "已退款" },
     ledgerLabels: { SIGNUP_BONUS: "注册奖励", CHECKIN: "每日签到", PURCHASE: "积分包", SUBSCRIPTION: "订阅", PRE_AUTH: "生成（预扣）", SETTLE: "生成完成", REFUND: "退款（失败）", REVOKE: "退款（支付）", EXPIRE: "已过期", ADMIN: "管理员调整" },
     pageHead: {
-      create: { title: "创作", desc: "双图像引擎 — 为你的提示词选最佳模型，生成前透明计费。" },
+      create: { title: "图片", desc: "双图像引擎 — 为你的提示词选最佳模型，生成前透明计费。" },
       edit: { title: "编辑", desc: "上传参考图，描述要修改的内容。" },
       video: { title: "视频", desc: "文生视频和图生视频，由 Seedance 2.0 驱动。" },
       explore: { title: "灵感库", desc: "精选模板，附带模型与参数，一键复用。" },
@@ -385,7 +381,6 @@ export function Workbench() {
   const [jobs, setJobs] = useState<JobStatus[]>([]);
   const finishedNotifiedRef = useRef<Set<string>>(new Set());
   const [assistantOut, setAssistantOut] = useState("");
-  const [assistantModel, setAssistantModel] = useState("deepseek");
   const [toast, setToast] = useState("");
   const [lightbox, setLightbox] = useState<string | null>(null);
   // Per-panel submitting guard — prevents double-click double-charge.
@@ -783,7 +778,7 @@ export function Workbench() {
     try {
       const data = await api<{ text: string; offline: boolean }>("/api/assistant", {
         method: "POST",
-        body: JSON.stringify({ prompt, mode, model: assistantModel }),
+        body: JSON.stringify({ prompt, mode }),
       });
       setAssistantOut(data.text + (data.offline ? "\n\n(offline mode)" : ""));
     } catch {
@@ -1041,9 +1036,6 @@ export function Workbench() {
                   <div className="assistant-head">
                     <span className="spark">✦</span>
                     {t.assistantHead}
-                    <select value={assistantModel} onChange={(e) => setAssistantModel(e.target.value)} style={{ marginLeft: "auto", fontSize: 12, padding: "2px 6px", borderRadius: 4, border: "1px solid var(--ink-4)" }}>
-                      {ASSISTANT_MODEL_OPTIONS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
-                    </select>
                   </div>
                   <div className="assistant-body">
                     <div className="assist-actions">
@@ -1120,7 +1112,8 @@ export function Workbench() {
                       </>
                     );
                   }
-                  if (gallery.length === 0) {
+                  const recentImages = gallery.filter((g) => !isVideoModel(g.model));
+                  if (recentImages.length === 0) {
                     return (
                       <div className="empty">
                         <span className="serif">{t.emptyCreate}</span>
@@ -1132,10 +1125,10 @@ export function Workbench() {
                     <>
                       <div className="results-head">
                         <h2>{t.recentImages}</h2>
-                        <span className="count">{gallery.length} {t.total}</span>
+                        <span className="count">{recentImages.length} {t.total}</span>
                       </div>
                       <div className="results-grid">
-                        {gallery.slice(0, 8).map((g) => (
+                        {recentImages.slice(0, 8).map((g) => (
                           <div key={g.id} className="result-card">
                             {renderMedia(g.url, g.model, g.prompt)}
                             {me?.plan === "free" && <div className="wm-badge">PixelDuo · AI 生成</div>}

@@ -1,9 +1,5 @@
-import { getDeepSeekKey, getDeepSeekBaseUrl, getModelVerseKey, getAliyunKey } from "./keys";
-import { ASSISTANT_MODELS } from "./assistant-models";
+import { getDeepSeekKey, getDeepSeekBaseUrl } from "./keys";
 import { readJsonCapped, outboundTimeoutMs } from "./store";
-
-export { ASSISTANT_MODELS };
-export type { AssistantModelOption } from "./assistant-models";
 
 export interface AssistantResult {
   text: string;
@@ -28,52 +24,13 @@ const STYLE_HINTS = [
   "minimal, warm neutral palette, centered composition",
 ];
 
-export async function improvePrompt(prompt: string, mode: string, modelId: string = "deepseek"): Promise<AssistantResult> {
-  const result = await callAssistantModel(prompt, mode, modelId);
-  if (result) return result;
-  // Fallback to deepseek, then offline
-  if (modelId !== "deepseek") {
-    const fallback = await callAssistantModel(prompt, mode, "deepseek");
-    if (fallback) return fallback;
-  }
-  return { text: offlineExpand(prompt, mode), offline: true };
-}
-
-async function callAssistantModel(prompt: string, mode: string, modelId: string): Promise<AssistantResult | null> {
-  let apiKey: string | undefined;
-  let apiUrl: string;
-  let modelName: string;
-  let extraBody: Record<string, unknown> = {};
-
-  switch (modelId) {
-    case "deepseek": {
-      apiKey = getDeepSeekKey();
-      apiUrl = `${getDeepSeekBaseUrl()}/chat/completions`;
-      // "deepseek-flash" is the official id for v4.1-flash — the /models
-      // list (probed 2026-09-19) exposes deepseek-flash + deepseek-v4-pro;
-      // the old "deepseek-v4-flash" id is gone.
-      modelName = "deepseek-flash";
-      extraBody = { thinking: { type: "disabled" } };
-      break;
-    }
-    case "glm": {
-      apiKey = getAliyunKey();
-      apiUrl = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
-      modelName = "glm-5.2";
-      // GLM-5.2 defaults to thinking mode; keep it for better prompt quality
-      break;
-    }
-    case "kimi": {
-      apiKey = getModelVerseKey();
-      apiUrl = "https://api.modelverse.cn/v1/chat/completions";
-      modelName = "kimi-k2.6";
-      break;
-    }
-    default:
-      return null;
-  }
-
-  if (!apiKey) return null;
+export async function improvePrompt(prompt: string, mode: string): Promise<AssistantResult> {
+  // Single backend model (official DeepSeek "deepseek-flash", the id for
+  // v4.1-flash per the /models list probed 2026-09-19). The model is
+  // deliberately not surfaced to users — the assistant is just "AI 润色".
+  const apiKey = getDeepSeekKey();
+  if (!apiKey) return { text: offlineExpand(prompt, mode), offline: true };
+  const apiUrl = `${getDeepSeekBaseUrl()}/chat/completions`;
 
   try {
     const controller = new AbortController();
@@ -84,14 +41,16 @@ async function callAssistantModel(prompt: string, mode: string, modelId: string)
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
         body: JSON.stringify({
-          model: modelName,
+          model: "deepseek-flash",
           messages: [
             { role: "system", content: SYSTEM },
             { role: "user", content: `${MODE_INSTRUCTIONS[mode] ?? MODE_INSTRUCTIONS.expand}\n\n${prompt}` },
           ],
           max_tokens: 320,
           temperature: 0.8,
-          ...extraBody,
+          // Flash is a non-thinking-by-default model; keep it explicit so a
+          // default change upstream cannot silently 3x the latency.
+          thinking: { type: "disabled" },
         }),
         signal: controller.signal,
         // No redirects — see callWithKeys in providers/index.ts.
@@ -105,7 +64,7 @@ async function callAssistantModel(prompt: string, mode: string, modelId: string)
         // Bound what a gateway can hand back: max_tokens is a request, not a
         // guarantee, and the response body is read up to 8 MB. A real reply is
         // a prompt expansion (a few hundred tokens), so this is generous.
-        if (text) return { text: text.slice(0, 4000), offline: false, model: modelId };
+        if (text) return { text: text.slice(0, 4000), offline: false };
       } else {
         // Cancel the unread body — see lib/router.ts for why.
         await res.body?.cancel().catch(() => undefined);
@@ -116,7 +75,7 @@ async function callAssistantModel(prompt: string, mode: string, modelId: string)
   } catch {
     // fall through
   }
-  return null;
+  return { text: offlineExpand(prompt, mode), offline: true };
 }
 
 function offlineExpand(prompt: string, mode: string): string {

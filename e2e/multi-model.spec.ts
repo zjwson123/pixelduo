@@ -144,16 +144,13 @@ test.describe("Multi-model image generation", () => {
     await expect(smartRouteBtn).toBeVisible();
   });
 
-  test("assistant model selector has multiple options", async ({ page }) => {
+  test("assistant panel hides the backend model from users", async ({ page }) => {
     await registerAndLogin(page);
     await page.waitForSelector(".composer");
-    const selector = page.locator("select");
-    await expect(selector).toBeVisible();
-    const options = await selector.locator("option").allTextContents();
-    expect(options.join(" ")).toContain("DeepSeek");
-    expect(options.join(" ")).toContain("GLM");
-    expect(options.join(" ")).toContain("Kimi");
-    // qwen dropped: DashScope key is restricted from qwen* models
-    expect(options.join(" ")).not.toContain("Qwen");
+    // The panel is just "AI polish" — no model dropdown may be exposed.
+    await expect(page.locator(".assistant")).toBeVisible();
+    await expect(page.locator(".assistant select")).toHaveCount(0);
+    const panelText = await page.locator(".assistant").textContent();
+    expect(panelText).not.toMatch(/deepseek|glm|kimi/i);
   });
 });
