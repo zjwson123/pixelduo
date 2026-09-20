@@ -70,33 +70,53 @@ export function webhookAllowed(url: string): boolean {
   }
 }
 
-// Best-effort, like the mail notification: the message is already stored, and a
-// dead webhook must not turn into an error for the person who wrote it.
-export async function notifyFeedback(input: NotifyInput): Promise<void> {
+export interface WebhookResult {
+  ok: boolean;
+  status?: number;
+  /** A little of the reply body: providers explain refusals there. */
+  body?: string;
+  error?: string;
+}
+
+// One POST, with the outcome REPORTED instead of captured — the app's own
+// notification path deliberately swallows failures (a stored message must not
+// fail because a webhook is down), but the pre-flight check in
+// scripts/verify-webhook.ts exists to show what the endpoint answered.
+export async function postWebhook(text: string): Promise<WebhookResult> {
   const url = webhookUrl();
-  if (!url) return;
+  if (!url) return { ok: false, error: "FEEDBACK_WEBHOOK_URL is not set" };
   if (!webhookAllowed(url)) {
-    captureError(new Error("FEEDBACK_WEBHOOK_URL must be https (or a loopback address for testing)"), {
-      scope: "notify",
-    });
-    return;
+    return { ok: false, error: "FEEDBACK_WEBHOOK_URL must be https (or a loopback address for testing)" };
   }
   try {
     const res = await fetch(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(buildWebhookBody(webhookKind(), buildWebhookText(input))),
+      body: JSON.stringify(buildWebhookBody(webhookKind(), text)),
       signal: AbortSignal.timeout(5000),
     });
-    if (!res.ok) {
-      // Read a little of the reply: webhook providers explain refusals there
-      // (a DingTalk bot without the required keyword answers 200 with errcode).
-      const detail = (await res.text().catch(() => "")).slice(0, 200);
-      captureError(new Error(`feedback webhook answered ${res.status}${detail ? `: ${detail}` : ""}`), {
-        scope: "notify",
-      });
-    }
+    const body = (await res.text().catch(() => "")).slice(0, 200);
+    // Feishu answers 200 with `code`, DingTalk/WeCom sometimes answer 200 with
+    // an errcode — so the body is part of the verdict, not just the status.
+    const refusedInBody = /"errcode"\s*:\s*(?!0)\d+|"code"\s*:\s*(?!0)\d+/.test(body);
+    return { ok: res.ok && !refusedInBody, status: res.status, body };
   } catch (e) {
-    captureError(e, { scope: "notify" });
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+// Best-effort, like the mail notification: the message is already stored, and a
+// dead webhook must not turn into an error for the person who wrote it.
+export async function notifyFeedback(input: NotifyInput): Promise<void> {
+  const url = webhookUrl();
+  if (!url) return;
+  const result = await postWebhook(buildWebhookText(input));
+  if (!result.ok) {
+    captureError(
+      new Error(
+        `feedback webhook failed: ${result.error ?? `answered ${result.status ?? "?"}${result.body ? `: ${result.body}` : ""}`}`,
+      ),
+      { scope: "notify" },
+    );
   }
 }

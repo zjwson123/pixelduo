@@ -199,7 +199,7 @@ PW_CHANNEL=chrome npx playwright test   # 本地用系统 Chrome；CI 用自带 
 - 支付主体/备案仍为壳子：Stripe/Paddle Provider 已实现，真实沙箱全流程 + 生产 key 待申请；支付宝/微信待国内主体
 - 邮箱验证 + 找回密码 + 登录防爆破 + 会话吊销 + **TOTP 2FA**（含备用码）+ **OAuth（Google/GitHub，配置即启用）** 已上线
 - 管理后台已上线（`/admin`，管理员角色 + ADMIN 账本闭环 + **feedback 留言收件箱**）
-- 反馈通知两条通道：邮件（`SMTP_URL`，见 docs/deploy.md）与**飞书/企微/钉钉群机器人**（`FEEDBACK_WEBHOOK_URL`，无需域名与 SPF，大陆主机最省事）；都未配置时留言仍完整保留在管理台收件箱，且管理台会显示哪个通道可用
+- 反馈通知两条通道：邮件（`SMTP_URL`，见 docs/deploy.md）与**飞书/企微/钉钉群机器人**（`FEEDBACK_WEBHOOK_URL`，无需域名与 SPF，大陆主机最省事，配好用 `npx tsx scripts/verify-webhook.ts` 一条命令验证）；都未配置时留言仍完整保留在管理台收件箱，且管理台会显示哪个通道可用
 - **用户反馈已上线**（`/feedback`，入口在首页页脚与工作台顶栏）：登录/未登录都能提交，分类 + 正文 + 回复邮箱；通知邮件发到 `FEEDBACK_TO`（默认运维邮箱），`Reply-To` 是留言者，邮箱里直接回复即回复用户；管理台 feedback 标签页可查看/标记已处理，登录状态下提交的留言随账号一并删除（见 [docs/deploy.md](docs/deploy.md)）
 - **公开 API 已上线**（`/api/v1/images/generations` + Key 管理 + 文档）；OAuth/支付等外部凭据就绪即启用
 - 图片对象备份：自托管已有 `backup-objects` 每日镜像 + 恢复演练；生产托管对象存储仍需开版本控制/跨区域复制

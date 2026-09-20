@@ -5,6 +5,7 @@ import {
   buildWebhookBody,
   buildWebhookText,
   notifyFeedback,
+  postWebhook,
   webhookAllowed,
   webhookKind,
   webhookUrl,
@@ -128,5 +129,52 @@ describe("feedback webhook channel", () => {
     // Silently skipped (and captured), because a misconfigured channel must not
     // fail the submission — but it must not leak the token either.
     await expect(notifyFeedback(input)).resolves.toBeUndefined();
+  });
+});
+
+describe("the webhook pre-flight check", () => {
+  it("reports the endpoint's own verdict, including a refusal carried in the body", async () => {
+    // A 200 with errcode is how DingTalk and WeCom refuse a message (keyword
+    // missing, token wrong); treating HTTP 200 as success would ship a channel
+    // that silently drops everything.
+    const refusing = http.createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ errcode: 310000, errmsg: "keywords not in content" }));
+    });
+    await new Promise<void>((resolve) => refusing.listen(0, "127.0.0.1", resolve));
+    const { port } = refusing.address() as AddressInfo;
+    try {
+      process.env.FEEDBACK_WEBHOOK_URL = `http://127.0.0.1:${port}/hook`;
+      const refused = await postWebhook("hello");
+      expect(refused.ok).toBe(false);
+      expect(refused.body).toContain("310000");
+
+      // A real 2xx with a success body is accepted.
+      const accepting = http.createServer((_req, res) => {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ code: 0, msg: "success" }));
+      });
+      await new Promise<void>((resolve) => accepting.listen(0, "127.0.0.1", resolve));
+      const okPort = (accepting.address() as AddressInfo).port;
+      process.env.FEEDBACK_WEBHOOK_URL = `http://127.0.0.1:${okPort}/hook`;
+      const accepted = await postWebhook("hello");
+      expect(accepted.ok).toBe(true);
+      expect(accepted.status).toBe(200);
+      await new Promise<void>((resolve) => accepting.close(() => resolve()));
+    } finally {
+      await new Promise<void>((resolve) => refusing.close(() => resolve()));
+    }
+  });
+
+  it("reports an unset url and a bad scheme instead of throwing", async () => {
+    delete process.env.FEEDBACK_WEBHOOK_URL;
+    const unset = await postWebhook("hello");
+    expect(unset.ok).toBe(false);
+    expect(unset.error).toMatch(/not set/i);
+
+    process.env.FEEDBACK_WEBHOOK_URL = "http://open.feishu.cn/hook";
+    const insecure = await postWebhook("hello");
+    expect(insecure.ok).toBe(false);
+    expect(insecure.error).toMatch(/https/i);
   });
 });

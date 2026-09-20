@@ -65,6 +65,17 @@ FEEDBACK_WEBHOOK_KIND="feishu|wecom|dingtalk|raw"                          # 默
 
 留言入库后会同时推送到这个群（`[PixelDuo] 反馈 · <分类>` + 留言者/套餐/来源页 + 参考号），与邮件互不依赖：两个都配就都发，都没配就只留在管理台收件箱。只接受 `https://`（本机回环地址除外），避免机器人 token 明文上网。管理台 feedback 标签页会分别显示两个通道是否已配置。
 
+配好之后一条命令验证（等价于邮件侧的 `verify-mail.ts`）：
+
+```bash
+FEEDBACK_WEBHOOK_URL="https://…" npx tsx scripts/verify-webhook.ts
+# → endpoint: 200 {"code":0,"msg":"success"}
+# → [OK] / [FAIL]（失败时按 errcode 给出原因：关键词校验、签名校验、token 失效、网络不通）
+npx tsx scripts/verify-webhook.ts --print    # 只打印将要发送的 JSON，不发送
+```
+
+它以退出码反映成败，可直接当部署门禁；端点返回 200 但 body 里 `errcode`/`code` 非 0 也算失败——钉钉/企微正是这么拒绝消息的（缺关键词等），只认 HTTP 状态会把"静默丢弃"当成成功。
+
 支持的 provider：`aliyun`、`qq`、`163`、`resend`、`sendgrid`、`postmark`、`ses`、`gmail`、`local`（不带参数运行会列出全部与注意事项）。脚本内置了主机/端口/协议，并在写盘前校验：**465 必须 `smtps://`（一上来就 TLS），587 用 `smtp://`（STARTTLS 升级）**——这对写错就是卡到超时，是首次配置最常见的失败。
 
 只想验证已写好的配置：
