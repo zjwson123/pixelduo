@@ -157,6 +157,11 @@ curl http://localhost:3000/api/health
 
 - 工作台路由为 **`/studio`**（未登录跳 `/login`）；`/register`、`/login` 为公开页
 - 若在 Docker 构建后本地 `tsx`/`vitest` 报 esbuild 或 Prisma 引擎的平台错误（Linux 二进制混入 macOS 的 `node_modules`），执行 `npx prisma generate` 并按需 `npm ci` 恢复本机平台依赖
+- **不要在开发服务器运行时执行 `npm run build` / `./scripts/ci-local.sh`**：构建会重写 `.next`，而正在跑的 `next start` 内存里仍是旧的 route 模块 —— 两者混用会让**每个页面都渲染错误边界（"出了点问题"）**，而服务照旧返回 200，看起来像代码回归。构建后重启即可；一条命令搞定（含本地 MinIO 凭据与生产模式启动断言所需的 `PAYMENT_ALLOW_MOCK=1`）：
+
+  ```bash
+  bash scripts/dev-restart.sh     # 重启 :3000 上的 app + worker，并校验 health/页面
+  ```
 
 CI（`.github/workflows/ci.yml`）：Postgres 服务容器下跑单测、构建、e2e。
 
