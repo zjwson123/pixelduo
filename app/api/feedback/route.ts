@@ -110,6 +110,11 @@ export async function POST(req: Request) {
 export async function GET() {
   try {
     const userId = await requireUserId();
+    // Same reasoning as the /api/jobs pair: a read with no state change still
+    // costs a query per call, and an authenticated client can loop it. The page
+    // fetches once per mount.
+    const limited = await enforceUserRateLimit(userId, "feedback-list", 120, 60_000);
+    if (limited) return fail(limited);
     const rows = await prisma.feedback.findMany({
       where: { userId },
       orderBy: { createdAt: "desc" },
