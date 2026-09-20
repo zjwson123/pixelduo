@@ -81,13 +81,68 @@ export function _setMailerForTests(mailer: Mailer | null) {
   cached = mailer;
 }
 
+// The outcome of the most recent send attempt, for the operator's own view.
+//
+// `mailDeliverable()` only proves SMTP_URL is set, which a wrong password also
+// satisfies — the failure then shows up as silence (feedback nobody receives,
+// password-reset links nobody gets). One slot, overwritten every time, so it
+// costs nothing and exposes nothing: it is shown in the admin console only, and
+// it is this PROCESS's last attempt (with several web replicas, whichever one
+// served the request).
+export interface MailAttempt {
+  at: string;
+  ok: boolean;
+  to: string;
+  subject: string;
+  response?: string;
+  error?: string;
+}
+
+let lastAttempt: MailAttempt | null = null;
+
+export function lastMailAttempt(): MailAttempt | null {
+  return lastAttempt;
+}
+
+export function _resetMailAttemptForTests() {
+  lastAttempt = null;
+}
+
+// The single choke point every outbound mail passes through, so the record is
+// about the mail path rather than about one caller: a broken password-reset mail
+// matters more than a broken notification.
+async function deliver(
+  to: string,
+  subject: string,
+  text: string,
+  html?: string,
+  replyTo?: string,
+): Promise<MailReceipt> {
+  try {
+    const receipt = (await getMailer().send(to, subject, text, html, replyTo)) ?? {};
+    lastAttempt = { at: new Date().toISOString(), ok: true, to, subject, response: receipt.response };
+    return receipt;
+  } catch (e) {
+    lastAttempt = {
+      at: new Date().toISOString(),
+      ok: false,
+      to,
+      subject,
+      // Truncated like every other place we keep a transport error: it can carry
+      // the SMTP host and the sender address, and nothing bounds its length.
+      error: (e instanceof Error ? e.message : String(e)).slice(0, 300),
+    };
+    throw e;
+  }
+}
+
 function baseUrl(): string {
   return process.env.NEXTAUTH_URL ?? "http://localhost:3000";
 }
 
 async function sendSafely(to: string, subject: string, text: string, html?: string): Promise<void> {
   try {
-    await getMailer().send(to, subject, text, html);
+    await deliver(to, subject, text, html);
   } catch (e) {
     // Alert on delivery failures (Sentry when configured); rethrow so the API
     // surfaces a failure instead of silently dropping the verification link.
@@ -296,7 +351,7 @@ function buildFeedbackNotification(input: FeedbackNotificationInput) {
 export async function sendFeedbackEmail(input: FeedbackNotificationInput): Promise<void> {
   const msg = buildFeedbackNotification(input);
   try {
-    await getMailer().send(msg.to, msg.subject, msg.text, undefined, msg.replyTo);
+    await deliver(msg.to, msg.subject, msg.text, undefined, msg.replyTo);
   } catch (e) {
     captureError(e, { mailTo: msg.to, mailSubject: "feedback" });
   }
@@ -309,12 +364,13 @@ export async function sendFeedbackEmail(input: FeedbackNotificationInput): Promi
 // send path deliberately does not surface.
 export async function sendFeedbackEmailWithReceipt(input: FeedbackNotificationInput): Promise<MailReceipt> {
   const msg = buildFeedbackNotification(input);
-  return (await getMailer().send(msg.to, msg.subject, msg.text, undefined, msg.replyTo)) ?? {};
+  return deliver(msg.to, msg.subject, msg.text, undefined, msg.replyTo);
 }
 
-// True when mail is actually deliverable. Without SMTP_URL the app uses the
+// True when mail is configured at all. Without SMTP_URL the app uses the
 // log-only mailer, so an operator who never configured one would otherwise
-// believe notifications are on their way to the feedback inbox.
+// believe notifications are on their way to the feedback inbox. It says nothing
+// about whether sending WORKS — that is what lastMailAttempt() answers.
 export function mailDeliverable(): boolean {
   return Boolean(process.env.SMTP_URL);
 }

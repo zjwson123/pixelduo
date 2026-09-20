@@ -49,6 +49,11 @@ interface FeedbackRow {
   handledAt: string | null;
 }
 
+interface MailState {
+  deliverable: boolean;
+  lastAttempt: { at: string; ok: boolean; to: string; subject: string; response?: string; error?: string } | null;
+}
+
 type Tab = "users" | "orders" | "images" | "feedback";
 
 async function api<T>(url: string, init?: RequestInit): Promise<T> {
@@ -69,7 +74,7 @@ export default function AdminPage() {
   const [images, setImages] = useState<ImageRow[]>([]);
   const [feedback, setFeedback] = useState<FeedbackRow[]>([]);
   const [unhandled, setUnhandled] = useState(0);
-  const [mailDeliverable, setMailDeliverable] = useState(true);
+  const [mail, setMail] = useState<MailState>({ deliverable: true, lastAttempt: null });
   const [showHandled, setShowHandled] = useState(false);
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
@@ -103,12 +108,12 @@ export default function AdminPage() {
 
   const refreshFeedback = useCallback(async () => {
     try {
-      const data = await api<{ feedback: FeedbackRow[]; unhandled: number; mailDeliverable: boolean }>(
+      const data = await api<{ feedback: FeedbackRow[]; unhandled: number; mail: MailState }>(
         `/api/admin/feedback?status=${showHandled ? "all" : "new"}`,
       );
       setFeedback(data.feedback);
       setUnhandled(data.unhandled);
-      setMailDeliverable(data.mailDeliverable);
+      setMail(data.mail);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "load failed");
     }
@@ -297,7 +302,7 @@ export default function AdminPage() {
         )}
         {tab === "feedback" && (
           <div style={{ marginTop: 16 }}>
-            {!mailDeliverable && (
+            {!mail.deliverable && (
               // Without SMTP_URL the app prints notifications to its own log
               // instead of sending them. An operator who assumes mail is flowing
               // would never open this tab and would miss every message.
@@ -306,6 +311,22 @@ export default function AdminPage() {
                 the server log. Messages below are still complete — set <code>SMTP_URL</code> + <code>EMAIL_FROM</code>{" "}
                 (docs/deploy.md) and run <code>npx tsx scripts/verify-mail.ts</code> to confirm delivery.
               </div>
+            )}
+            {mail.deliverable && mail.lastAttempt && !mail.lastAttempt.ok && (
+              // Configured is not the same as working: a rejected password or an
+              // unverified sender domain passes the configuration check and then
+              // fails silently, which looks exactly like "nobody wrote in".
+              <div className="form-error" style={{ marginBottom: 12 }}>
+                The last outgoing mail failed: {mail.lastAttempt.error ?? "unknown error"}
+                {" — "}check <code>SMTP_URL</code> / <code>EMAIL_FROM</code>, then run{" "}
+                <code>npx tsx scripts/verify-mail.ts</code> on the host (it explains the reason).
+              </div>
+            )}
+            {mail.deliverable && mail.lastAttempt?.ok && (
+              <p style={{ fontSize: 12, color: "#7c829a", marginBottom: 10 }}>
+                Last outgoing mail accepted {new Date(mail.lastAttempt.at).toLocaleString()}
+                {mail.lastAttempt.response ? ` — ${mail.lastAttempt.response}` : ""}
+              </p>
             )}
             <div className="row" style={{ marginBottom: 10 }}>
               <label style={{ fontSize: 13, color: "#7c829a" }}>

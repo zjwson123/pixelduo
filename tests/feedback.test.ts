@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { prisma } from "../lib/prisma";
-import { _setMailerForTests, FEEDBACK_TO_DEFAULT, type Mailer } from "../lib/mail";
+import { _resetMailAttemptForTests, _setMailerForTests, FEEDBACK_TO_DEFAULT, type Mailer } from "../lib/mail";
 import { FEEDBACK_MESSAGE_MAX, FEEDBACK_MESSAGE_MIN } from "../lib/feedback-meta";
 import { ADMIN_GUARD_LOCK } from "../lib/admin";
 
@@ -310,11 +310,15 @@ describe("admin feedback inbox", () => {  it("is admin-only, lists newest first,
     getServerSession.mockResolvedValue({ user: { id: admin.id, sv: 0, totpPending: false } });
     const list = await adminList(new Request("http://localhost/api/admin/feedback?status=all"));
     expect(list.status).toBe(200);
-    const payload = (await list.json()) as { feedback: Array<{ id: string }>; unhandled: number; mailDeliverable: boolean };
+    const payload = (await list.json()) as {
+      feedback: Array<{ id: string }>;
+      unhandled: number;
+      mail: { deliverable: boolean; lastAttempt: { ok: boolean } | null };
+    };
     expect(payload.unhandled).toBe(before + 2);
     // Whether notifications actually leave the box is part of the inbox view:
-    // an operator must not have to guess (see mailDeliverable).
-    expect(typeof payload.mailDeliverable).toBe("boolean");
+    // an operator must not have to guess (see mailDeliverable / lastMailAttempt).
+    expect(typeof payload.mail.deliverable).toBe("boolean");
     const ids = payload.feedback.map((f) => f.id);
     expect(ids.indexOf(newer.id)).toBeLessThan(ids.indexOf(older.id));
     // The unhandled-only view drops nothing that is still open.
@@ -353,18 +357,40 @@ describe("admin feedback inbox", () => {  it("is admin-only, lists newest first,
     });
   });
 
-  it("reports whether notifications can actually be delivered", async () => {
+  it("reports whether notifications can actually be delivered, and how the last attempt went", async () => {
     const admin = await makeUser("mail-flag", { role: "admin", credits: 10 });
     getServerSession.mockResolvedValue({ user: { id: admin.id, sv: 0, totpPending: false } });
+    const readMail = async () => {
+      const res = await adminList(new Request("http://localhost/api/admin/feedback"));
+      return ((await res.json()) as { mail: { deliverable: boolean; lastAttempt: { ok: boolean; error?: string } | null } }).mail;
+    };
     try {
       delete process.env.SMTP_URL;
-      const off = await adminList(new Request("http://localhost/api/admin/feedback"));
-      expect(((await off.json()) as { mailDeliverable: boolean }).mailDeliverable).toBe(false);
+      _resetMailAttemptForTests();
+      expect((await readMail()).deliverable).toBe(false);
+
+      // A rejected send is recorded, not invisible: a wrong password passes the
+      // configuration check and otherwise looks exactly like silence.
+      _setMailerForTests({
+        async send() {
+          throw new Error("535 5.7.8 Username and Password not accepted");
+        },
+      });
+      expectAccepted(await submit({ category: "bug", message: "records the failed attempt", email: anon("failed") }));
+      const failed = await readMail();
+      expect(failed.lastAttempt?.ok).toBe(false);
+      expect(failed.lastAttempt?.error).toContain("535");
+
       process.env.SMTP_URL = "smtp://user:pass@smtp.example.com:587";
-      const on = await adminList(new Request("http://localhost/api/admin/feedback"));
-      expect(((await on.json()) as { mailDeliverable: boolean }).mailDeliverable).toBe(true);
+      _setMailerForTests(recordingMailer);
+      expectAccepted(await submit({ category: "idea", message: "records the accepted attempt", email: anon("ok") }));
+      const okMail = await readMail();
+      expect(okMail.deliverable).toBe(true);
+      expect(okMail.lastAttempt?.ok).toBe(true);
     } finally {
       delete process.env.SMTP_URL;
+      _resetMailAttemptForTests();
+      _setMailerForTests(recordingMailer);
       await prisma.user.delete({ where: { id: admin.id } });
     }
   });
