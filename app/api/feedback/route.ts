@@ -11,6 +11,7 @@ import {
 } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { sendFeedbackEmail } from "@/lib/mail";
+import { notifyFeedback } from "@/lib/notify";
 import { FEEDBACK_CATEGORY_IDS, FEEDBACK_MESSAGE_MAX, FEEDBACK_MESSAGE_MIN } from "@/lib/feedback-meta";
 
 const schema = z.object({
@@ -91,6 +92,19 @@ export async function POST(req: Request) {
       page: body.page ?? null,
       locale: body.locale ?? null,
       userAgent: req.headers.get("user-agent")?.slice(0, 300) ?? null,
+    });
+    // Second channel, for deployments where mail is not an option (a Feishu/
+    // WeCom/DingTalk group bot is a URL, not an account with a verified domain).
+    // Also best-effort: it is off unless FEEDBACK_WEBHOOK_URL is set.
+    await notifyFeedback({
+      ref: row.id,
+      category: body.category,
+      message: body.message,
+      email,
+      userId: user?.id ?? null,
+      plan: user?.plan ?? null,
+      page: body.page ?? null,
+      locale: body.locale ?? null,
     });
 
     // The id is returned so the sender can quote it; it is their own row and

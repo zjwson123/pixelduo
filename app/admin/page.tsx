@@ -54,6 +54,10 @@ interface MailState {
   lastAttempt: { at: string; ok: boolean; to: string; subject: string; response?: string; error?: string } | null;
 }
 
+interface NotifyState {
+  webhook: boolean;
+}
+
 type Tab = "users" | "orders" | "images" | "feedback";
 
 async function api<T>(url: string, init?: RequestInit): Promise<T> {
@@ -75,6 +79,7 @@ export default function AdminPage() {
   const [feedback, setFeedback] = useState<FeedbackRow[]>([]);
   const [unhandled, setUnhandled] = useState(0);
   const [mail, setMail] = useState<MailState>({ deliverable: true, lastAttempt: null });
+  const [notify, setNotify] = useState<NotifyState>({ webhook: false });
   const [showHandled, setShowHandled] = useState(false);
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
@@ -108,12 +113,13 @@ export default function AdminPage() {
 
   const refreshFeedback = useCallback(async () => {
     try {
-      const data = await api<{ feedback: FeedbackRow[]; unhandled: number; mail: MailState }>(
+      const data = await api<{ feedback: FeedbackRow[]; unhandled: number; mail: MailState; notify: NotifyState }>(
         `/api/admin/feedback?status=${showHandled ? "all" : "new"}`,
       );
       setFeedback(data.feedback);
       setUnhandled(data.unhandled);
       setMail(data.mail);
+      setNotify(data.notify);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "load failed");
     }
@@ -307,9 +313,12 @@ export default function AdminPage() {
               // instead of sending them. An operator who assumes mail is flowing
               // would never open this tab and would miss every message.
               <div className="form-error" style={{ marginBottom: 12 }}>
-                Mail is not configured: <code>SMTP_URL</code> is unset, so feedback notifications are only written to
-                the server log. Messages below are still complete — set <code>SMTP_URL</code> + <code>EMAIL_FROM</code>{" "}
-                (docs/deploy.md) and run <code>npx tsx scripts/verify-mail.ts</code> to confirm delivery.
+                No notification channel is configured: <code>SMTP_URL</code> is unset, so feedback mail is only written
+                to the server log.
+                {notify.webhook
+                  ? " The webhook channel is set, so messages are still pushed."
+                  : " Set SMTP_URL + EMAIL_FROM (docs/deploy.md) and run npx tsx scripts/verify-mail.ts, or point FEEDBACK_WEBHOOK_URL at a Feishu/WeCom/DingTalk group bot."}{" "}
+                Messages below are complete either way.
               </div>
             )}
             {mail.deliverable && mail.lastAttempt && !mail.lastAttempt.ok && (

@@ -56,6 +56,15 @@ npx tsx scripts/setup-mail.ts local 2525                                # 无账
 
 **先从大陆网络实测的可达性（2026-09-20，本机同处国内）**：`smtpdm.aliyun.com:465`、`smtp.qq.com:465`、`smtp.163.com:465`、`smtp.resend.com:587`、`smtp.sendgrid.net:587` **可达**；**`smtp.gmail.com:465` 不可达**（被墙）。所以大陆主机请优先 aliyun/qq/163，别用 Gmail SMTP。（部署主机的网络才是决定性的，但同一网络环境下这个结论基本一致。）
 
+**更省事的替代通道：飞书/企微/钉钉群机器人（无需域名、无需 SPF、无需密码）**——在群里添加"自定义机器人"拿到 webhook URL，然后：
+
+```bash
+FEEDBACK_WEBHOOK_URL="https://open.feishu.cn/open-apis/bot/v2/hook/xxxx"   # 默认按飞书格式发
+FEEDBACK_WEBHOOK_KIND="feishu|wecom|dingtalk|raw"                          # 默认 feishu
+```
+
+留言入库后会同时推送到这个群（`[PixelDuo] 反馈 · <分类>` + 留言者/套餐/来源页 + 参考号），与邮件互不依赖：两个都配就都发，都没配就只留在管理台收件箱。只接受 `https://`（本机回环地址除外），避免机器人 token 明文上网。管理台 feedback 标签页会分别显示两个通道是否已配置。
+
 支持的 provider：`aliyun`、`qq`、`163`、`resend`、`sendgrid`、`postmark`、`ses`、`gmail`、`local`（不带参数运行会列出全部与注意事项）。脚本内置了主机/端口/协议，并在写盘前校验：**465 必须 `smtps://`（一上来就 TLS），587 用 `smtp://`（STARTTLS 升级）**——这对写错就是卡到超时，是首次配置最常见的失败。
 
 只想验证已写好的配置：

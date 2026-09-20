@@ -2,6 +2,7 @@ import { clampPage, ok, fail } from "@/lib/api";
 import { requireAdmin } from "@/lib/admin";
 import { prisma } from "@/lib/prisma";
 import { lastMailAttempt, mailDeliverable } from "@/lib/mail";
+import { webhookUrl } from "@/lib/notify";
 
 const PAGE_SIZE = 50;
 
@@ -49,6 +50,10 @@ export async function GET(req: Request) {
       page,
       pageSize: PAGE_SIZE,
       mail: { deliverable: mailDeliverable(), lastAttempt: lastMailAttempt() },
+      // The webhook is the channel that needs no provider account; the console
+      // shows whether either path is configured so "nobody wrote in" is never
+      // confused with "nobody was told".
+      notify: { webhook: Boolean(webhookUrl()) },
     });
   } catch (e) {
     return fail(e);
