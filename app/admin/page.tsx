@@ -34,7 +34,22 @@ interface ImageRow {
   createdAt: string;
 }
 
-type Tab = "users" | "orders" | "images";
+interface FeedbackRow {
+  id: string;
+  userId: string | null;
+  email: string;
+  category: string;
+  message: string;
+  status: string;
+  page: string | null;
+  locale: string | null;
+  plan: string | null;
+  userAgent: string | null;
+  createdAt: string;
+  handledAt: string | null;
+}
+
+type Tab = "users" | "orders" | "images" | "feedback";
 
 async function api<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
@@ -52,6 +67,9 @@ export default function AdminPage() {
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [orders, setOrders] = useState<OrderRow[]>([]);
   const [images, setImages] = useState<ImageRow[]>([]);
+  const [feedback, setFeedback] = useState<FeedbackRow[]>([]);
+  const [unhandled, setUnhandled] = useState(0);
+  const [showHandled, setShowHandled] = useState(false);
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
 
@@ -81,6 +99,25 @@ export default function AdminPage() {
       setErr(e instanceof Error ? e.message : "load failed");
     }
   }, []);
+
+  const refreshFeedback = useCallback(async () => {
+    try {
+      const data = await api<{ feedback: FeedbackRow[]; unhandled: number }>(
+        `/api/admin/feedback?status=${showHandled ? "all" : "new"}`,
+      );
+      setFeedback(data.feedback);
+      setUnhandled(data.unhandled);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "load failed");
+    }
+  }, [showHandled]);
+
+  // The unhandled count drives the tab badge, so it is fetched on mount rather
+  // than only after the operator opens the tab — otherwise new messages are
+  // invisible until someone thinks to look.
+  useEffect(() => {
+    refreshFeedback();
+  }, [refreshFeedback]);
 
   useEffect(() => {
     if (tab === "users") refreshUsers();
@@ -142,6 +179,16 @@ export default function AdminPage() {
     }
   };
 
+  const markHandled = async (row: FeedbackRow, status: "new" | "done") => {
+    setErr("");
+    try {
+      await api(`/api/admin/feedback/${row.id}`, { method: "PATCH", body: JSON.stringify({ status }) });
+      refreshFeedback();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "update failed");
+    }
+  };
+
   return (
     <div className="auth-wrap">
       <div className="auth-card" style={{ maxWidth: 900 }}>
@@ -150,13 +197,18 @@ export default function AdminPage() {
           <h1 style={{ fontWeight: 800, fontSize: 22, margin: 0 }}>PixelDuo Admin</h1>
         </div>
         <div className="row" style={{ marginTop: 14, gap: 8 }}>
-          {(["users", "orders", "images"] as Tab[]).map((t) => (
+          {(["users", "orders", "images", "feedback"] as Tab[]).map((t) => (
             <button
               key={t}
               className={`btn btn-sm ${tab === t ? "btn-dark" : "btn-ghost"}`}
               onClick={() => setTab(t)}
             >
               {t}
+              {t === "feedback" && unhandled > 0 && (
+                <span style={{ marginLeft: 6, padding: "1px 6px", borderRadius: 999, background: "var(--orange)", color: "#fff", fontSize: 11 }}>
+                  {unhandled}
+                </span>
+              )}
             </button>
           ))}
           <Link className="btn btn-ghost btn-sm" href="/studio" style={{ marginLeft: "auto" }}>← Workbench</Link>
@@ -240,6 +292,52 @@ export default function AdminPage() {
               ))}
             </tbody>
           </table>
+        )}
+        {tab === "feedback" && (
+          <div style={{ marginTop: 16 }}>
+            <div className="row" style={{ marginBottom: 10 }}>
+              <label style={{ fontSize: 13, color: "#7c829a" }}>
+                <input type="checkbox" checked={showHandled} onChange={(e) => setShowHandled(e.target.checked)} />{" "}
+                show handled
+              </label>
+              <span style={{ marginLeft: "auto", fontSize: 13, color: "#7c829a" }}>
+                {unhandled} unhandled
+              </span>
+            </div>
+            {feedback.length === 0 && <p style={{ color: "#7c829a", fontSize: 13 }}>Nothing here yet.</p>}
+            {feedback.map((f) => (
+              <div key={f.id} className="card" style={{ padding: 14, marginBottom: 10 }}>
+                <div className="row" style={{ gap: 8, flexWrap: "wrap", fontSize: 12, color: "#7c829a" }}>
+                  <span className="chip" style={{ cursor: "default" }}>{f.category}</span>
+                  <b style={{ color: "var(--ink, #111)" }}>{f.email}</b>
+                  {!f.userId && <span>(not signed in)</span>}
+                  {f.plan && <span>plan: {f.plan}</span>}
+                  {f.page && <span>from: {f.page}</span>}
+                  {f.locale && <span>{f.locale}</span>}
+                  <span style={{ marginLeft: "auto" }} title={f.id}>
+                    #{f.id.slice(-8)} · {new Date(f.createdAt).toLocaleString()}
+                  </span>
+                  {f.status === "done" && <span style={{ color: "#2f9e44" }}>handled</span>}
+                </div>
+                <p style={{ whiteSpace: "pre-wrap", margin: "10px 0 10px", fontSize: 13.5, lineHeight: 1.6 }}>{f.message}</p>
+                <div className="row" style={{ gap: 8 }}>
+                  <a className="btn btn-ghost btn-sm" href={`mailto:${encodeURIComponent(f.email)}?subject=${encodeURIComponent(`Re: [PixelDuo] ${f.category}`)}`}>
+                    Reply by email
+                  </a>
+                  {f.status === "new" ? (
+                    <button className="btn btn-ghost btn-sm" onClick={() => markHandled(f, "done")}>Mark handled</button>
+                  ) : (
+                    <button className="btn btn-ghost btn-sm" onClick={() => markHandled(f, "new")}>Reopen</button>
+                  )}
+                  {f.userAgent && (
+                    <span style={{ fontSize: 11, color: "#aab", marginLeft: "auto", maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={f.userAgent}>
+                      {f.userAgent}
+                    </span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
         )}
       </div>
     </div>

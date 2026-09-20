@@ -14,7 +14,7 @@ export async function POST(req: Request) {
     const userLimited = await enforceUserRateLimit(userId, "export", 3, 60 * 60_000);
     if (userLimited) return fail(userLimited);
     // Bounded take so a hoarded account cannot force an unbounded response.
-    const [user, ledger, images, jobs, orders] = await Promise.all([
+    const [user, ledger, images, jobs, orders, feedback] = await Promise.all([
       prisma.user.findUnique({
         where: { id: userId },
         select: { id: true, email: true, name: true, credits: true, plan: true, planRenewsAt: true, createdAt: true },
@@ -23,8 +23,11 @@ export async function POST(req: Request) {
       prisma.image.findMany({ where: { userId }, orderBy: { createdAt: "asc" }, take: 5000 }),
       prisma.job.findMany({ where: { userId }, orderBy: { createdAt: "asc" }, take: 5000 }),
       prisma.order.findMany({ where: { userId }, orderBy: { createdAt: "asc" }, take: 5000 }),
+      // Messages the user sent while signed in. Anonymous reports carry no
+      // userId and are therefore not attributable, so they cannot be included.
+      prisma.feedback.findMany({ where: { userId }, orderBy: { createdAt: "asc" }, take: 5000 }),
     ]);
-    return ok({ exportedAt: new Date().toISOString(), data: { user, ledger, images, jobs, orders } });
+    return ok({ exportedAt: new Date().toISOString(), data: { user, ledger, images, jobs, orders, feedback } });
   } catch (e) {
     return fail(e);
   }

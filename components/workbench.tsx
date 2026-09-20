@@ -142,6 +142,7 @@ type Locale = "en" | "zh";
 const LOCALE_STRINGS: Record<Locale, {
   tabs: Record<Tab, string>;
   credits: string; topUp: string; signOut: string; generate: string; generating: string; beta: string;
+  feedback: string; security: string; apiKeys: string; admin: string;
   orderStatus: Record<string, string>;
   ledgerLabels: Record<string, string>;
   pageHead: {
@@ -179,6 +180,7 @@ const LOCALE_STRINGS: Record<Locale, {
   en: {
     tabs: { create: "Image", edit: "Edit", video: "Video", explore: "Explore", gallery: "Gallery", ledger: "Ledger", orders: "Orders", pricing: "Pricing" },
     credits: "credits", topUp: "Top up", signOut: "Sign out", generate: "Generate", generating: "Generating…", beta: "Beta · free",
+    feedback: "Feedback", security: "Security", apiKeys: "API Keys", admin: "Admin",
     orderStatus: { paid: "Paid", pending: "Pending", refunded: "Refunded" },
     ledgerLabels: { SIGNUP_BONUS: "Signup bonus", CHECKIN: "Daily check-in", PURCHASE: "Credit pack", SUBSCRIPTION: "Plan subscription", PRE_AUTH: "Generation (pre-auth)", SETTLE: "Generation settled", REFUND: "Refund (failure)", REVOKE: "Refund (payment)", EXPIRE: "Expired", ADMIN: "Adjustment" },
     pageHead: {
@@ -223,6 +225,7 @@ const LOCALE_STRINGS: Record<Locale, {
   zh: {
     tabs: { create: "图片", edit: "编辑", video: "视频", explore: "灵感库", gallery: "画廊", ledger: "账本", orders: "订单", pricing: "定价" },
     credits: "积分", topUp: "充值", signOut: "退出", generate: "生成", generating: "生成中…", beta: "Beta · 免费",
+    feedback: "反馈", security: "安全", apiKeys: "API 密钥", admin: "管理台",
     orderStatus: { paid: "已支付", pending: "待支付", refunded: "已退款" },
     ledgerLabels: { SIGNUP_BONUS: "注册奖励", CHECKIN: "每日签到", PURCHASE: "积分包", SUBSCRIPTION: "订阅", PRE_AUTH: "生成（预扣）", SETTLE: "生成完成", REFUND: "退款（失败）", REVOKE: "退款（支付）", EXPIRE: "已过期", ADMIN: "管理员调整" },
     pageHead: {
@@ -1018,9 +1021,10 @@ export function Workbench() {
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M20 13.5A8.5 8.5 0 1 1 10.5 4a6.8 6.8 0 0 0 9.5 9.5z" /></svg>
             )}
           </button>
-          <Link className="btn btn-ghost btn-sm" href="/account/security">Security</Link>
-          <Link className="btn btn-ghost btn-sm" href="/account/api">API Keys</Link>
-          {me?.role === "admin" && <Link className="btn btn-ghost btn-sm" href="/admin">Admin</Link>}
+          <Link className="btn btn-ghost btn-sm" href="/account/security">{t.security}</Link>
+          <Link className="btn btn-ghost btn-sm" href="/account/api">{t.apiKeys}</Link>
+          <Link className="btn btn-ghost btn-sm" href="/feedback?from=/studio">{t.feedback}</Link>
+          {me?.role === "admin" && <Link className="btn btn-ghost btn-sm" href="/admin">{t.admin}</Link>}
           <button className="btn btn-ghost btn-sm" onClick={() => signOut({ callbackUrl: "/" })}>{t.signOut}</button>
         </div>
       </header>

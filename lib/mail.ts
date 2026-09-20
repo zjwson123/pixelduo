@@ -11,14 +11,14 @@ import {
 } from "./mail-html";
 
 export interface Mailer {
-  send(to: string, subject: string, text: string, html?: string): Promise<void>;
+  send(to: string, subject: string, text: string, html?: string, replyTo?: string): Promise<void>;
 }
 
 // No SMTP configured → print the email to the server log (dev/test mode).
 // Production must set SMTP_URL (SES / SendGrid / Resend / any SMTP).
 class DevMailer implements Mailer {
-  async send(to: string, subject: string, text: string, html?: string) {
-    console.log(`[mail:dev] To: ${to} | ${subject}\n${text}`);
+  async send(to: string, subject: string, text: string, html?: string, replyTo?: string) {
+    console.log(`[mail:dev] To: ${to}${replyTo ? ` | Reply-To: ${replyTo}` : ""} | ${subject}\n${text}`);
     if (html) console.log(`[mail:dev:html] ${html.slice(0, 160)}…`);
     // Test hook: MAIL_DEV_DIR=/tmp/pd-mail makes emails readable from e2e
     // specs (verification / reset link extraction).
@@ -26,7 +26,10 @@ class DevMailer implements Mailer {
     if (dir) {
       const safe = to.replace(/[^a-zA-Z0-9@._-]/g, "_");
       fs.mkdirSync(dir, { recursive: true });
-      fs.appendFileSync(path.join(dir, `${safe}.txt`), `Subject: ${subject}\n${text}\n\n---\n`);
+      fs.appendFileSync(
+        path.join(dir, `${safe}.txt`),
+        `Subject: ${subject}\n${replyTo ? `Reply-To: ${replyTo}\n` : ""}${text}\n\n---\n`,
+      );
     }
   }
 }
@@ -40,8 +43,8 @@ class SmtpMailer implements Mailer {
     this.from = from;
   }
 
-  async send(to: string, subject: string, text: string, html?: string) {
-    await this.transport.sendMail({ from: this.from, to, subject, text, ...(html ? { html } : {}) });
+  async send(to: string, subject: string, text: string, html?: string, replyTo?: string) {
+    await this.transport.sendMail({ from: this.from, to, subject, text, ...(html ? { html } : {}), ...(replyTo ? { replyTo } : {}) });
   }
 }
 
@@ -209,5 +212,57 @@ export async function sendTwoFactorStateEmail(to: string, enabled: boolean): Pro
     );
   } catch (e) {
     captureError(e, { mailTo: to, mailSubject: "2fa-state-change" });
+  }
+}
+
+// Where user feedback is delivered. The operator's address is the default so a
+// deployment that configures nothing still reaches a human; FEEDBACK_TO
+// overrides it (a support alias, a ticketing inbox, a mailing list).
+export const FEEDBACK_TO_DEFAULT = "zhaijunwei0@gmail.com";
+export function feedbackRecipient(): string {
+  return process.env.FEEDBACK_TO || FEEDBACK_TO_DEFAULT;
+}
+
+// Notify the operator of a submitted message. Plain text on purpose: the body
+// is user-written, and a text part cannot be an HTML injection surface in a
+// mail client. Reply-To is the reporter, so answering in the mail client goes
+// to them rather than back to the app's own From address.
+//
+// Deliberately NOT sendSafely: a mail outage must not turn a stored message
+// into an error for the person who wrote it. The row is the record (it is what
+// the admin console's feedback tab lists) and the failure is reported instead —
+// same bargain as the 2FA state mail below.
+export async function sendFeedbackEmail(input: {
+  ref: string;
+  category: string;
+  message: string;
+  email: string;
+  userId?: string | null;
+  plan?: string | null;
+  page?: string | null;
+  locale?: string | null;
+  userAgent?: string | null;
+}): Promise<void> {
+  const to = feedbackRecipient();
+  const context = [
+    `ref:      ${input.ref}`,
+    `category: ${input.category}`,
+    `from:     ${input.email}${input.userId ? ` (user ${input.userId})` : " (not signed in)"}`,
+    `plan:     ${input.plan ?? "—"}`,
+    `page:     ${input.page ?? "—"}`,
+    `locale:   ${input.locale ?? "—"}`,
+    `agent:    ${input.userAgent ?? "—"}`,
+    `at:       ${new Date().toISOString()}`,
+  ].join("\n");
+  try {
+    await getMailer().send(
+      to,
+      `[PixelDuo] ${input.category} · ${input.email}`,
+      `New feedback from the PixelDuo ${input.page ?? "app"}.\n\n${input.message}\n\n---\n${context}\n\nReply to this mail to answer ${input.email} directly.`,
+      undefined,
+      input.email,
+    );
+  } catch (e) {
+    captureError(e, { mailTo: to, mailSubject: "feedback" });
   }
 }

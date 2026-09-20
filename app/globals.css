@@ -459,6 +459,14 @@ img { display: block; }
   background: var(--surface-2); font-size: 14px; outline: none; transition: border .12s ease, box-shadow .12s ease;
 }
 .field input:focus { border-color: var(--indigo); box-shadow: 0 0 0 3px var(--indigo-soft); }
+/* Same surface as .field input, so a textarea (the feedback message) reads as
+   part of the same form instead of borrowing the studio's prompt box. */
+.field textarea {
+  width: 100%; padding: 12px 13px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--surface-2); color: var(--ink); font: inherit; font-size: 14px; line-height: 1.55;
+  resize: vertical; outline: none; transition: border .12s ease, box-shadow .12s ease;
+}
+.field textarea:focus { border-color: var(--indigo); box-shadow: 0 0 0 3px var(--indigo-soft); }
 .form-error { background: var(--red-soft); border: 1px solid var(--red); color: var(--red); font-size: 12.5px; padding: 9px 12px; border-radius: 10px; margin-bottom: 14px; }
 .auth-foot { margin-top: 18px; font-size: 13px; color: var(--ink-2); text-align: center; }
 

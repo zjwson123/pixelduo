@@ -33,7 +33,7 @@ const T = {
       ["退款政策是什么？", "14 天冷静期内，未使用的积分余额可申请退款；已生成的图片不可退款。详见条款。"],
       ["内容安全怎么保证？", "PixelDuo 严格 SFW。提示词在生成前过滤，每张图还会经过 AI 安全审核——违规内容自动拦截、退款并删除。"],
     ],
-    terms: "条款", privacy: "隐私",
+    terms: "条款", privacy: "隐私", feedback: "反馈",
     footer: "PixelDuo · 保留作品全部权益",
     choose: "选择",
   },
@@ -61,7 +61,7 @@ const T = {
       ["What is the refund policy?", "Unused credit balances may be refunded within a 14-day cooling-off period; images already generated are not refundable. See our Terms for details."],
       ["How does content safety work?", "PixelDuo is strictly SFW. Prompts are filtered before generation and every image passes an AI safety review — violations are blocked, refunded, and deleted automatically."],
     ],
-    terms: "Terms", privacy: "Privacy",
+    terms: "Terms", privacy: "Privacy", feedback: "Feedback",
     footer: "PixelDuo · You keep full ownership",
     choose: "Choose",
   },
@@ -257,6 +257,7 @@ export default function Landing() {
       <footer className="land-footer">
         {t.footer}
         <span className="foot-links">
+          <Link href="/feedback?from=/">{t.feedback}</Link>
           <Link href="/terms">{t.terms}</Link>
           <Link href="/privacy">{t.privacy}</Link>
         </span>

@@ -15,6 +15,7 @@ export default function PrivacyPage() {
           <li><b>Account</b> — email, password hash, display name.</li>
           <li><b>Usage</b> — generation records (prompts, model, credits), ledger entries, orders. Card details are handled by payment providers; we never store card numbers.</li>
           <li><b>Technical</b> — IP and device/browser data for security and rate limiting.</li>
+          <li><b>Feedback you send</b> — your message, the reply address, and (to make the report actionable) your plan, interface language, the page you sent it from and your browser's user-agent string. A copy is emailed to our support inbox so we can answer you there.</li>
         </ul>
 
         <h2>How we use it</h2>
@@ -26,7 +27,7 @@ export default function PrivacyPage() {
         <h2>Your rights (GDPR / PIPL)</h2>
         <ul>
           <li><b>Export</b> — request all your data via the account export feature.</li>
-          <li><b>Delete</b> — request account and related data deletion.</li>
+          <li><b>Delete</b> — request account and related data deletion; feedback you sent while signed in is removed with the account.</li>
           <li><b>Correct / withdraw / complain</b> — contact support@pixelduo.ai.</li>
         </ul>
 

@@ -30,6 +30,7 @@ model User {
   checkins Checkin[]
   grants   CreditGrant[]
   tokens   VerificationToken[]
+  feedback Feedback[]
 }
 
 // Single-use 2FA recovery codes (SHA-256 hashes only).
@@ -238,4 +239,35 @@ model Checkin {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, date])
+}
+
+// User feedback / messages (bug reports, feature ideas, billing questions).
+// Written by POST /api/feedback (also reachable signed-out, so a user who
+// cannot log in can still reach us), read in the admin console's feedback tab.
+// `userId` is nullable because anonymous reports are allowed; `email` is the
+// reply-to address (the account's when signed in, the form's when not) and is
+// what an operator answers, so it is kept even if the account is later deleted
+// by hand — the Cascade below is the erasure path, and it removes the whole row.
+model Feedback {
+  id         String    @id @default(cuid())
+  userId     String?
+  email      String
+  category   String // idea | bug | billing | other
+  message    String
+  status     String    @default("new") // new | done
+  // Context the reporter does not have to type: the page they were on, the UI
+  // language, their plan, the build. A bug report without these is usually
+  // unactionable ("the button did not work").
+  page       String?
+  locale     String?
+  plan       String?
+  userAgent  String?
+  createdAt  DateTime  @default(now())
+  handledAt  DateTime?
+  handledBy  String? // admin user id
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([status, createdAt])
+  @@index([userId])
 }
