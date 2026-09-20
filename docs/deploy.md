@@ -55,6 +55,12 @@ EMAIL_FROM="PixelDuo <no-reply@你的域名>"
 SMTP_URL="smtp://你的地址@gmail.com:<app-password>@smtp.gmail.com:587"
 ```
 
+两点容易踩的坑：
+
+- **发信域名要先验证**：Resend / SES / SendGrid 都要求把 `EMAIL_FROM` 的域名加进控制台并配置 **SPF + DKIM** DNS 记录，否则连接成功但邮件被拒（脚本会直接给出这条提示）；临时可用服务商给的 onboarding 地址当 `EMAIL_FROM`。
+- **到了也可能进垃圾箱**：Gmail 对未做 SPF/DKIM/DMARC 的发信方会归入垃圾邮件。所以"收到"要连垃圾箱一起看，长期做法是给发信域名配齐三条记录。
+- 生产部署**无法**用"只打印到日志"模式：`assertProductionConfig()` 要求 `SMTP_URL`（或显式 `MAIL_DEV_MODE=1`）。密码重置/验证邮件依赖同一条通道，所以这不是反馈功能单独的需求——生产必须配。
+
 配置后用自托管机或本地任一环境提交一条真实留言，确认 `FEEDBACK_TO` 邮箱收到通知、且直接回复能回到留言者。不接 SMTP 也能用——留言仍在管理台 feedback 标签页里，只是不会推送到邮箱。
 
 **一条命令验证投递**（配置后先跑这个，再谈"用户能不能收到"）：

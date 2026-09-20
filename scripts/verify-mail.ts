@@ -25,6 +25,15 @@ function hint(error: string): string | null {
   if (/PBL|Spamhaus|blacklist|5\.7\.1/i.test(error)) {
     return "The sending IP is blocklisted (SES/Resend exist for exactly this reason). Use a provider's relay, not a bare IP.";
   }
+  // The most common first-run failure at Resend/SES/SendGrid: the transport
+  // authenticates fine and the message is refused because EMAIL_FROM's domain
+  // has not been verified (with its SPF/DKIM records) in the provider console.
+  if (/not verified|domain is not verified|not authorized to send|553|5\.7\.2|Sender address rejected|not allowed to send/i.test(error)) {
+    return "The provider refuses EMAIL_FROM's domain. Verify the sending domain (Resend/SES/SendGrid all require it) and add its SPF + DKIM DNS records; until then use the provider's own onboarding address as EMAIL_FROM.";
+  }
+  if (/421|rate limit|too many|Daily message quota|5\.4\.5/i.test(error)) {
+    return "The provider accepted the connection but refused this message (quota/rate limit, or a sandbox account restricted to its own address). Check the provider's dashboard.";
+  }
   if (/ETIMEDOUT|ECONNREFUSED|ENOTFOUND|getaddrinfo/i.test(error)) {
     return "Could not reach the SMTP host — check the URL's host/port (587 + STARTTLS is the common pair) and outbound firewall rules.";
   }
