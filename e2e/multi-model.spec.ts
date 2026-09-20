@@ -72,6 +72,17 @@ test.describe("Multi-model image generation", () => {
     expect(allText).toContain("Seedance");
     expect(allText).not.toContain("Wan 2.7 T2V");
     expect(allText).not.toContain("Wan 2.7 I2V");
+
+    // The selector must render EXACTLY ONCE per enabled video model. The 续写
+    // commit added a second copy of the whole block without removing the first,
+    // so the tab showed two identical "Model / Seedance 2.0" rows and read as a
+    // duplicated model — joining the chip texts (above) cannot see that.
+    const modelLabels = await page.locator(".composer .field-label", { hasText: /^Model$/ }).count();
+    expect(modelLabels).toBe(1);
+    expect(modelChips.filter((c) => c.trim() === "Seedance 2.0")).toHaveLength(1);
+    // 2.5 is registered but disabled (Ark answers ModelNotOpen), so it must not
+    // be offered as a choice at all.
+    expect(modelChips.filter((c) => c.trim() === "Seedance 2.5")).toHaveLength(0);
   });
 
   test("generates video end-to-end with mock provider", async ({ page }) => {
@@ -97,6 +108,17 @@ test.describe("Multi-model image generation", () => {
     // in an unclaimable state (see tests/queue-video.test.ts).
     await expect(page.locator("video")).toBeVisible({ timeout: 60_000 });
     await expect(page.locator(".results-head")).toContainText(/video/i, { timeout: 10_000 });
+
+    // 续写 (extend) is offered on a finished clip. Entering the mode must show
+    // the source→total banner, hide the model selector (the continuation runs
+    // on the SOURCE clip's model, so there is nothing to choose) and relabel
+    // the duration row to the segment length.
+    await page.locator(".dl-link", { hasText: /^Extend$/ }).click();
+    const banner = page.locator(".composer span", { hasText: /^Extend mode:/ }).first();
+    await expect(banner).toContainText(/source \d+s/);
+    await expect(banner).toContainText("Seedance 2.0");
+    await expect(page.locator(".composer .field-label", { hasText: /^Model$/ })).toHaveCount(0);
+    await expect(page.locator(".composer .field-label", { hasText: /^Extend by$/ })).toHaveCount(1);
   });
 
   test("queues two image jobs back-to-back and completes both", async ({ page }) => {

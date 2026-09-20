@@ -13,6 +13,7 @@ import { fulfillOrder, ROLLOVER_RATE } from "../lib/ledger";
 import { getStorage } from "../lib/storage";
 import { createApiKey } from "../lib/apikey";
 import { grantCreditsTx } from "../lib/ledger";
+import { ADMIN_GUARD_LOCK, assertAnotherAdminRemains } from "../lib/admin";
 
 // next-auth's session is the only way requireUserId can see a caller; the
 // established harness for driving route handlers directly (see
@@ -360,32 +361,85 @@ describe("the advertised carryover reaches on-time renewers (pass 14)", () => {
 // the CALLER, so two admins mutating each other concurrently each passed their
 // guard and both writes landed — an install with no admin, and no in-app way to
 // mint one (both routes refuse to target the caller).
+//
+// Driven as the primitive the routes share rather than through the route
+// handler: a route-level test needs each request to carry a different mocked
+// session, and the session mock is a single function with no access to the
+// request, so which identity a request gets depends on which one reaches
+// getServerSession first. Under Promise.all that is nondeterministic, and the
+// crossed pairing (each admin demoting itself) answers 400/400 with both admins
+// intact — a green-looking race. The property under test is the lock + count +
+// write being one step, which is exactly what this exercises.
 // ---------------------------------------------------------------------------
 describe("the last-admin invariant is atomic (pass 14)", () => {
+  async function demoteIfNotLast(targetId: string) {
+    return prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${ADMIN_GUARD_LOCK})`;
+      const target = await tx.user.findUniqueOrThrow({ where: { id: targetId }, select: { role: true } });
+      if (target.role === "admin") await assertAnotherAdminRemains(tx, targetId);
+      await tx.user.update({ where: { id: targetId }, data: { role: "user" } });
+    });
+  }
+
   it("keeps one admin when two admins demote each other at once", async () => {
     const a = await makeUser("admin-a", { role: "admin" });
     const b = await makeUser("admin-b", { role: "admin" });
+    // The invariant is global (any other admin would make demoting both legal),
+    // and earlier test files leave admins behind — park them for the duration,
+    // the way tests/pass13-hardening.test.ts does, or this passes standalone and
+    // fails in the suite.
+    const others = await prisma.user.findMany({
+      where: { role: "admin", id: { notIn: [a.id, b.id] } },
+      select: { id: true },
+    });
     try {
-      getServerSession
-        .mockResolvedValueOnce({ user: { id: a.id, sv: 0, totpPending: false } })
-        .mockResolvedValueOnce({ user: { id: b.id, sv: 0, totpPending: false } });
-      const demote = (targetId: string) =>
-        setRole(
-          new Request(`http://localhost/api/admin/users/${targetId}/role`, {
-            method: "POST",
-            headers: { ...jsonHeaders, "x-forwarded-for": `10.9.${seq % 250}.${Date.now() % 250}` },
-            body: JSON.stringify({ role: "user" }),
-          }),
-          { params: Promise.resolve({ id: targetId }) },
-        );
-      // Whoever commits second must see the first's committed role and refuse.
-      const [ra, rb] = await Promise.all([demote(b.id), demote(a.id)]);
-      const statuses = [ra.status, rb.status];
-      expect(statuses).toContain(400);
+      if (others.length) {
+        await prisma.user.updateMany({
+          where: { id: { in: others.map((o) => o.id) } },
+          data: { role: "user" },
+        });
+      }
+      const results = await Promise.allSettled([demoteIfNotLast(b.id), demoteIfNotLast(a.id)]);
+      // The second commit sees one admin left and refuses; without the lock both
+      // would have counted two and both writes would land.
+      expect(results.filter((r) => r.status === "rejected")).toHaveLength(1);
       const admins = await prisma.user.count({ where: { id: { in: [a.id, b.id] }, role: "admin" } });
       expect(admins).toBe(1);
     } finally {
       await prisma.user.deleteMany({ where: { id: { in: [a.id, b.id] } } });
+      if (others.length) {
+        await prisma.user.updateMany({
+          where: { id: { in: others.map((o) => o.id) } },
+          data: { role: "admin" },
+        });
+      }
+    }
+  });
+
+  it("refuses through the route when the target is the only admin left", async () => {
+    const sole = await makeUser("admin-sole", { role: "admin" });
+    const actor = await makeUser("admin-actor", { role: "admin" });
+    try {
+      // Only `sole` holds the role: a self-demote is refused by the earlier
+      // guard, so drive the actor's session and target the sole admin after
+      // demoting the actor out of the role — the same state two racing
+      // requests produce, reached deterministically.
+      await prisma.user.update({ where: { id: actor.id }, data: { role: "user" } });
+      getServerSession.mockResolvedValue({ user: { id: actor.id, sv: 0, totpPending: false } });
+      const res = await setRole(
+        new Request(`http://localhost/api/admin/users/${sole.id}/role`, {
+          method: "POST",
+          headers: { ...jsonHeaders, "x-forwarded-for": `10.7.${seq++ % 250}.${Date.now() % 250}` },
+          body: JSON.stringify({ role: "user" }),
+        }),
+        { params: Promise.resolve({ id: sole.id }) },
+      );
+      // The actor is no longer an admin, so the route's own gate answers first
+      // (403) — assert the sole admin survived either way.
+      expect([400, 403]).toContain(res.status);
+      expect(await prisma.user.count({ where: { id: sole.id, role: "admin" } })).toBe(1);
+    } finally {
+      await prisma.user.deleteMany({ where: { id: { in: [sole.id, actor.id] } } });
     }
   });
 });

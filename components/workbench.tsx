@@ -695,7 +695,12 @@ export function Workbench() {
     const srcDur = j.durationSec ?? 0;
     if (srcDur + 4 > 30) return setToast(locale === "zh" ? "该视频已到 30 秒上限" : "Already at the 30s cap");
     setExtendSrc({ jobId: j.id, durationSec: srcDur });
-    setVideoModel("seedance");
+    // The model follows the SOURCE clip, not a hardcoded default: the segment
+    // is continued by the same provider model (/api/video uses src.model), and
+    // the cost estimate + duration range below are read off videoModel — so a
+    // hardcoded id would show the wrong price the moment a second Ark video
+    // model is enabled.
+    setVideoModel(j.model);
     setVideoPrompt(j.prompt);
     setVideoDuration(Math.min(15, 30 - srcDur));
     setVideoImage(null);
@@ -1290,59 +1295,43 @@ export function Workbench() {
                   </div>
                 </div>
 
-                <div>
-                  <div className="field-label" style={{ marginBottom: 8 }}>{t.model}</div>
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                    {VIDEO_MODEL_OPTIONS.map((m) => (
-                      <button key={m.value} className={`chip${videoModel === m.value ? " on" : ""}`} onClick={() => {
-                        setVideoModel(m.value);
-                        // Clamp duration to the new model's valid range
-                        const r = getModel(m.value)?.durationSecRange;
-                        if (r) setVideoDuration((d) => Math.max(r.min, Math.min(r.max, d)));
-                        // Clear uploaded reference image if the new model doesn't use one
-                        if (!getModel(m.value)?.supportsImageInput) setVideoImage(null);
-                      }}>
-                        {m.label}
-                      </button>
-                    ))}
+                {/* Hidden while extending: the continuation runs on the SOURCE
+                    clip's model (/api/video uses src.model), so the choice is
+                    fixed — and the cost shown below is computed from
+                    videoModel, so offering a switch would quote a price the
+                    job will not use. The banner names the model instead. */}
+                {!extendSrc && (
+                  <div>
+                    <div className="field-label" style={{ marginBottom: 8 }}>{t.model}</div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                      {VIDEO_MODEL_OPTIONS.map((m) => (
+                        <button key={m.value} className={`chip${videoModel === m.value ? " on" : ""}`} onClick={() => {
+                          setVideoModel(m.value);
+                          // Clamp duration to the new model's valid range
+                          const r = getModel(m.value)?.durationSecRange;
+                          if (r) setVideoDuration((d) => Math.max(r.min, Math.min(r.max, d)));
+                          // Clear uploaded reference image if the new model doesn't use one
+                          if (!getModel(m.value)?.supportsImageInput) setVideoImage(null);
+                        }}>
+                          {m.label}
+                        </button>
+                      ))}
+                    </div>
+                    <div style={{ marginTop: 6, fontSize: 12, color: "var(--ink-3)" }}>
+                      {VIDEO_MODELS.find((m) => m.id === videoModel)?.description ?? ""}
+                    </div>
                   </div>
-                  <div style={{ marginTop: 6, fontSize: 12, color: "var(--ink-3)" }}>
-                    {VIDEO_MODELS.find((m) => m.id === videoModel)?.description ?? ""}
-                  </div>
-                </div>
+                )}
 
                 {extendSrc && (
                   <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 12px", borderRadius: 10, background: "var(--surface-2)", border: "1px solid var(--indigo)" }}>
                     <span style={{ fontSize: 13, color: "var(--ink)" }}>
                       {locale === "zh"
-                        ? `续写模式：原片 ${extendSrc.durationSec}s + 续写 ${videoDuration}s → 成片 ${extendSrc.durationSec + videoDuration}s`
-                        : `Extend mode: source ${extendSrc.durationSec}s + ${videoDuration}s → ${extendSrc.durationSec + videoDuration}s total`}
+                        ? `续写模式：${getModel(videoModel)?.displayName ?? ""} · 原片 ${extendSrc.durationSec}s + 续写 ${videoDuration}s → 成片 ${extendSrc.durationSec + videoDuration}s`
+                        : `Extend mode: ${getModel(videoModel)?.displayName ?? ""} · source ${extendSrc.durationSec}s + ${videoDuration}s → ${extendSrc.durationSec + videoDuration}s total`}
                     </span>
                     <button className="chip" style={{ marginLeft: "auto", padding: "4px 10px" }} onClick={() => setExtendSrc(null)}>{t.extendCancel}</button>
                   </div>
-                )}
-
-                {!extendSrc && (
-                <div>
-                  <div className="field-label" style={{ marginBottom: 8 }}>{t.model}</div>
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                    {VIDEO_MODEL_OPTIONS.map((m) => (
-                      <button key={m.value} className={`chip${videoModel === m.value ? " on" : ""}`} onClick={() => {
-                        setVideoModel(m.value);
-                        // Clamp duration to the new model's valid range
-                        const r = getModel(m.value)?.durationSecRange;
-                        if (r) setVideoDuration((d) => Math.max(r.min, Math.min(r.max, d)));
-                        // Clear uploaded reference image if the new model doesn't use one
-                        if (!getModel(m.value)?.supportsImageInput) setVideoImage(null);
-                      }}>
-                        {m.label}
-                      </button>
-                    ))}
-                  </div>
-                  <div style={{ marginTop: 6, fontSize: 12, color: "var(--ink-3)" }}>
-                    {VIDEO_MODELS.find((m) => m.id === videoModel)?.description ?? ""}
-                  </div>
-                </div>
                 )}
 
                 <div className="opt-row">
