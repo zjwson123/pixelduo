@@ -23,6 +23,14 @@ export S3_ENDPOINT=http://localhost:9000
 export S3_REGION=us-east-1
 export S3_BUCKET=pixelduo
 export S3_FORCE_PATH_STYLE=true
+# Mail: unset (or empty) → the log-only DevMailer, which prints every message —
+# verification and reset links included — to /tmp/pd-dev-app.log. Export
+# SMTP_URL to exercise the real transport instead, e.g. against the local sink:
+#   node scripts/dev-smtp-sink.mjs 2525 /tmp/pd-smtp-inbox.log &
+#   SMTP_URL=smtp://127.0.0.1:2525 bash scripts/dev-restart.sh
+# (a real provider: smtp://user:pass@host:port — Gmail needs an app password).
+export SMTP_URL="${SMTP_URL:-}"
+export EMAIL_FROM="${EMAIL_FROM:-PixelDuo <no-reply@pixelduo.ai>}"
 # Credentials come from the MinIO container, so they are never written to disk.
 if [ -z "${S3_ACCESS_KEY_ID:-}" ]; then
   minio_env="$(docker inspect pixelduo-storage --format '{{range .Config.Env}}{{println .}}{{end}}')"

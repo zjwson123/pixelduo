@@ -162,6 +162,7 @@ curl http://localhost:3000/api/health
   ```bash
   bash scripts/dev-restart.sh     # 重启 :3000 上的 app + worker，并校验 health/页面
   ```
+- **邮件**：本地默认走 `DevMailer`——邮件（含验证/重置链接）打印到 `/tmp/pd-dev-app.log`，不投递。要验证真实发信链路又不想申请账号，用仓库里的 SMTP 接收器：`node scripts/dev-smtp-sink.mjs 2525 /tmp/pd-smtp-inbox.log &` 然后 `SMTP_URL=smtp://127.0.0.1:2525 bash scripts/dev-restart.sh`，收到的完整报文（信封收件人 + 报文头）写在 `/tmp/pd-smtp-inbox.log`。生产发信配置见 [docs/deploy.md](docs/deploy.md)（`SMTP_URL` / `EMAIL_FROM`）
 
 CI（`.github/workflows/ci.yml`）：Postgres 服务容器下跑单测、构建、e2e。
 

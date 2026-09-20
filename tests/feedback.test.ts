@@ -10,6 +10,21 @@ vi.mock("next-auth", async (importOriginal) => {
   return { ...actual, getServerSession: (...args: unknown[]) => getServerSession(...args) };
 });
 
+// The SMTP transport, so the production send path can be asserted without a
+// mail provider: SmtpMailer's own code (createTransport + the sendMail payload)
+// otherwise only ever runs in a real deployment — the class of gap this repo
+// has been bitten by before (a fix that silently never executes).
+interface SmtpPayload {
+  from: string;
+  to: string;
+  subject: string;
+  text: string;
+  replyTo?: string;
+}
+const sendMail = vi.fn(async (_payload: SmtpPayload) => ({ messageId: "mocked" }));
+const createTransport = vi.fn((_url: string) => ({ sendMail }));
+vi.mock("nodemailer", () => ({ default: { createTransport: (url: string) => createTransport(url) } }));
+
 const { POST: submitFeedback, GET: listMine } = await import("../app/api/feedback/route");
 const { GET: adminList } = await import("../app/api/admin/feedback/route");
 const { PATCH: adminPatch } = await import("../app/api/admin/feedback/[id]/route");
@@ -194,6 +209,33 @@ describe("feedback submission", () => {
     expectAccepted(await submit({ category: "other", message: "the mailer is down but keep this", email: anon("resilient") }));
     expect(await prisma.feedback.count({ where: { email: anon("resilient") } })).toBe(1);
     _setMailerForTests(recordingMailer);
+  });
+
+  it("goes through the real SMTP transport when SMTP_URL is configured", async () => {
+    _setMailerForTests(null); // let getMailer() build from the environment
+    process.env.SMTP_URL = "smtp://user:secret@smtp.example.com:587";
+    process.env.EMAIL_FROM = "PixelDuo <no-reply@pixelduo.ai>";
+    sendMail.mockClear();
+    createTransport.mockClear();
+    try {
+      getServerSession.mockResolvedValue(null);
+      const address = anon("smtp");
+      expectAccepted(await submit({ category: "idea", message: "smtp transport path check", email: address }));
+
+      expect(createTransport).toHaveBeenCalledWith("smtp://user:secret@smtp.example.com:587");
+      expect(sendMail).toHaveBeenCalledTimes(1);
+      const payload = sendMail.mock.calls[0][0];
+      // The three fields an operator's mailbox and a reply depend on.
+      expect(payload.from).toBe("PixelDuo <no-reply@pixelduo.ai>");
+      expect(payload.to).toBe(FEEDBACK_TO_DEFAULT);
+      expect(payload.replyTo).toBe(address);
+      expect(payload.subject).toContain("idea");
+      expect(payload.text).toContain("smtp transport path check");
+    } finally {
+      delete process.env.SMTP_URL;
+      delete process.env.EMAIL_FROM;
+      _setMailerForTests(recordingMailer);
+    }
   });
 
   it("rate limits per IP and per account", async () => {

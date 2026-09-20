@@ -44,6 +44,21 @@
 - 自动附带的定位信息：套餐、界面语言、来源页面（只取路径，不含 query，避免把重置令牌之类带进邮箱）、User-Agent
 - SMTP 故障不会丢留言：先入库再发信，发信失败只记录告警
 
+**发信配置（决定你能否收到通知）**：`SMTP_URL` + `EMAIL_FROM` 必须指向一个真实发信服务，未配置时邮件走 `DevMailer`——**只打印到容器日志，不投递**。可选任一 SMTP：
+
+```bash
+# Resend（推荐，域名可控）：先在控制台验证发信域名
+SMTP_URL="smtp://resend:<API_KEY>@smtp.resend.com:587"
+EMAIL_FROM="PixelDuo <no-reply@你的域名>"
+# Amazon SES / SendGrid / Postmark 同理：smtp://用户名:密码@smtp主机:端口
+# Gmail 应用专用密码（个人收件箱，需先开两步验证并生成 app password）
+SMTP_URL="smtp://你的地址@gmail.com:<app-password>@smtp.gmail.com:587"
+```
+
+配置后用自托管机或本地任一环境提交一条真实留言，确认 `FEEDBACK_TO` 邮箱收到通知、且直接回复能回到留言者。不接 SMTP 也能用——留言仍在管理台 feedback 标签页里，只是不会推送到邮箱。
+
+本地想在无账号的情况下验证发信链路：`node scripts/dev-smtp-sink.mjs 2525 /tmp/pd-smtp-inbox.log &` 后 `SMTP_URL=smtp://127.0.0.1:2525 bash scripts/dev-restart.sh`，提交留言，收到的报文（含信封收件人）写在 `/tmp/pd-smtp-inbox.log`。
+
 ## 部署步骤
 
 ```bash
