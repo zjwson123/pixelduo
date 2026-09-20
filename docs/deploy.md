@@ -57,6 +57,17 @@ SMTP_URL="smtp://你的地址@gmail.com:<app-password>@smtp.gmail.com:587"
 
 配置后用自托管机或本地任一环境提交一条真实留言，确认 `FEEDBACK_TO` 邮箱收到通知、且直接回复能回到留言者。不接 SMTP 也能用——留言仍在管理台 feedback 标签页里，只是不会推送到邮箱。
 
+**一条命令验证投递**（配置后先跑这个，再谈"用户能不能收到"）：
+
+```bash
+SMTP_URL="..." EMAIL_FROM="..." npx tsx scripts/verify-mail.ts
+# → transport / from / recipient
+# → server response: 250 2.0.0 Ok: queued as …      ← 接收端自己的应答，这才是投递证据
+# → [OK] / [FAIL]（失败时给出 535 认证、PBL 黑名单、TLS 端口等具体提示）
+```
+
+它以 `--exit-code` 反映成败，可直接当部署门禁；无 `SMTP_URL` 时它主动失败并说明原因，**不会**让你误以为"没报错就是发出去了"。管理台 feedback 标签页在未配置 `SMTP_URL` 时也会显示提示，避免运维以为通知在发。
+
 本地想在无账号的情况下验证发信链路：`node scripts/dev-smtp-sink.mjs 2525 /tmp/pd-smtp-inbox.log &` 后 `SMTP_URL=smtp://127.0.0.1:2525 bash scripts/dev-restart.sh`，提交留言，收到的报文（含信封收件人）写在 `/tmp/pd-smtp-inbox.log`。
 
 ## 部署步骤

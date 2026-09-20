@@ -262,8 +262,7 @@ describe("feedback submission", () => {
   });
 });
 
-describe("the sender's own message history", () => {
-  it("lists only the caller's messages, newest first, and refuses anonymous callers", async () => {
+describe("the sender's own message history", () => {  it("lists only the caller's messages, newest first, and refuses anonymous callers", async () => {
     const user = await makeUser("history", { credits: 10 });
     const other = await makeUser("history-other", { credits: 10 });
     await prisma.feedback.create({
@@ -311,8 +310,11 @@ describe("admin feedback inbox", () => {  it("is admin-only, lists newest first,
     getServerSession.mockResolvedValue({ user: { id: admin.id, sv: 0, totpPending: false } });
     const list = await adminList(new Request("http://localhost/api/admin/feedback?status=all"));
     expect(list.status).toBe(200);
-    const payload = (await list.json()) as { feedback: Array<{ id: string }>; unhandled: number };
+    const payload = (await list.json()) as { feedback: Array<{ id: string }>; unhandled: number; mailDeliverable: boolean };
     expect(payload.unhandled).toBe(before + 2);
+    // Whether notifications actually leave the box is part of the inbox view:
+    // an operator must not have to guess (see mailDeliverable).
+    expect(typeof payload.mailDeliverable).toBe("boolean");
     const ids = payload.feedback.map((f) => f.id);
     expect(ids.indexOf(newer.id)).toBeLessThan(ids.indexOf(older.id));
     // The unhandled-only view drops nothing that is still open.
@@ -349,6 +351,22 @@ describe("admin feedback inbox", () => {  it("is admin-only, lists newest first,
       await tx.feedback.deleteMany({ where: { id: { in: [older.id, newer.id] } } });
       await tx.user.deleteMany({ where: { id: { in: [admin.id, reporter.id] } } });
     });
+  });
+
+  it("reports whether notifications can actually be delivered", async () => {
+    const admin = await makeUser("mail-flag", { role: "admin", credits: 10 });
+    getServerSession.mockResolvedValue({ user: { id: admin.id, sv: 0, totpPending: false } });
+    try {
+      delete process.env.SMTP_URL;
+      const off = await adminList(new Request("http://localhost/api/admin/feedback"));
+      expect(((await off.json()) as { mailDeliverable: boolean }).mailDeliverable).toBe(false);
+      process.env.SMTP_URL = "smtp://user:pass@smtp.example.com:587";
+      const on = await adminList(new Request("http://localhost/api/admin/feedback"));
+      expect(((await on.json()) as { mailDeliverable: boolean }).mailDeliverable).toBe(true);
+    } finally {
+      delete process.env.SMTP_URL;
+      await prisma.user.delete({ where: { id: admin.id } });
+    }
   });
 
   it("erases a signed-in reporter's messages with the account (GDPR)", async () => {

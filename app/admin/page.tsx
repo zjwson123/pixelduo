@@ -69,6 +69,7 @@ export default function AdminPage() {
   const [images, setImages] = useState<ImageRow[]>([]);
   const [feedback, setFeedback] = useState<FeedbackRow[]>([]);
   const [unhandled, setUnhandled] = useState(0);
+  const [mailDeliverable, setMailDeliverable] = useState(true);
   const [showHandled, setShowHandled] = useState(false);
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
@@ -102,11 +103,12 @@ export default function AdminPage() {
 
   const refreshFeedback = useCallback(async () => {
     try {
-      const data = await api<{ feedback: FeedbackRow[]; unhandled: number }>(
+      const data = await api<{ feedback: FeedbackRow[]; unhandled: number; mailDeliverable: boolean }>(
         `/api/admin/feedback?status=${showHandled ? "all" : "new"}`,
       );
       setFeedback(data.feedback);
       setUnhandled(data.unhandled);
+      setMailDeliverable(data.mailDeliverable);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "load failed");
     }
@@ -295,6 +297,16 @@ export default function AdminPage() {
         )}
         {tab === "feedback" && (
           <div style={{ marginTop: 16 }}>
+            {!mailDeliverable && (
+              // Without SMTP_URL the app prints notifications to its own log
+              // instead of sending them. An operator who assumes mail is flowing
+              // would never open this tab and would miss every message.
+              <div className="form-error" style={{ marginBottom: 12 }}>
+                Mail is not configured: <code>SMTP_URL</code> is unset, so feedback notifications are only written to
+                the server log. Messages below are still complete — set <code>SMTP_URL</code> + <code>EMAIL_FROM</code>{" "}
+                (docs/deploy.md) and run <code>npx tsx scripts/verify-mail.ts</code> to confirm delivery.
+              </div>
+            )}
             <div className="row" style={{ marginBottom: 10 }}>
               <label style={{ fontSize: 13, color: "#7c829a" }}>
                 <input type="checkbox" checked={showHandled} onChange={(e) => setShowHandled(e.target.checked)} />{" "}
