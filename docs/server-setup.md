@@ -42,6 +42,8 @@ set -a; source .env.production; set +a
 docker compose -f docker-compose.single.yml up -d --build --scale worker=3
 ```
 
+> **国内服务器先配 Docker 镜像加速，否则 `--build` 会卡在拉基础镜像上**（本机实测两条构建路径都停在解析 `docker.io/library/node:24-alpine`，CPU ≈0%，既不是编译慢也不是 Dockerfile 问题）：在 Docker 配置里加一个 registry mirror（阿里云「容器镜像服务 → 镜像加速器」会给出专属地址）后重启 Docker，再执行下面的 `--build`。这一步不做，`up -d --build` 会长时间无输出。
+
 首次会自动：建库迁移 → 起 Caddy 并申请 Let's Encrypt 证书 → web/3×worker/rollover/备份全部上线。
 3 个 worker 并发生图（每个 worker 同一时刻只处理 1 个任务，数据库队列自动分发，互不抢单）。
 如果机器只有 2C4G，把命令里的 `worker=3` 改成 `worker=2`。
