@@ -44,37 +44,28 @@
 - 自动附带的定位信息：套餐、界面语言、来源页面（只取路径，不含 query，避免把重置令牌之类带进邮箱）、User-Agent
 - SMTP 故障不会丢留言：先入库再发信，发信失败只记录告警
 
-**发信配置（决定你能否收到通知）**：`SMTP_URL` + `EMAIL_FROM` 必须指向一个真实发信服务，未配置时邮件走 `DevMailer`——**只打印到容器日志，不投递**。可选任一 SMTP：
+**一条命令配置 + 验证投递**（推荐；它会写 `.env`，只改那两个键并留 `.env.bak`，然后立刻发一封真实通知并把接收端应答打出来）：
 
 ```bash
-# Resend（推荐，域名可控）：先在控制台验证发信域名
-SMTP_URL="smtp://resend:<API_KEY>@smtp.resend.com:587"
-EMAIL_FROM="PixelDuo <no-reply@你的域名>"
-# Amazon SES / SendGrid / Postmark 同理：smtp://用户名:密码@smtp主机:端口
-# Gmail 应用专用密码（个人收件箱，需先开两步验证并生成 app password）
-SMTP_URL="smtp://你的地址@gmail.com:<app-password>@smtp.gmail.com:587"
+npx tsx scripts/setup-mail.ts <provider> <凭据> [发信地址]
+npx tsx scripts/setup-mail.ts aliyun no-reply@你的域名 <DirectMail密码>   # 大陆服务器首选
+npx tsx scripts/setup-mail.ts qq 你的QQ号@qq.com <授权码>                # 或 163
+npx tsx scripts/setup-mail.ts resend <API_KEY> "PixelDuo <no-reply@你的域名>"
+npx tsx scripts/setup-mail.ts local 2525                                # 无账号演练（配本地 sink）
 ```
 
-两点容易踩的坑：
+支持的 provider：`aliyun`、`qq`、`163`、`resend`、`sendgrid`、`postmark`、`ses`、`gmail`、`local`（不带参数运行会列出全部与注意事项）。脚本内置了主机/端口/协议，并在写盘前校验：**465 必须 `smtps://`（一上来就 TLS），587 用 `smtp://`（STARTTLS 升级）**——这对写错就是卡到超时，是首次配置最常见的失败。
 
-- **发信域名要先验证**：Resend / SES / SendGrid 都要求把 `EMAIL_FROM` 的域名加进控制台并配置 **SPF + DKIM** DNS 记录，否则连接成功但邮件被拒（脚本会直接给出这条提示）；临时可用服务商给的 onboarding 地址当 `EMAIL_FROM`。
-- **到了也可能进垃圾箱**：Gmail 对未做 SPF/DKIM/DMARC 的发信方会归入垃圾邮件。所以"收到"要连垃圾箱一起看，长期做法是给发信域名配齐三条记录。
-- 生产部署**无法**用"只打印到日志"模式：`assertProductionConfig()` 要求 `SMTP_URL`（或显式 `MAIL_DEV_MODE=1`）。密码重置/验证邮件依赖同一条通道，所以这不是反馈功能单独的需求——生产必须配。
-
-配置后用自托管机或本地任一环境提交一条真实留言，确认 `FEEDBACK_TO` 邮箱收到通知、且直接回复能回到留言者。不接 SMTP 也能用——留言仍在管理台 feedback 标签页里，只是不会推送到邮箱。
-
-**一条命令验证投递**（配置后先跑这个，再谈"用户能不能收到"）：
+只想验证已写好的配置：
 
 ```bash
-SMTP_URL="..." EMAIL_FROM="..." npx tsx scripts/verify-mail.ts
+npx tsx scripts/verify-mail.ts
 # → transport / from / recipient
 # → server response: 250 2.0.0 Ok: queued as …      ← 接收端自己的应答，这才是投递证据
-# → [OK] / [FAIL]（失败时给出 535 认证、PBL 黑名单、TLS 端口等具体提示）
+# → [OK] / [FAIL]（失败时给出具体提示：535 认证、域名未验证、465/587、配额/沙箱等）
 ```
 
-它以 `--exit-code` 反映成败，可直接当部署门禁；无 `SMTP_URL` 时它主动失败并说明原因，**不会**让你误以为"没报错就是发出去了"。管理台 feedback 标签页在未配置 `SMTP_URL` 时也会显示提示，避免运维以为通知在发。
-
-本地想在无账号的情况下验证发信链路：`node scripts/dev-smtp-sink.mjs 2525 /tmp/pd-smtp-inbox.log &` 后 `SMTP_URL=smtp://127.0.0.1:2525 bash scripts/dev-restart.sh`，提交留言，收到的报文（含信封收件人）写在 `/tmp/pd-smtp-inbox.log`。
+它以退出码反映成败，可直接当部署门禁；无 `SMTP_URL` 时它主动失败并说明原因，**不会**让你误以为"没报错就是发出去了"。管理台 feedback 标签页在未配置时会显示提示条，配好之后还会显示**最近一次发信的结果**（成功是 250 应答，失败是具体错误）——因为"配了"不等于"能发"。不接 SMTP 也能用：留言仍在管理台 feedback 收件箱里，只是不会推送到邮箱。
 
 ## 部署步骤
 
