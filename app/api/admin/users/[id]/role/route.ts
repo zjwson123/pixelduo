@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { requireAdmin } from "@/lib/admin";
+import { ADMIN_GUARD_LOCK, assertAnotherAdminRemains, requireAdmin } from "@/lib/admin";
 import { zodMessage, ok, fail, readBodyCapped, enforceRateLimit, enforceUserRateLimit } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 
@@ -21,13 +21,23 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     if (id === adminId && body.role !== "admin") {
       return fail(new Error("cannot-demote-self"));
     }
-    // P2025 on the update below would 500; unknown ids are a plain 404.
-    const target = await prisma.user.findUnique({ where: { id }, select: { id: true } });
-    if (!target) return fail(new Error("user-not-found"));
-    const updated = await prisma.user.update({
-      where: { id: id },
-      data: { role: body.role },
-      select: { id: true, role: true },
+    // The self-check above only covers the caller. Two admins demoting each
+    // other at the same time each pass it — the count and the write have to be
+    // one atomic step, taken under a lock held to commit, or both writes land
+    // and the install is left with no admin and no in-app way to mint one.
+    const updated = await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${ADMIN_GUARD_LOCK})`;
+      const target = await tx.user.findUnique({ where: { id }, select: { id: true, role: true } });
+      // P2025 on the update below would 500; unknown ids are a plain 404.
+      if (!target) throw new Error("user-not-found");
+      if (target.role === "admin" && body.role !== "admin") {
+        await assertAnotherAdminRemains(tx, id);
+      }
+      return tx.user.update({
+        where: { id: id },
+        data: { role: body.role },
+        select: { id: true, role: true },
+      });
     });
     return ok({ user: updated });
   } catch (e) {

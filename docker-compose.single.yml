@@ -63,6 +63,12 @@ services:
     restart: "no"
 
   web:
+    # Pinned so the rollback in docs/server-setup.md §6 names a real image:
+    # without it Compose derives the name from the PROJECT DIRECTORY (the clone
+    # path is "pixelduo" in that guide, "image-gen" in this tree), so
+    # `docker tag image-gen-web:latest …:prev` either failed outright or tagged
+    # an image nothing ever started, and the "rollback" restarted the bad build.
+    image: ${IMAGE_WEB:-image-gen-web:latest}
     build: { context: ., target: web }
     environment: *appenv
     expose: ["3000"]
@@ -77,6 +83,7 @@ services:
     restart: unless-stopped
 
   worker:
+    image: ${IMAGE_WORKER:-image-gen-worker:latest}
     build: { context: ., target: worker }
     command: npx tsx scripts/worker.ts
     # 默认 1 个 worker；生产建议起 3 个（4C8G）：

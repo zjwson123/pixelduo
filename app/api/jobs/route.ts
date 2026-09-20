@@ -1,6 +1,16 @@
-import { requireUserId, ok, fail } from "@/lib/api";
+import { requireUserId, ok, fail, enforceUserRateLimit } from "@/lib/api";
 import { deliveredVideoSeconds, getActiveJobsForUser } from "@/lib/queue";
 import { serveUserUrl } from "@/lib/store";
+
+// The workbench polls this every 2.5s per open tab (24/min, plus one
+// /api/jobs/[id] per in-flight job), so the ceiling has to clear a few tabs at
+// once. It is here because each call costs O(in-flight jobs × extend-chain
+// length) queries — deliveredVideoSeconds walks up to 10 jobs per extend job —
+// and neither this route nor its [id] sibling had any limit at all, so an
+// authenticated client could loop them at wire speed against the database
+// serving everyone else.
+const JOBS_RATE_LIMIT = 600;
+const JOBS_RATE_WINDOW_MS = 60_000;
 
 async function serialize(job: Awaited<ReturnType<typeof getActiveJobsForUser>>[number]) {
   let images: string[];
@@ -37,6 +47,8 @@ async function serialize(job: Awaited<ReturnType<typeof getActiveJobsForUser>>[n
 export async function GET() {
   try {
     const userId = await requireUserId();
+    const limited = await enforceUserRateLimit(userId, "jobs-list", JOBS_RATE_LIMIT, JOBS_RATE_WINDOW_MS);
+    if (limited) return fail(limited);
     const jobs = await getActiveJobsForUser(userId);
     return ok({ jobs: await Promise.all(jobs.map(serialize)) });
   } catch (e) {

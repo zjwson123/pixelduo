@@ -31,6 +31,7 @@
 | `NEXTAUTH_URL` | **https://** | next-auth 仅依此判断是否给会话 Cookie 加 `Secure`；http 时 Cookie 明文可被截获，且邮件链接指向错误域名 |
 | `SMTP_URL` | 必填（或 `MAIL_DEV_MODE=1`） | 缺省时邮件走 stdout，密码重置链接（等于账号接管凭据）会写进容器日志 |
 | `EMAIL_VERIFY_AUTO` | 生产禁用 | 自动验证注册并发放注册奖励 = 无限量带额度的已验证账号 |
+| `PAYMENT_PROVIDER` + 对应密钥 | 必须能构造出 provider | `getPaymentProvider()` 现在也在启动时解析（`assertPaymentProviderUsable()`）：拼错的值、生产下的 `mock`、缺少 `STRIPE_WEBHOOK_SECRET` / Paddle 密钥都会让进程拒绝启动。此前它只在第一次 checkout 或 webhook 时才被调用，于是容器"健康"、每笔支付 500、**每个回调 500**——上游重试数天后停用该回调地址，结果是钱收了、积分没给 |
 
 标记为测试部署（`PAYMENT_ALLOW_MOCK=1`，CI 与 `ci-local.sh` 使用）时，后三项自动豁免——mock 支付本身在生产已被拒绝，该标记即"这不是真实部署"的声明。
 

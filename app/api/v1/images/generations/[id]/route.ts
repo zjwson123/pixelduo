@@ -12,6 +12,14 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   try {
     const auth = await authenticateApiKey(req);
     if (!auth) return errorResponse({ ok: false, error: "unauthorized" }, { status: 401 });
+    // Same account gate as the POST sibling and /api/files. Unreachable today —
+    // a key can only be minted by POST /api/account/keys, which needs a verified
+    // account, and no code path ever writes emailVerified back to null — so this
+    // is alignment rather than a live hole: the invariant that makes it
+    // unreachable is enforced nowhere near this route.
+    if (!auth.emailVerified) {
+      return errorResponse({ ok: false, error: "verify-email-required" }, { status: 403 });
+    }
     // The POST is capped per key; the poll was not. Under the S3 driver each
     // poll re-signs one presigned URL per image (HMAC work, and the URL is
     // never cacheable because it changes), so an uncapped poll loop is a CPU

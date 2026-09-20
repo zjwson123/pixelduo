@@ -117,39 +117,60 @@ export { GRANT_LOCK_ORDER };
 // Credits granted, pre-authed and refunded inside one billing cycle, used to
 // compute unused quota for the 30% carryover at renewal time.
 //
-// `cycleAnchor` is the END of the cycle being measured — the planRenewsAt that
-// cycle ran to. The cycle's own quota is identified as the most recent
-// SUBSCRIPTION grant created at or before that anchor (each renewal mints
-// exactly one), NOT by summing SUBSCRIPTION ledger rows in the
+// The cycle's quota is identified by its SUBSCRIPTION GRANT — the newest one
+// whose own cycle has ended — NOT by summing SUBSCRIPTION ledger rows in an
 // `[anchor - 1 month, now]` window. The window silently dropped the quota of
-// any cycle funded by an EARLY renewal: that grant is created before the
-// window opens, so `granted` came out 0, `unused` was 0, and the 30% carryover
-// the customer was promised never materialised (while the leftover quota was
-// still swept at the cycle end). Anchoring on the funding grant also keeps the
-// cash-out protection: it survives planRenewsAt being moved.
+// any cycle funded by an EARLY renewal: that grant is created before the window
+// opens, so `granted` came out 0, `unused` was 0, and the 30% carryover the
+// customer was promised never materialised (while the leftover quota was still
+// swept at the cycle end). Anchoring on the grant also keeps the cash-out
+// protection: it survives planRenewsAt being moved, and its `createdAt` bounds
+// the spend scan.
 export async function cycleUsageTx(
   tx: Prisma.TransactionClient,
   userId: string,
-  // The cycle's end (planRenewsAt). It no longer bounds anything: the funding
-  // grant identifies which quota was in play and its createdAt bounds the spend
-  // scan. It stays in the signature because the call still reads as "measure
-  // the cycle that ended here" — and because anchoring on a timestamp was the
-  // bug (see above), so there is nothing here for a future edit to reach for.
+  // The caller's own witness of the cycle end (planRenewsAt). Used only as a
+  // FALLBACK: the primary evidence is the funding grant's own expiry. Kept in
+  // the signature because it is what an operator correction — or a test — moves
+  // when the plan clock and the grant clock disagree.
   cycleAnchor: Date,
 ): Promise<CycleUsage> {
-  void cycleAnchor;
-  // The cycle's quota came from the most recent renewal, i.e. the newest
-  // SUBSCRIPTION grant on the account at this moment — this runs BEFORE
-  // fulfillOrder mints the incoming cycle's grant, so "newest" is precisely the
-  // grant that funded the cycle being measured. (An `expiresAt = planRenewsAt`
-  // or `createdAt <= planRenewsAt` test would be tighter on paper but breaks
-  // whenever the anchor is moved after the grant was minted — which is how the
-  // expiry tests simulate a lapsed cycle, and how an operator correction looks.)
-  const funding = await tx.creditGrant.findFirst({
-    where: { userId, source: "SUBSCRIPTION" },
+  const grantSelect = { id: true, amount: true, refId: true, createdAt: true, expiresAt: true } as const;
+  // The quota whose unused portion is being measured is the newest SUBSCRIPTION
+  // grant whose OWN cycle has already ended. Two reasons it must be "ended"
+  // rather than simply "newest":
+  //
+  //  - An early renewal (buying the next month before the current one runs out,
+  //    which is what a customer does to avoid being cut off) has already minted
+  //    the incoming cycle's grant by the time the NEXT renewal arrives. The
+  //    newest grant is then the cycle still in play — measuring it reports
+  //    nothing unspent for a cycle that has not finished — while the cycle that
+  //    actually ended is the one before it. The carryover was therefore granted
+  //    only to customers who let their plan lapse and renew afterwards, i.e.
+  //    exactly not the population the feature is advertised to (see
+  //    PRODUCT_OUTLINE.md: "use 1500 of 2000, 150 lands next month").
+  //  - Its expiresAt is the cycle boundary itself: fulfillOrder stamps
+  //    SUBSCRIPTION grants with `renew`, and it survives the daily downgrade
+  //    sweep, which only nulls User.planRenewsAt.
+  //
+  // `cycleAnchor` covers the case where the plan clock moved but the grant did
+  // not (a correction, or a test rewinding planRenewsAt to model a lapsed
+  // cycle) — without it that state would measure as "no cycle at all" and the
+  // callers that rely on it would silently stop granting carryover.
+  const ended = await tx.creditGrant.findFirst({
+    where: { userId, source: "SUBSCRIPTION", expiresAt: { lte: new Date() } },
     orderBy: { createdAt: "desc" },
-    select: { id: true, amount: true, refId: true, createdAt: true, expiresAt: true },
+    select: grantSelect,
   });
+  const funding =
+    ended ??
+    (cycleAnchor.getTime() <= Date.now()
+      ? await tx.creditGrant.findFirst({
+          where: { userId, source: "SUBSCRIPTION" },
+          orderBy: { createdAt: "desc" },
+          select: grantSelect,
+        })
+      : null);
   const cycleOrderIds = new Set(funding?.refId ? [funding.refId] : []);
   const granted = funding?.amount ?? 0;
 
@@ -318,7 +339,15 @@ export async function refundCreditsTx(
   if (!consumption?.length) {
     // Fallback for jobs created before grant tracking: flat refund. Nothing
     // links these credits to an order, so a refunded order cannot be detected.
-    await addCreditsTx(tx, userId, "REFUND", amount, refType, refId, note);
+    // It must still mint a GRANT rather than only increment the balance: every
+    // other credit source in the app is a grant, spendCreditsTx draws only on
+    // grants, and adminClawbackTx reconciles against them — so a bare increment
+    // left the user with a balance /api/me displayed and no code could spend
+    // (insufficient-credits), while an operator clawback of it threw the same
+    // error and runExpiry could never sweep it. Unreachable for jobs created
+    // since the credit_grants migration (every creation path writes
+    // consumption), so this is a latent landmine, not a live path.
+    await grantCreditsTx(tx, userId, "REFUND", amount, null, refType, refId, note);
     return;
   }
   // Lock the consumed rows so the expiry sweep serializes with this refund:
@@ -491,26 +520,31 @@ export async function fulfillOrder(
       const renew = new Date(base);
       renew.setMonth(renew.getMonth() + 1);
       // 30% of the unused quota from a just-ended cycle carries into the new
-      // one. Only when the previous cycle has actually ended — early renewals
-      // keep their remaining quota and wait until the next cycle boundary.
+      // one, and only from a cycle that has ACTUALLY ended.
       //
-      // "Ended" is read from the cycle's ANCHOR (when its quota ran out), from
-      // TWO sources because neither is sufficient alone. planRenewsAt is the
-      // anchor while the plan is still on the books; the daily downgrade sweep
-      // (downgradeExpiredPlans) NULLs it for exactly the same condition — the
-      // same moment the renewal below is processing — so a customer who renews
-      // after the sweep has run (i.e. any renewal more than ~a day after the
-      // cycle end, the normal shape of a lapsed subscription) found no anchor,
-      // `unused` came out 0, and the 30% carryover the plan page advertises was
-      // never granted while the leftover quota was still swept. The
-      // SUBSCRIPTION grant the cycle was funded with carries the same instant
-      // and survives the sweep, so it is the fallback anchor.
+      // "Ended" is decided by the measured cycle's own quota grant, whose
+      // expiresAt is the cycle boundary (cycleUsageTx selects the newest grant
+      // that has run out). planRenewsAt is consulted only as the fallback
+      // witness for when the two clocks disagree — an operator correction, or a
+      // test that rewinds the plan alone.
+      //
+      // Gating on planRenewsAt instead was the last piece of why the advertised
+      // rollover did not exist in practice. A customer who renews inside their
+      // cycle — the ordinary way to avoid being cut off — always has a
+      // planRenewsAt in the FUTURE at renewal time (it is the cycle they are
+      // extending) and an unexpired current grant, so both readings said "not
+      // ended", `unused` came out 0, and the leftover was still swept at the
+      // boundary. The carryover was paid exclusively to customers who let the
+      // plan lapse first. Everything below therefore measures the previous,
+      // finished cycle while the customer is still inside the current one; the
+      // newly bought month is untouched by it.
       let rollover = 0;
       let unused = 0;
       let rolloverRef: string = orderId;
       const usage = await cycleUsageTx(client, userId, user.planRenewsAt ?? now);
-      const anchor = user.planRenewsAt ?? usage.fundingExpiresAt;
-      if (anchor && anchor <= now) {
+      const planClockSaysEnded = user.planRenewsAt !== null && user.planRenewsAt <= now;
+      const grantClockSaysEnded = usage.fundingExpiresAt !== null && usage.fundingExpiresAt <= now;
+      if (grantClockSaysEnded || (planClockSaysEnded && usage.granted > 0)) {
         unused = Math.max(0, usage.granted - usage.spentNet - usage.revoked);
         rollover = Math.floor(unused * ROLLOVER_RATE);
         // Stamp the carryover with the order that funded the MEASURED cycle,
@@ -522,6 +556,19 @@ export async function fulfillOrder(
         // quota — every cycle. Falls back to the incoming order when the old
         // cycle has no funding order to name (legacy/manual grants).
         if (usage.fundingRefId) rolloverRef = usage.fundingRefId;
+        // A cycle carries over once. Measuring "the newest grant that has
+        // ended" means a second renewal before ANY later cycle ends would
+        // measure the same cycle again and pay its 30% twice — each time for a
+        // real payment, so it is a bounded over-delivery rather than a mint,
+        // but the carryover is a property of the cycle, not of the purchase.
+        // The witness is the ROLLOVER grant already stamped with that cycle's
+        // funding order: the same provenance the refund clawback depends on.
+        if (rollover > 0 && usage.fundingRefId) {
+          const alreadyPaid = await client.creditGrant.count({
+            where: { userId, source: "ROLLOVER", refId: usage.fundingRefId },
+          });
+          if (alreadyPaid > 0) rollover = 0;
+        }
       }
       await client.user.update({ where: { id: userId }, data: { plan: planId, planRenewsAt: renew } });
       await grantCreditsTx(client, userId, "SUBSCRIPTION", credits, renew, "order", orderId, `plan ${planId}`);
@@ -573,7 +620,7 @@ export async function revokeOrderCreditsTx(
   // statement (without it, a revoke racing a refund could deadlock).
   const grants = await tx.$queryRaw<Array<{ id: string; remaining: number }>>(
     Prisma.sql`SELECT id, remaining FROM "CreditGrant"
-      WHERE "refId" = ${order.id}
+      WHERE "refId" = ${order.id} AND "refType" = 'order'
       ${GRANT_LOCK_ORDER}
       FOR UPDATE`,
   );

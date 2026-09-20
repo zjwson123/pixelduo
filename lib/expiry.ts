@@ -1,6 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "./prisma";
 import { addCreditsTx, GRANT_LOCK_ORDER } from "./ledger";
+import { captureError } from "./observability";
 
 const BATCH_SIZE = 200;
 
@@ -49,9 +50,15 @@ export async function runExpiry(): Promise<number> {
           await addCreditsTx(tx, userId, "EXPIRE", -sum, "none", null, `expired credits (${grants.length} grant(s))`);
           return sum;
         })
-        .catch(() => {
+        .catch((e) => {
           // A broken invariant (already-negative balance) must not spin-loop
-          // the cron on the same rows forever — skip and continue.
+          // the cron on the same rows forever — skip and continue. Reported, not
+          // swallowed: this used to discard every failure silently, so a sweep
+          // that failed on every row printed the same `expired credits: 0` as a
+          // sweep that had nothing to do, and an operator had no signal that
+          // EXPIRE bookkeeping had been broken for weeks — unspendable credits,
+          // no ledger rows — until a customer noticed.
+          captureError(e, { scope: "expiry-sweep", userId });
           return 0;
         });
       if (expired > 0) {

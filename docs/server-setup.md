@@ -49,9 +49,22 @@ docker compose -f docker-compose.single.yml up -d --build --scale worker=3
 ## 5. 验证
 
 ```bash
-curl -fsS https://pixelduo.ai/api/health          # db/redis/storage 全 up
-npx tsx scripts/promote-admin.ts <你的邮箱>        # 提权管理员（在服务器上跑）
-npx tsx scripts/reset-2fa.ts <用户邮箱> --notify   # 用户丢失验证器+备用码时重置 2FA（吊销全部会话与 API Key，并邮件通知本人）
+# 健康：真实响应体只有 ok / service / db / redis / storage / queue.active / time。
+# ok:false 时它也返回 200（只有探测本身抛异常才 503），所以 `curl -fsS` 只能证明
+# "服务在响应"——redis 挂了它会照旧退出 0，而 lib/rate-limit.ts 会静默退化成
+# 进程内限流（每个 worker 各限一份），这正是冒烟必须看 JSON 的原因：
+curl -sS https://pixelduo.ai/api/health \
+  | jq -e '.service == "pixelduo" and .ok and .db == "up" and .redis == "up" and .storage == "up"'
+# 没装 jq 就退化成 grep '"ok":true'（同样是粗判）；redis 字段在未配置 REDIS_URL
+# 时是 "unconfigured"，生产必须是 "up"。
+
+# 提权管理员 / 重置 2FA：这两条必须在容器里跑。宿主机上只有 Docker（第 2 步只装了
+# Docker，第 3 步只 clone 了代码），npx 会去网上拉 tsx，而 DATABASE_URL 里的主机名
+# `db` 只在 compose 网络里能解析（db 也没有映射宿主端口），所以 `npx tsx
+# scripts/*.ts` 在宿主机上必然失败。worker 镜像里带着 node_modules + prisma：
+docker compose -f docker-compose.single.yml run --rm worker npx tsx scripts/promote-admin.ts <你的邮箱>
+docker compose -f docker-compose.single.yml run --rm worker npx tsx scripts/reset-2fa.ts <用户邮箱> --notify
+# reset-2fa 会吊销该用户全部会话与 API Key 并邮件通知本人。
 ```
 
 然后按 [release.md](release.md) 的冒烟清单走一遍：注册→邮箱验证→真实支付一笔→退款→API Key→管理台。
@@ -62,7 +75,9 @@ npx tsx scripts/reset-2fa.ts <用户邮箱> --notify   # 用户丢失验证器+�
 - 扩缩 worker：`docker compose -f docker-compose.single.yml up -d --scale worker=3`（改数字即可，服务不中断）
 - 备份：DB 每天进 `./backups/`（保留 14 份），图片镜像进 `./backups/objects/`（保留 7 份）；建议把 `./backups/` 挂到对象存储或异地拷贝
 - 监控：Sentry DSN 生效后，异常自动上报
-- 回滚：升级前 `docker tag image-gen-web:latest image-gen-web:prev`，出问题 `docker compose -f docker-compose.single.yml up -d --scale worker=3` 换回
+- 回滚：升级前把当前镜像存成 prev —— `docker tag image-gen-web:latest image-gen-web:prev && docker tag image-gen-worker:latest image-gen-worker:prev`；
+  出问题先 `docker tag image-gen-web:prev image-gen-web:latest && docker tag image-gen-worker:prev image-gen-worker:latest`，
+  再 `docker compose -f docker-compose.single.yml up -d --scale worker=3`（**不带** `--build`：带 `--build` 会在启动前重新构建并把 prev 覆盖掉，这也是"回滚后问题照旧"的常见原因）。数据库迁移不随镜像回滚，含迁移的升级要先备份。
 
 ## 7. 之后想迁移到托管服务
 

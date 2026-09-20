@@ -56,5 +56,18 @@ RUN apk add --no-cache fontconfig font-noto-cjk ffmpeg
 COPY --from=deps --chown=node:node /app/node_modules ./node_modules
 COPY --chown=node:node . .
 RUN npx prisma generate
+# Same prune as the web stage, for the same reason `COPY . .` is unsafe here:
+# .dockerignore keeps secrets and runtime data out of the context, but it does
+# not cover internal prose. The worker image — the one a registry push or
+# `docker save` carries off the host, and the one operators are told to keep old
+# tags of — otherwise ships docs/ (the full history of every fixed weakness, plus
+# the provider cost/pricing research), docs/compliance/, tests/, e2e/, designs/
+# and the root markdown. None of it is read at runtime: the worker needs
+# package.json, node_modules, prisma/, lib/ and scripts/ only, and
+# prisma/seed.ts's designs/ read is a CI/host-only path.
+RUN rm -rf \
+      .env .env.production .env.local \
+      docs tests e2e designs data backups public/generated public/showcase \
+      ./*.md ./*.tsbuildinfo
 USER node
 CMD ["npx", "tsx", "scripts/worker.ts"]

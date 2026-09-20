@@ -68,8 +68,15 @@ export async function POST(req: Request) {
       cancelUrl: process.env.PAYMENT_CANCEL_URL || `${base}/studio`,
       metadata: { orderId: order.id, kind: body.kind, userId },
     });
-    await prisma.order.update({
-      where: { id: order.id },
+    // Predicate-guarded like every other Order write: the row is the one the
+    // refund path resolves through (findFirst on providerOrderId), and this
+    // update used to be unconditional. The session is created before the buyer
+    // can pay, so nothing can interleave today — but the paid webhook rewrites
+    // providerOrderId with the payment-intent id, and a retried or
+    // instantly-settling payment that landed first would have it silently
+    // overwritten with the session id, orphaning the refund's lookup.
+    await prisma.order.updateMany({
+      where: { id: order.id, status: "pending" },
       data: { providerOrderId: session.providerSessionId },
     });
     return ok({

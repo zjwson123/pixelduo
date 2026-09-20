@@ -9,13 +9,23 @@ import { POST as resetPOST } from "../app/api/auth/reset-password/route";
 
 let userId: string;
 let email: string;
-let ipSeq = 100;
+let ipSeq = 0;
 const origVerifyAuto = process.env.EMAIL_VERIFY_AUTO;
+// A per-RUN second octet plus a per-CALL third octet. Limiter buckets are keyed
+// by client IP for the whole window (forgot-password allows 5 per 15 minutes),
+// so a fixed address sequence reused every run made the SECOND run of this file
+// inside that window answer 429 — a red suite with no code change behind it.
+// ci-local clears rl:* before the unit run; a bare repeated `npm test` did not,
+// which is exactly how this presented (pass-13 lesson).
+const runOctet = Math.floor(Math.random() * 250) + 1;
 
 function jsonRequest(url: string, body: unknown): Request {
   return new Request(url, {
     method: "POST",
-    headers: { "content-type": "application/json", "x-forwarded-for": `10.9.${ipSeq++}.1` },
+    headers: {
+      "content-type": "application/json",
+      "x-forwarded-for": `10.${runOctet}.${(ipSeq++ % 250) + 1}.1`,
+    },
     body: JSON.stringify(body),
   });
 }

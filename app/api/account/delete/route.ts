@@ -1,8 +1,9 @@
 import { z } from "zod";
 import { zodMessage, requireUserId, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
-import { getStorage } from "@/lib/storage";
+import { deleteObjectsBounded } from "@/lib/storage";
 import { checkpointKeys } from "@/lib/queue";
+import { ADMIN_GUARD_LOCK, assertAnotherAdminRemains } from "@/lib/admin";
 import { verifyTotp, useBackupCode } from "@/lib/twofa";
 import bcrypt from "bcryptjs";
 
@@ -71,21 +72,26 @@ export async function POST(req: Request) {
     });
     const refKeys = jobs.map((j) => j.refImageKey).filter((k): k is string => Boolean(k));
     const staged = jobs.flatMap((j) => checkpointKeys(j.images));
-    const storage = getStorage();
-    await Promise.allSettled([
-      ...images.map((i) => storage.delete(i.url)),
-      ...refKeys.map((k) => storage.delete(k)),
-      ...staged.map((k) => storage.delete(k)),
-    ]);
-    await prisma.$transaction([
-      prisma.backupCode.deleteMany({ where: { userId } }),
-      prisma.verificationToken.deleteMany({ where: { userId } }),
-      prisma.creditReminder.deleteMany({ where: { userId } }),
+    await deleteObjectsBounded([...images.map((i) => i.url), ...refKeys, ...staged]);
+    await prisma.$transaction(async (tx) => {
+      // Re-checked under a lock held to commit, in the same transaction as the
+      // delete. The unlocked count above cannot be the invariant: two admins
+      // erasing themselves at the same moment each saw 2 admins and both deletes
+      // landed, leaving an install with no admin and no in-app way to mint one
+      // (both admin routes refuse to target the caller, so recovery needs host
+      // access to scripts/promote-admin.ts).
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${ADMIN_GUARD_LOCK})`;
+      const current = await tx.user.findUnique({ where: { id: userId }, select: { role: true } });
+      if (!current) throw new Error("user-not-found");
+      if (current.role === "admin") await assertAnotherAdminRemains(tx, userId);
+      await tx.backupCode.deleteMany({ where: { userId } });
+      await tx.verificationToken.deleteMany({ where: { userId } });
+      await tx.creditReminder.deleteMany({ where: { userId } });
       // ApiKey has no FK relation (by design, hash-only table), so it needs an
       // explicit wipe or key metadata survives the erasure request.
-      prisma.apiKey.deleteMany({ where: { userId } }),
-      prisma.user.delete({ where: { id: userId } }),
-    ]);
+      await tx.apiKey.deleteMany({ where: { userId } });
+      await tx.user.delete({ where: { id: userId } });
+    });
     return ok({ deleted: true });
   } catch (e) {
     if (e instanceof z.ZodError) return fail(zodMessage(e));

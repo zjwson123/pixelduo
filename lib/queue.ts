@@ -324,6 +324,63 @@ export function checkpointKeys(raw: string | null): string[] {
   }
 }
 
+// Message prefix for a checkpoint write that lost its race with a job that left
+// the queue. The worker treats it as "stop this attempt and take my own objects
+// back out" (see scripts/worker.ts). Shared so the thrower and the classifier
+// cannot drift apart.
+export const JOB_ABANDONED = "job-abandoned";
+
+// Statuses a job can still be collecting output in.
+const IN_FLIGHT_STATUSES = ["running", "polling", "queued"] as const;
+
+// Write an attempt's checkpoint into Job.images, guarded by status.
+//
+// The status predicate is a CAS, not decoration. Every other writer of this
+// column is CAS-guarded (heartbeat, setJobPolling, schedulePoll, completeJob,
+// failJob) and this is the one that runs WHILE a provider call is in flight —
+// minutes long, for a video. The recovery sweep on another worker (compose runs
+// --scale worker=3) can terminally fail and refund the very job whose output is
+// still being generated, and failJob's terminal branch deliberately destroys the
+// checkpoint as it reclaims the objects it names; writing through that
+// resurrects the checkpoint on a failed, refunded job, so the objects it names
+// belong to nobody. Detecting the lost race and throwing is what lets the
+// attempt stop instead of billing the provider for output that can no longer be
+// delivered.
+//
+// A database error is swallowed on purpose: persisting a checkpoint must never
+// fail the generation itself.
+export async function checkpointJobProgress(jobId: string, payload: unknown): Promise<void> {
+  const res = await prisma.job
+    .updateMany({
+      where: { id: jobId, status: { in: [...IN_FLIGHT_STATUSES] } },
+      data: { images: JSON.stringify(payload) },
+    })
+    .catch(() => null);
+  if (res && res.count === 0) {
+    throw new Error(`${JOB_ABANDONED}: the job left the queue while this attempt was running`);
+  }
+}
+
+// Checkpoint a video attempt's artifact under `key`, deleting the key it
+// supersedes.
+//
+// A video attempt writes objects too — the provider segment, then the merged
+// extend clip — and Job.images is the only checkpoint failJob reclaims and the
+// erasure routes read. Without one, every failed or retried delivery orphaned
+// its file permanently: an Image row is created only by completeJob, so nothing
+// could serve it (/api/files resolves keys that have a row) and nothing could
+// name it (the erasure routes walk Image rows, Job.refImageKey and this
+// checkpoint). One 100MB object per failed attempt, invisible to GDPR erasure.
+// Superseding instead of appending keeps a retried delivery at one live object.
+export async function checkpointJobArtifact(
+  jobId: string,
+  previous: string | null,
+  key: string,
+): Promise<void> {
+  if (previous && previous !== key) await getStorage().delete(previous).catch(() => undefined);
+  await checkpointJobProgress(jobId, [{ key }]);
+}
+
 // Recover jobs stuck in "running" or "polling" after a worker crash.
 // Polling (video) tasks can legitimately run for minutes — use a longer
 // cutoff than for running (image) jobs so a slow provider doesn't get

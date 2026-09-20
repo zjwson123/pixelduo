@@ -1,11 +1,16 @@
-import { requireUserId, ok, fail } from "@/lib/api";
+import { requireUserId, ok, fail, enforceUserRateLimit } from "@/lib/api";
 import { deliveredVideoSeconds, getJobForUser } from "@/lib/queue";
 import { serveUserUrl } from "@/lib/store";
 
+// See /api/jobs: 600/min per account clears several polling tabs, and bounds a
+// client that loops this route (each call can cost up to 10 queries walking an
+// extend chain).
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   try {
     const userId = await requireUserId();
+    const limited = await enforceUserRateLimit(userId, "jobs-get", 600, 60_000);
+    if (limited) return fail(limited);
     const job = await getJobForUser(userId, id);
     if (!job) return fail(new Error("job-not-found"));
     let images: string[];

@@ -51,6 +51,12 @@ services:
         condition: service_healthy
 
   web:
+    # Pinned, with the same defaults docker-compose.prod.yml consumes. Without
+    # it Compose derives the name from the PROJECT DIRECTORY ("pixelduo-web" for
+    # the clone path the deploy docs use, "image-gen-web" in this tree), so the
+    # images this file builds were not the images prod.yml was then asked to
+    # start — and a rollback that tags a name by hand tagged nothing.
+    image: ${IMAGE_WEB:-image-gen-web:latest}
     build:
       context: .
       target: web
@@ -81,6 +87,7 @@ services:
       retries: 12
 
   worker:
+    image: ${IMAGE_WORKER:-image-gen-worker:latest}
     build:
       context: .
       target: worker
@@ -95,6 +102,7 @@ services:
         condition: service_completed_successfully
 
   rollover:
+    image: ${IMAGE_WORKER:-image-gen-worker:latest}
     build:
       context: .
       target: worker

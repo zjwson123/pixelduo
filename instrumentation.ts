@@ -94,6 +94,31 @@ export function assertProductionConfig(env: NodeJS.ProcessEnv = process.env): vo
   }
 }
 
+// Resolve the payment provider BEFORE traffic. getPaymentProvider() throws for a
+// typo'd PAYMENT_PROVIDER, for mock outside the mock flag, and for any settings
+// it cannot serve (a missing STRIPE_WEBHOOK_SECRET / Paddle secret) — but it was
+// only ever reached on the first checkout or webhook, so a deployment could boot
+// healthy, 500 every checkout, and 500 EVERY webhook: the provider retries for
+// days and then disables the endpoint, with money taken and no credits granted,
+// while `docker compose ps` shows a healthy container. Every other configuration
+// gate in this codebase fails closed at boot for exactly this reason (the
+// moderation and mock-provider gates in scripts/worker.ts). Separate from
+// assertProductionConfig because it needs a dynamic import — lib/payments pulls
+// the Stripe and Paddle SDKs, which must not be bundled for the edge runtime —
+// and because the env-object parameter that function is tested with cannot
+// affect the SDKs' own process.env reads.
+export async function assertPaymentProviderUsable(): Promise<void> {
+  if (!isProductionRuntime()) return;
+  try {
+    const { getPaymentProvider } = await import("./lib/payments");
+    getPaymentProvider();
+  } catch (e) {
+    throw new Error(
+      `payment provider is not usable with the current configuration: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+}
+
 export async function register() {
   if (process.env.NEXT_RUNTIME === "nodejs") {
     // A misconfiguration must stop the process, not just reject this promise:
@@ -103,6 +128,7 @@ export async function register() {
     // explicitly is what makes the assertion a real startup failure.
     try {
       assertProductionConfig();
+      await assertPaymentProviderUsable();
     } catch (e) {
       console.error(`[fatal] refusing to start: ${e instanceof Error ? e.message : String(e)}`);
       process.exit(1);

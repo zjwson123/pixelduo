@@ -192,6 +192,25 @@ export function newStorageKey(ext = "png"): string {
   return `img/${randomUUID()}.${ext}`;
 }
 
+// Best-effort delete of many objects with bounded concurrency. The erasure
+// routes used to hand every key to one Promise.allSettled, so an account with
+// tens of thousands of delivered rows queued that many DeleteObjectCommands into
+// the driver at once (S3: all of them into undici's connection pool; local: the
+// same number of concurrent fs operations) — a memory and socket spike on the
+// one request an operator cannot ask the user to retry. Callers tolerate
+// failures: the rows are what make content visible, so a blob that survives is
+// an ops concern, not a user-facing one.
+export async function deleteObjectsBounded(keys: string[], concurrency = 16): Promise<number> {
+  const storage = getStorage();
+  let deleted = 0;
+  for (let i = 0; i < keys.length; i += concurrency) {
+    const batch = keys.slice(i, i + concurrency);
+    const results = await Promise.allSettled(batch.map((k) => storage.delete(k)));
+    deleted += results.filter((r) => r.status === "fulfilled").length;
+  }
+  return deleted;
+}
+
 // Test hook
 export function _resetStorageForTests() {
   driver = null;

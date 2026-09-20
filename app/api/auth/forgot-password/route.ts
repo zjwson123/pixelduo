@@ -23,7 +23,16 @@ export async function POST(req: Request) {
       const userLimited = await enforceUserRateLimit(user.id, "forgot-account", 5, 15 * 60_000);
       if (!userLimited) {
         const token = await createToken(email, "reset-password", user.id);
-        await sendResetPasswordEmail(email, token);
+        // Deliberately NOT awaited. A uniform `{sent:true}` body closed the
+        // content channel, but the unknown-address path answers in ~1ms while
+        // this one created a token AND completed a full SMTP exchange (fresh
+        // TCP+TLS+auth+DATA per message — the URL uses no pool) in hundreds of
+        // ms, so one request per address read account existence off the clock.
+        // The login path installs a DUMMY_HASH for exactly this reason; here the
+        // cheap equivalent is to return without waiting for delivery. Failures
+        // are still reported: sendSafely captures them before rethrowing, and
+        // the user can simply request another link.
+        void sendResetPasswordEmail(email, token).catch(() => undefined);
       }
     }
     return ok({ sent: true });

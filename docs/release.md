@@ -27,7 +27,11 @@
 ## 2. 部署
 
 ```bash
-docker compose -f docker-compose.prod.yml build web worker rollover
+# 构建用带 build 段的 compose 文件（默认 docker-compose.yml）：docker-compose.prod.yml
+# 只有 image:，没有 build 上下文，对它执行 `build` 不会产出任何镜像，紧接着的 up 也
+# 就找不到要启动的镜像。两个文件的镜像名一致（IMAGE_WEB / IMAGE_WORKER，默认
+# image-gen-web / image-gen-worker），所以是"先构建、再切到 prod.yml 启动"：
+docker compose build web worker rollover
 docker compose -f docker-compose.prod.yml up -d --scale worker=3
 ```
 

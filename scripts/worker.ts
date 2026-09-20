@@ -1,4 +1,4 @@
-import { claimNextJob, completeJob, failJob, heartbeat, recoverStuckJobs, setJobPolling, schedulePoll } from "../lib/queue";
+import { JOB_ABANDONED, checkpointJobArtifact, checkpointJobProgress, checkpointKeys, claimNextJob, completeJob, failJob, heartbeat, recoverStuckJobs, setJobPolling, schedulePoll } from "../lib/queue";
 import { generateImages, laneCountFor, createVideoTask, pollVideoTask, saveRemoteVideo, mockImageProviderEnabled, type ProviderImage } from "../lib/providers";
 import { modelCost, videoCost } from "../lib/cost";
 import { analyzeAllImagesSequentially, moderationRequested } from "../lib/safety";
@@ -28,6 +28,9 @@ async function processImageJob(job: {
   images: string | null;
 }, workerId: string): Promise<boolean> {
   const hb = setInterval(() => heartbeat(job.id).catch(() => undefined), 20_000);
+  // Objects this attempt stores, so an attempt that discovers the job has left
+  // the queue can take its own outputs back out of storage.
+  const storedThisAttempt: string[] = [];
   try {
     // Resume from a partial attempt: transient failures requeue the job with
     // the images it already persisted (Job.images holds the checkpoint), so
@@ -75,12 +78,14 @@ async function processImageJob(job: {
     const isFree = (user?.plan ?? "free") === "free";
 
     // Checkpoint each newly persisted image so a later retry resumes here.
-    // Persisting the checkpoint must never fail the generation itself.
+    // Persisting a checkpoint must never fail the generation itself, and the
+    // status CAS inside checkpointJobProgress is what keeps a job another
+    // worker has already failed and refunded from being written to again — it
+    // throws, and the catch below takes this attempt's objects back out.
     const persistProgress = async (img: ProviderImage) => {
       saved.push(img);
-      await prisma.job
-        .update({ where: { id: job.id }, data: { images: JSON.stringify(saved) } })
-        .catch(() => undefined);
+      storedThisAttempt.push(img.key);
+      await checkpointJobProgress(job.id, saved);
     };
 
     const generated =
@@ -171,7 +176,17 @@ async function processImageJob(job: {
     console.log(`[worker ${workerId}] job ${job.id} done (${rows.length} images)`);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
+    const abandoned = msg.startsWith(JOB_ABANDONED);
+    // Not marked terminal: "the job left the queue" covers both a terminal reap
+    // (failJob then early-returns — it is already failed and refunded) and a
+    // retry reap that requeued it (the normal retry transition is the right one;
+    // forcing terminal here would refund a job that was about to be retried).
     await failJob(job.id, msg, { terminal: isPermanentProviderError(msg) });
+    if (abandoned) {
+      // Another worker moved the job on, so the checkpoint write above was
+      // refused: these objects are named by nothing and are ours to remove.
+      await Promise.all(storedThisAttempt.map((k) => getStorage().delete(k).catch(() => undefined)));
+    }
     console.error(`[worker ${workerId}] job ${job.id} failed: ${msg}`);
     captureError(e, { jobId: job.id, model: job.model, quality: job.quality });
   } finally {
@@ -193,6 +208,7 @@ async function processVideoJob(job: {
   status: string;
   startedAt: Date | null;
   createdAt: Date;
+  images: string | null;
 }, workerId: string): Promise<boolean> {
   const modelInfo = getModel(job.model);
   if (!modelInfo) {
@@ -201,6 +217,10 @@ async function processVideoJob(job: {
   }
 
   const hb = setInterval(() => heartbeat(job.id).catch(() => undefined), 20_000);
+  // The object this attempt most recently stored. Between the storage put and
+  // the checkpoint write it is named by nothing, so an attempt that discovers
+  // the job has left the queue must take it back out itself.
+  let storedKey: string | null = null;
   try {
     // Phase 1: create the upstream task exactly once. providerTaskId is the
     // source of truth — re-creating on retry would double-bill the provider.
@@ -258,8 +278,13 @@ async function processVideoJob(job: {
 
     if (status.status === "succeeded" && status.videoUrl) {
       console.log(`[worker ${workerId}] job ${job.id}: video ready, downloading...`);
-      // Download and store the video
+      // Download and store the video. A retried attempt may find a file the
+      // previous one stored: pass it as the key to supersede so the checkpoint
+      // never names two objects, and only the live one is left behind.
+      const priorKey = checkpointKeys(job.images)[0] ?? null;
       const segmentKey = await saveRemoteVideo(status.videoUrl);
+      storedKey = segmentKey;
+      await checkpointJobArtifact(job.id, priorKey, segmentKey);
       let videoKey = segmentKey;
       if (job.sourceVideoKey) {
         // Extend jobs deliver original + continuation as ONE clip. If the
@@ -275,6 +300,8 @@ async function processVideoJob(job: {
             const finalKey = newStorageKey("mp4");
             await getStorage().put(finalKey, merged, "video/mp4");
             videoKey = finalKey;
+            storedKey = finalKey;
+            await checkpointJobArtifact(job.id, segmentKey, finalKey);
             console.log(`[worker ${workerId}] job ${job.id}: extended video assembled (${videoKey})`);
           } else {
             console.warn(`[worker ${workerId}] job ${job.id}: concat failed — delivering segment only`);
@@ -282,7 +309,12 @@ async function processVideoJob(job: {
         } else {
           console.warn(`[worker ${workerId}] job ${job.id}: source video missing — delivering segment only`);
         }
-        await getStorage().delete(segmentKey).catch(() => undefined);
+        // Only when the merge produced a DIFFERENT object. Deleting it
+        // unconditionally deleted the file being delivered whenever the concat
+        // path was not taken, so the fallback delivery handed the caller an
+        // Image row pointing at an object that no longer existed: charged in
+        // full for a video that 404s, with no refund and no retry.
+        if (videoKey !== segmentKey) await getStorage().delete(segmentKey).catch(() => undefined);
       }
       const vc = videoCost(job.model, job.durationSec ?? 5);
       // NOTE: the delivered length is deliberately NOT written back here. An
@@ -318,7 +350,15 @@ async function processVideoJob(job: {
     return true;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
+    const abandoned = msg.startsWith(JOB_ABANDONED);
+    // See the image catch for why an abandoned attempt is not forced terminal.
     await failJob(job.id, msg, { terminal: isPermanentProviderError(msg) });
+    if (abandoned && storedKey) {
+      // The checkpoint write was refused, so this object is named by nothing —
+      // not by the checkpoint failJob just reclaimed, and not by the one the
+      // retry will resume from.
+      await getStorage().delete(storedKey).catch(() => undefined);
+    }
     console.error(`[worker ${workerId}] job ${job.id} failed: ${msg}`);
     captureError(e, { jobId: job.id, model: job.model });
   } finally {

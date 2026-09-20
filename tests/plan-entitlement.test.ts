@@ -123,23 +123,26 @@ describe("30% carryover is computed from the cycle's funding grant", () => {
     const second = await makePlanOrder(userId, "pro", 2000);
     await fulfillOrder(userId, second.id, "plan", 2000, "pro");
     const early = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
-    const cycleEnd = early.planRenewsAt!;
+    expect(early.planRenewsAt!.getTime()).toBeGreaterThan(Date.now());
 
     // The early renewal did not pay out a carryover…
     expect(
       await prisma.creditGrant.count({ where: { userId, source: "ROLLOVER", refId: second.id } }),
     ).toBe(0);
 
-    // …and the funding grant for that cycle is the early (second) one.
-    const usage = await cycleUsage(userId, cycleEnd);
-    expect(usage.granted).toBe(2000);
-
-    // Force the cycle to have ended, then renew. Nothing was spent, so the
-    // carryover must be 30% of the full 2000 — the pre-fix code computed 0.
+    // Force the cycle to have ended, then measure it the way the renewal does.
+    // The cycle that just ran out is the one the EARLY renewal funded, so that
+    // grant's quota is what gets measured — the window version returned 0 here
+    // and the promised carryover vanished while the leftover quota was still
+    // swept at the cycle end.
     await prisma.user.update({
       where: { id: userId },
       data: { planRenewsAt: new Date(Date.now() - 60_000) },
     });
+    const usage = await cycleUsage(userId, new Date());
+    expect(usage).toMatchObject({ granted: 2000, spentNet: 0, fundingRefId: second.id });
+
+    // Nothing was spent, so the carryover must be 30% of the full 2000.
     const third = await makePlanOrder(userId, "pro", 2000);
     await fulfillOrder(userId, third.id, "plan", 2000, "pro");
     // Provenance: the carryover was measured from the cycle funded by the

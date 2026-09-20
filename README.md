@@ -198,7 +198,8 @@ PW_CHANNEL=chrome npx playwright test   # 本地用系统 Chrome；CI 用自带 
 - 内容安全：前置关键词过滤 + 后置 vision 审核（`IMAGE_MODERATION=1`，命中即拦截/退款/删图）
 - 水印：Seedream 图自带"AI生成"合规标识；免费档 gpt/wan 图交付前烘焙 "PixelDuo · AI 生成"；**视频免费档目前只有 UI 标识、片内无水印**（产品决定，见"已知边界"）
 - 限流：Redis 全局 + 中间件内存粗筛；监控告警 Sentry 待 DSN 生效
-- 已知边界（有意保留）：视频输出不做内容审核（无视频审核通道）；免费档视频无水印；2FA 一旦被他人绑定，改密码不会清除该绑定（改密本身会踢掉攻击者的会话与 API Key），解绑需运维执行 `scripts/reset-2fa.ts`
+- 订阅结转：月配额未使用部分的 30% 结转到下一周期（`lib/ledger.ts` 的 `fulfillOrder`）。本平台**不自动续费**，所以发放发生在"周期结束后的下一次购买订阅"时；提前续费的客户晚一个周期拿到（在下一次续费时结算上一个已结束周期）
+- 已知边界（有意保留）：视频输出不做内容审核（无视频审核通道）；免费档视频无水印；2FA 一旦被他人绑定，改密码不会清除该绑定（改密本身会踢掉攻击者的会话与 API Key），解绑需运维执行 `scripts/reset-2fa.ts`；生产部署的支付配置（`PAYMENT_PROVIDER` + 对应 webhook 密钥）改为**启动时校验**，配错即拒绝启动（见 [docs/deploy.md](docs/deploy.md)）
 
 ## 目录
 
