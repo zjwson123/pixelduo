@@ -10,7 +10,7 @@ vi.mock("next-auth", async (importOriginal) => {
   return { ...actual, getServerSession: (...args: unknown[]) => getServerSession(...args) };
 });
 
-const { POST: submitFeedback } = await import("../app/api/feedback/route");
+const { POST: submitFeedback, GET: listMine } = await import("../app/api/feedback/route");
 const { GET: adminList } = await import("../app/api/admin/feedback/route");
 const { PATCH: adminPatch } = await import("../app/api/admin/feedback/[id]/route");
 
@@ -220,8 +220,36 @@ describe("feedback submission", () => {
   });
 });
 
-describe("admin feedback inbox", () => {
-  it("is admin-only, lists newest first, counts unhandled, and marks handled", async () => {
+describe("the sender's own message history", () => {
+  it("lists only the caller's messages, newest first, and refuses anonymous callers", async () => {
+    const user = await makeUser("history", { credits: 10 });
+    const other = await makeUser("history-other", { credits: 10 });
+    await prisma.feedback.create({
+      data: { userId: user.id, email: user.email, category: "idea", message: "my older message", createdAt: new Date(Date.now() - 60_000) },
+    });
+    await prisma.feedback.create({
+      data: { userId: user.id, email: user.email, category: "bug", message: "my newer message" },
+    });
+    await prisma.feedback.create({
+      data: { userId: other.id, email: other.email, category: "other", message: "someone else's private message" },
+    });
+
+    getServerSession.mockResolvedValue(null);
+    expect((await listMine()).status).toBe(401);
+
+    getServerSession.mockResolvedValue({ user: { id: user.id, sv: 0, totpPending: false } });
+    const res = await listMine();
+    expect(res.status).toBe(200);
+    const payload = (await res.json()) as { feedback: Array<{ message: string }> };
+    const messages = payload.feedback.map((f) => f.message);
+    expect(messages[0]).toBe("my newer message");
+    expect(messages).toContain("my older message");
+    // Scoped by owner: another account's message must never appear.
+    expect(messages).not.toContain("someone else's private message");
+  });
+});
+
+describe("admin feedback inbox", () => {  it("is admin-only, lists newest first, counts unhandled, and marks handled", async () => {
     const admin = await makeUser("admin", { role: "admin", credits: 10 });
     const reporter = await makeUser("reporter", { credits: 10 });
     // Relative to the rows other cases left behind: an absolute count here would

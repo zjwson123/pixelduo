@@ -1,10 +1,18 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { FEEDBACK_CATEGORIES, FEEDBACK_MESSAGE_MAX, FEEDBACK_MESSAGE_MIN, type FeedbackCategory } from "@/lib/feedback-meta";
 
 type Locale = "en" | "zh";
+
+interface FeedbackRow {
+  id: string;
+  category: string;
+  message: string;
+  status: string;
+  createdAt: string;
+}
 
 // Copy lives here rather than in lib/i18n.ts: the landing page and workbench
 // each carry their own table, and this page is self-contained.
@@ -38,6 +46,9 @@ const T = {
     rateLimited: "That is a lot of messages just now — please try again in a few minutes.",
     failed: "Could not send that. Please try again.",
     chars: "characters",
+    mineTitle: "Messages you have sent",
+    statusNew: "Waiting",
+    statusDone: "Handled",
   },
   zh: {
     lang: "EN",
@@ -67,6 +78,9 @@ const T = {
     rateLimited: "刚刚提交得有点频繁，请过几分钟再试。",
     failed: "没能发送出去，请重试。",
     chars: "字符",
+    mineTitle: "你提交过的留言",
+    statusNew: "待处理",
+    statusDone: "已处理",
   },
 } as const;
 
@@ -103,8 +117,19 @@ export default function FeedbackPage() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState<{ id: string; email: string } | null>(null);
+  const [mine, setMine] = useState<FeedbackRow[]>([]);
 
   const t = T[locale];
+
+  const loadMine = useCallback(async () => {
+    try {
+      const res = await fetch("/api/feedback");
+      const data = await res.json();
+      if (data.ok) setMine(data.feedback as FeedbackRow[]);
+    } catch {
+      // The history is a convenience; never block the form on it.
+    }
+  }, []);
 
   useEffect(() => {
     const saved = localStorage.getItem("pd-lang");
@@ -115,10 +140,13 @@ export default function FeedbackPage() {
     fetch("/api/me")
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
-        if (data?.ok && data.user?.email) setMe({ email: data.user.email });
+        if (data?.ok && data.user?.email) {
+          setMe({ email: data.user.email });
+          loadMine();
+        }
       })
       .catch(() => undefined);
-  }, []);
+  }, [loadMine]);
 
   const switchLocale = (l: Locale) => {
     setLocale(l);
@@ -163,6 +191,7 @@ export default function FeedbackPage() {
         throw new Error(t.failed);
       }
       setDone({ id: String(data.id), email: me?.email ?? email.trim() });
+      loadMine();
     } catch (err) {
       setError(err instanceof Error ? err.message : t.failed);
     }
@@ -280,6 +309,36 @@ export default function FeedbackPage() {
               <Link className="link" href="/">PixelDuo</Link> · <Link className="link" href="/terms">Terms</Link> ·{" "}
               <Link className="link" href="/privacy">Privacy</Link>
             </div>
+
+            {/* Signed-in senders get their own history: "did anyone read this?"
+                is the question a feedback channel lives or dies on, and until
+                now the only answer was the confirmation screen. */}
+            {me && mine.length > 0 && (
+              <div style={{ marginTop: 22, borderTop: "1px solid var(--line)", paddingTop: 14 }}>
+                <div className="field-label" style={{ marginBottom: 8 }}>{t.mineTitle}</div>
+                {mine.map((row) => (
+                  <div key={row.id} style={{ display: "flex", gap: 8, alignItems: "baseline", fontSize: 12.5, marginBottom: 7 }}>
+                    <span
+                      className="chip"
+                      style={{
+                        cursor: "default",
+                        flex: "none",
+                        color: row.status === "done" ? "var(--ink-3)" : "var(--indigo)",
+                        borderColor: row.status === "done" ? "var(--line)" : "var(--indigo)",
+                      }}
+                    >
+                      {row.status === "done" ? t.statusDone : t.statusNew}
+                    </span>
+                    <span style={{ color: "var(--ink-2)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {row.message}
+                    </span>
+                    <span style={{ color: "var(--ink-3)", marginLeft: "auto", flex: "none" }}>
+                      {new Date(row.createdAt).toLocaleDateString()}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
           </form>
         )}
       </div>

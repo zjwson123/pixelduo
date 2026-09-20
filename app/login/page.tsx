@@ -128,7 +128,8 @@ export default function LoginPage() {
           No account? <Link className="link" href="/register">Create one — 30 free credits</Link>
         </div>
         <div className="auth-foot" style={{ marginTop: 10, fontSize: 12 }}>
-          <Link className="link" href="/terms">Terms</Link> · <Link className="link" href="/privacy">Privacy</Link>
+          <Link className="link" href="/terms">Terms</Link> · <Link className="link" href="/privacy">Privacy</Link> ·{" "}
+          <Link className="link" href="/feedback?from=/login">Feedback</Link>
         </div>
       </form>
     </div>

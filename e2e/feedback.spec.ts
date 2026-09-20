@@ -81,6 +81,13 @@ test("a signed-in report carries the account, and the admin inbox can close it",
   await page.locator('button[type="submit"]').click();
   await expect(page.locator("h1", { hasText: "Received." })).toBeVisible();
 
+  // The sender can see their own message waiting, inside the product — the
+  // answer to "did anyone read this?" without having to mail anyone.
+  await page.locator(".auth-card button", { hasText: "Write another" }).click();
+  await expect(page.locator(".auth-card")).toContainText("Messages you have sent");
+  await expect(page.locator(".auth-card")).toContainText("Waiting");
+  await expect(page.locator(".auth-card")).toContainText(tag);
+
   const row = await prisma.feedback.findFirstOrThrow({ where: { email } });
   expect(row.category).toBe("billing");
   expect(row.page).toBe("/studio");
@@ -106,6 +113,10 @@ test("a signed-in report carries the account, and the admin inbox can close it",
   const closed = await prisma.feedback.findUniqueOrThrow({ where: { id: row.id } });
   expect(closed.status).toBe("done");
   expect(closed.handledBy).not.toBeNull();
+
+  // …and the sender sees it close too, on the page they wrote from.
+  await page.goto("/feedback?from=/studio");
+  await expect(page.locator(".auth-card")).toContainText("Handled");
 
   await prisma.feedback.deleteMany({ where: { email } });
 });

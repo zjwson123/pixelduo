@@ -28,7 +28,7 @@ export default function PrivacyPage() {
         <ul>
           <li><b>Export</b> — request all your data via the account export feature.</li>
           <li><b>Delete</b> — request account and related data deletion; feedback you sent while signed in is removed with the account.</li>
-          <li><b>Correct / withdraw / complain</b> — contact support@pixelduo.ai.</li>
+          <li><b>Correct / withdraw / complain</b> — contact support@pixelduo.ai, or send us a message from the <Link href="/feedback">feedback page</Link> (works whether or not you can sign in).</li>
         </ul>
 
         <h2>Retention</h2>
@@ -38,7 +38,10 @@ export default function PrivacyPage() {
         <p>The service is for users 13 and older; generating realistic likenesses of real people requires being 18+. Child sexual abuse material is reported to authorities and removed.</p>
 
         <h2>Contact</h2>
-        <p>Data protection contact: support@pixelduo.ai.</p>
+        <p>
+          Data protection contact: support@pixelduo.ai — or use the <Link href="/feedback">feedback page</Link>, which
+          reaches us without needing to sign in.
+        </p>
 
         <p className="legal-back"><Link href="/">← Back to PixelDuo</Link></p>
       </div>

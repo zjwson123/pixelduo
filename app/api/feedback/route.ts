@@ -102,3 +102,22 @@ export async function POST(req: Request) {
     return fail(e);
   }
 }
+
+// The sender's own messages and their status, so "did anyone read this?" has an
+// answer inside the product instead of only in the mailbox. Signed-in callers
+// only: an anonymous report carries no identity to list it by — the reference
+// shown at submit time is the way to follow one up by mail.
+export async function GET() {
+  try {
+    const userId = await requireUserId();
+    const rows = await prisma.feedback.findMany({
+      where: { userId },
+      orderBy: { createdAt: "desc" },
+      take: 20,
+      select: { id: true, category: true, message: true, status: true, createdAt: true, handledAt: true },
+    });
+    return ok({ feedback: rows });
+  } catch (e) {
+    return fail(e);
+  }
+}
