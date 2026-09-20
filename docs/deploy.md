@@ -54,6 +54,8 @@ npx tsx scripts/setup-mail.ts resend <API_KEY> "PixelDuo <no-reply@你的域名>
 npx tsx scripts/setup-mail.ts local 2525                                # 无账号演练（配本地 sink）
 ```
 
+**先从大陆网络实测的可达性（2026-09-20，本机同处国内）**：`smtpdm.aliyun.com:465`、`smtp.qq.com:465`、`smtp.163.com:465`、`smtp.resend.com:587`、`smtp.sendgrid.net:587` **可达**；**`smtp.gmail.com:465` 不可达**（被墙）。所以大陆主机请优先 aliyun/qq/163，别用 Gmail SMTP。（部署主机的网络才是决定性的，但同一网络环境下这个结论基本一致。）
+
 支持的 provider：`aliyun`、`qq`、`163`、`resend`、`sendgrid`、`postmark`、`ses`、`gmail`、`local`（不带参数运行会列出全部与注意事项）。脚本内置了主机/端口/协议，并在写盘前校验：**465 必须 `smtps://`（一上来就 TLS），587 用 `smtp://`（STARTTLS 升级）**——这对写错就是卡到超时，是首次配置最常见的失败。
 
 只想验证已写好的配置：
