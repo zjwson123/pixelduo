@@ -69,7 +69,7 @@ npm run worker
 
 - 本地无 SMTP 时，验证/重置邮件打印到服务器日志（`[mail:dev]`），点链接即可
 - 验证页要**同时**输入注册时设置的密码：邮件链接证明"你有邮箱"，密码证明"账号是你注册的"。注册接口不校验邮箱归属，攻击者可以拿别人的邮箱预注册并设一个自己知道的密码——只凭链接就能激活的话，之后对方用 Google 登录会直接进到攻击者的账号里（账号劫持）。忘记密码时走"重置密码"即可换掉那把密码
-- 生产设置 `SMTP_URL`（如 `smtp://user:pass@smtp.resend.com:587`）与 `EMAIL_FROM`
+- 生产设置 `SMTP_URL` 与 `EMAIL_FROM`：一条命令配置并验证——`npx tsx scripts/setup-mail.ts aliyun no-reply@域名 <密码>`（也支持 `qq`/`163`/`resend`/`sendgrid`/`postmark`/`ses`/`gmail`/`local`；不带参数运行会列出全部）。它会写 `.env`（留备份、只改这两个键）并立刻打印接收端应答
 - 测试/CI 用 `EMAIL_VERIFY_AUTO=1` 让注册自动验证（e2e 默认路径，跳过上面的密码步骤）；本地跑验证 UX 全流程：
 
 ```bash
