@@ -358,6 +358,7 @@ export function Workbench() {
     if (TABS.some((t) => t.id === hash)) setTabState(hash as Tab);
   }, []);
   const [me, setMe] = useState<Me | null>(null);
+  const [unhandledFeedback, setUnhandledFeedback] = useState(0);
   const [prompt, setPrompt] = useState("a minimalist ceramic coffee mug on a warm beige background");
   const [model, setModel] = useState<string>("gpt");
   const [quality, setQuality] = useState<Quality>("medium");
@@ -425,6 +426,16 @@ export function Workbench() {
       setMe(data.user);
     } catch {}
   }, []);
+
+  // Unread feedback, for admins only: without it a new message is invisible
+  // until someone happens to open the console — which is how feedback quietly
+  // piles up unseen. Fetched once per mount; it is a hint, not a live counter.
+  useEffect(() => {
+    if (me?.role !== "admin") return;
+    api<{ unhandled: number }>("/api/admin/feedback")
+      .then((data) => setUnhandledFeedback(data.unhandled))
+      .catch(() => undefined);
+  }, [me?.role]);
 
   const refreshGallery = useCallback(async () => {
     try {
@@ -1024,7 +1035,16 @@ export function Workbench() {
           <Link className="btn btn-ghost btn-sm" href="/account/security">{t.security}</Link>
           <Link className="btn btn-ghost btn-sm" href="/account/api">{t.apiKeys}</Link>
           <Link className="btn btn-ghost btn-sm" href="/feedback?from=/studio">{t.feedback}</Link>
-          {me?.role === "admin" && <Link className="btn btn-ghost btn-sm" href="/admin">{t.admin}</Link>}
+          {me?.role === "admin" && (
+            <Link className="btn btn-ghost btn-sm" href="/admin">
+              {t.admin}
+              {unhandledFeedback > 0 && (
+                <span style={{ marginLeft: 6, padding: "1px 6px", borderRadius: 999, background: "var(--orange)", color: "#fff", fontSize: 11 }}>
+                  {unhandledFeedback}
+                </span>
+              )}
+            </Link>
+          )}
           <button className="btn btn-ghost btn-sm" onClick={() => signOut({ callbackUrl: "/" })}>{t.signOut}</button>
         </div>
       </header>

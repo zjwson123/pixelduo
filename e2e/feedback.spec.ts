@@ -98,6 +98,9 @@ test("a signed-in report carries the account, and the admin inbox can close it",
   await prisma.user.update({ where: { email }, data: { role: "admin" } });
   await page.goto("/studio");
   await page.reload();
+  // The unread hint on the Admin entry: without it a new message is invisible
+  // until someone decides to open the console.
+  await expect(page.locator('a[href="/admin"]')).toContainText(/\d/);
   await page.locator('a[href="/admin"]').click();
   await page.waitForURL("**/admin");
   await page.locator("button", { hasText: /^feedback/ }).click();
