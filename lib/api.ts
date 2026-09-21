@@ -128,7 +128,11 @@ function expectedStatus(msg: string): number | null {
     return 400;
   }
   if (msg.startsWith("too-many-keys") || msg === "email-already-registered") return 409;
-  if (msg.startsWith("queue-full:") || msg === "rate-limited") return 429;
+  // "2fa-locked" is the cumulative second-factor brake (lib/twofa.ts), not the
+  // per-minute burst limiter: the account is refused for the rest of a 24h
+  // window, so it is a distinct message the client can tell apart from
+  // "rate-limited" — and it is a 429 (retryable, not an incident), never a 500.
+  if (msg.startsWith("queue-full:") || msg === "rate-limited" || msg === "2fa-locked") return 429;
   if (msg === "unauthorized") return 401;
   if (msg === "2fa-required" || msg === "admin-required" || msg === "verify-email-required") {
     return 403;

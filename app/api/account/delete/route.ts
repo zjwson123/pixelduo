@@ -1,10 +1,18 @@
 import { z } from "zod";
-import { zodMessage, requireUserId, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
+import { zodMessage, requireUserId, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped, ApiError } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { deleteObjectsBounded } from "@/lib/storage";
 import { checkpointKeys } from "@/lib/queue";
 import { ADMIN_GUARD_LOCK, assertAnotherAdminRemains } from "@/lib/admin";
-import { verifyTotp, useBackupCode } from "@/lib/twofa";
+import {
+  verifyTotp,
+  useBackupCode,
+  isTwoFactorLocked,
+  recordTwoFactorFailure,
+  clearTwoFactorFailures,
+  claimTotpCode,
+  TWOFA_LOCKED_ERROR,
+} from "@/lib/twofa";
 import bcrypt from "bcryptjs";
 
 const schema = z.object({
@@ -26,6 +34,10 @@ export async function POST(req: Request) {
     if (limited) return limited;
     const userLimited = await enforceUserRateLimit(userId, "account-delete", 5, 60_000);
     if (userLimited) return fail(userLimited);
+    // Cumulative brake (lib/twofa.ts), consulted before the password and the
+    // second factor are compared: erasure is the one irreversible second-factor
+    // check, and the account is refused entirely while a grind is in progress.
+    if (await isTwoFactorLocked(userId)) return fail(new ApiError(429, TWOFA_LOCKED_ERROR));
     const bodyRaw = await readBodyCapped(req, 8 * 1024);
     if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
     const body = schema.parse(JSON.parse(bodyRaw.raw));
@@ -54,10 +66,17 @@ export async function POST(req: Request) {
     // invalid input, making the documented call impossible for those users.
     if (user.totpEnabled && user.totpSecret) {
       if (!body.token && !body.backupCode) return fail(new Error("2fa-code-required"));
+      // The TOTP branch claims the code (a code observed inside its ±1 step
+      // window must not also be able to erase the account); backup codes are
+      // already single-use in the database.
       const ok2 = body.token
-        ? verifyTotp(user.totpSecret, body.token)
+        ? verifyTotp(user.totpSecret, body.token) && (await claimTotpCode(userId, body.token))
         : await useBackupCode(userId, body.backupCode!);
-      if (!ok2) return fail(new Error("invalid-code"));
+      if (!ok2) {
+        await recordTwoFactorFailure(userId);
+        return fail(new Error("invalid-code"));
+      }
+      await clearTwoFactorFailures(userId);
     }
     // Generated outputs AND user-uploaded reference images (Job.refImageKey —
     // for i2v/edit workflows these can be personal photos, the most sensitive

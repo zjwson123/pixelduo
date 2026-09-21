@@ -12,8 +12,12 @@ afterAll(async () => {
 });
 
 describe("OAuth account provisioning", () => {
+  // The third argument is the provider's verdict on the address, and only an
+  // explicit `true` creates or links an account (lib/auth.ts): the default is
+  // refusal, so these cases state the vouching they rely on instead of leaving
+  // it implied.
   it("creates a verified account with signup bonus on first sign-in", async () => {
-    const user = await ensureOAuthUser(EMAIL, "OAuth User");
+    const user = await ensureOAuthUser(EMAIL, "OAuth User", true);
     expect(user).not.toBeNull();
     const db = await prisma.user.findUniqueOrThrow({ where: { email: EMAIL } });
     expect(db.emailVerified).not.toBeNull();
@@ -22,7 +26,7 @@ describe("OAuth account provisioning", () => {
   });
 
   it("reuses the existing account without double-granting", async () => {
-    await ensureOAuthUser(EMAIL, "OAuth User");
+    await ensureOAuthUser(EMAIL, "OAuth User", true);
     const db = await prisma.user.findUniqueOrThrow({ where: { email: EMAIL } });
     expect(db.credits).toBe(30);
   });
@@ -45,9 +49,22 @@ describe("OAuth account provisioning", () => {
     await prisma.user.create({
       data: { email, passwordHash: "attacker-hash", name: "Attacker Pre-Reg" },
     });
-    expect(await ensureOAuthUser(email, "Victim OAuth")).toBeNull();
+    expect(await ensureOAuthUser(email, "Victim OAuth", true)).toBeNull();
     const db = await prisma.user.findUniqueOrThrow({ where: { email } });
     expect(db.emailVerified).toBeNull(); // not auto-verified by the attempt
+  });
+
+  // Silence is not consent: a caller that supplies no verdict (or a resolver
+  // that gave up) must not be the difference between a refusal and an
+  // auto-verified account, so the default argument refuses.
+  it("refuses when no provider verdict is supplied", async () => {
+    const email = `oauth-noclaim-${Date.now()}@test.dev`;
+    await prisma.user.create({
+      data: { email, passwordHash: "victim-hash", name: "Victim", emailVerified: new Date() },
+    });
+    expect(await ensureOAuthUser(email, "No Claim")).toBeNull();
+    expect(await ensureOAuthUser(email, "Null Claim", null as never)).toBeNull();
+    expect(await prisma.user.findUniqueOrThrow({ where: { email } })).toBeTruthy();
   });
 
   it("accepts an explicitly verified provider email", async () => {

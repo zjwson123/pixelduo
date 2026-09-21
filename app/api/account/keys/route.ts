@@ -1,8 +1,16 @@
 import { z } from "zod";
-import { zodMessage, requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
+import { zodMessage, requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped, ApiError } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { createApiKey } from "@/lib/apikey";
-import { verifyTotp, useBackupCode } from "@/lib/twofa";
+import {
+  verifyTotp,
+  useBackupCode,
+  isTwoFactorLocked,
+  recordTwoFactorFailure,
+  clearTwoFactorFailures,
+  claimTotpCode,
+  TWOFA_LOCKED_ERROR,
+} from "@/lib/twofa";
 import bcrypt from "bcryptjs";
 
 const schema = z.object({
@@ -43,6 +51,10 @@ export async function POST(req: Request) {
     // dilute the limit (same treatment as 2fa/disable and account/delete).
     const userLimited = await enforceUserRateLimit(userId, "apikey-create", 5, 60_000);
     if (userLimited) return fail(userLimited);
+    // Cumulative brake (lib/twofa.ts) before the password and the second factor
+    // are compared: a key outlives sessions and never consults sessionVersion,
+    // so this re-auth gate gets the same campaign-level bound as the login step.
+    if (await isTwoFactorLocked(userId)) return fail(new ApiError(429, TWOFA_LOCKED_ERROR));
     const bodyRaw = await readBodyCapped(req, 8 * 1024);
     if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
     const body = schema.parse(JSON.parse(bodyRaw.raw));
@@ -54,10 +66,16 @@ export async function POST(req: Request) {
     if (user.totpEnabled && user.totpSecret) {
       // normalizeBackupCode(undefined) would throw a TypeError → masked 500.
       if (!body.token && !body.backupCode) return fail(new Error("2fa-code-required"));
+      // The TOTP branch claims the code: a code observed inside its ±1 step
+      // window must not also be able to mint a permanent credential.
       const ok2 = body.token
-        ? verifyTotp(user.totpSecret, body.token)
+        ? verifyTotp(user.totpSecret, body.token) && (await claimTotpCode(userId, body.token))
         : await useBackupCode(userId, body.backupCode!);
-      if (!ok2) return fail(new Error("invalid-code"));
+      if (!ok2) {
+        await recordTwoFactorFailure(userId);
+        return fail(new Error("invalid-code"));
+      }
+      await clearTwoFactorFailures(userId);
     }
     // Cap active keys: unbounded creation bloats the table and each key adds
     // its own per-key v1 rate budget. Count-then-create is a TOCTOU, so it runs

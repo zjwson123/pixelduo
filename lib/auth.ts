@@ -4,7 +4,7 @@ import GoogleProvider from "next-auth/providers/google";
 import GitHubProvider from "next-auth/providers/github";
 import bcrypt from "bcryptjs";
 import { randomBytes } from "crypto";
-import { reserveLoginAttempt, clearLoginFailures, alertLoginAbuse } from "./login-guard";
+import { reserveLoginAttempt, refundLoginFailures, alertLoginAbuse } from "./login-guard";
 import { prisma } from "./prisma";
 import { verifyPreAuthToken } from "./twofa";
 import { signupBonus } from "./ledger";
@@ -76,6 +76,17 @@ async function githubEmailVerified(accessToken: string | undefined, email: strin
   }
 }
 
+// The verdict carried by a provider's `email_verified` claim. Only an explicit
+// boolean true is the provider vouching for the address; the false-ish
+// spellings providers (and the OIDC libraries in front of them) actually emit
+// are the refusal they mean; anything else carries no verdict at all and has to
+// be resolved against the provider — or refused.
+function emailVerifiedClaim(claim: unknown): boolean | null {
+  if (claim === true) return true;
+  if (claim === false || claim === 0 || claim === "false" || claim === "0") return false;
+  return null;
+}
+
 export const authOptions: NextAuthOptions = {
   session: { strategy: "jwt" },
   pages: { signIn: "/login" },
@@ -105,8 +116,10 @@ export const authOptions: NextAuthOptions = {
           void alertLoginAbuse(email).catch(() => undefined);
           return null;
         }
-        // Correct password: refund this attempt from both counters.
-        await clearLoginFailures(email, ip);
+        // Correct password: refund this attempt from both counters. Not
+        // clearLoginFailures, which also clears the 2FA brake — a correct
+        // password must not buy a fresh budget of second-factor guesses.
+        await refundLoginFailures(email, ip);
         if (user.totpEnabled) {
           const pre = (credentials as Record<string, string>).preAuthToken;
           // Second step: password + valid one-time 2FA ticket → real session.
@@ -162,18 +175,34 @@ export const authOptions: NextAuthOptions = {
     // would silently bypass the second factor.
     async signIn({ user, account, profile }) {
       if (account?.type !== "oauth") return true;
-      // Forward the provider's own email_verified claim so an explicitly
-      // unverified address can never auto-verify a local account. A provider
-      // that publishes no such claim cannot be taken on faith — GitHub doesn't
-      // (see githubEmailVerified) — so it is resolved from the provider's API
-      // and a refusal falls through to `false`.
+      // Resolve the provider's own email_verified claim so an address the
+      // provider does not vouch for can never auto-verify (or auto-link into) a
+      // local account. The claim used to be read as
+      // `typeof claim === "boolean" ? claim : null`, and null slipped past
+      // ensureOAuthUser's `=== false` guard — so `email_verified: "false"` (or
+      // 0, or "0", or whatever type a provider or a proxy in front of it
+      // produced) was read as "no information" and the address was trusted,
+      // which against a pre-existing verified local account is account
+      // takeover. Only an explicit boolean true is vouching; everything else is
+      // resolved here or refused.
       const claim = (profile as { email_verified?: unknown } | undefined)?.email_verified;
-      let emailVerified: boolean | null = typeof claim === "boolean" ? claim : null;
-      if (emailVerified === null && account.provider === "github") {
+      const claimed = emailVerifiedClaim(claim);
+      let emailVerified: boolean;
+      if (claimed !== null) {
+        emailVerified = claimed;
+      } else if (account.provider === "github") {
+        // GitHub publishes no such claim at all (see githubEmailVerified), so
+        // its answer comes from the provider's own /user/emails list.
         emailVerified = await githubEmailVerified(
           account.access_token as string | undefined,
           user.email ?? "",
         );
+      } else {
+        // No claim, and no provider API to resolve it against — Google
+        // publishes the claim in its id_token, so a missing one means we cannot
+        // tell whether the address is verified. Refuse rather than treat
+        // silence as consent.
+        emailVerified = false;
       }
       const dbUser = await ensureOAuthUser(user.email ?? "", user.name ?? "", emailVerified);
       if (!dbUser) return false;
@@ -227,20 +256,24 @@ export function hasUsablePassword(passwordHash: string | null | undefined): bool
 }
 
 // Find-or-create a local account from a verified OAuth identity.
+//
+// `providerEmailVerified` defaults to REFUSAL, not to "no information": making
+// "the provider vouches for this address" the only accepted value means a
+// caller that forgets the argument, or forwards a claim it could not resolve,
+// cannot be the difference between a refusal and an auto-verified account. A
+// provider that explicitly reports the address as unverified — or that
+// publishes no claim we could verify ourselves (GitHub: see
+// githubEmailVerified, which resolves the claim from the provider's API) — must
+// not be allowed to claim (and auto-verify) a pending local registration: that
+// is an account-takeover path.
 export async function ensureOAuthUser(
   email: string,
   name: string,
-  providerEmailVerified?: boolean | null,
+  providerEmailVerified = false,
 ): Promise<{ id: string; totpEnabled: boolean } | null> {
   const e = email.toLowerCase().trim();
   if (!e) return null;
-  // A provider that explicitly reports the address as unverified — or that
-  // publishes no claim we could verify ourselves (GitHub: see
-  // githubEmailVerified, which resolves the claim from the provider API and
-  // passes null through only for providers that do publish one) — must not be
-  // allowed to claim (and auto-verify) a pending local registration: that is
-  // an account-takeover path.
-  if (providerEmailVerified === false) return null;
+  if (providerEmailVerified !== true) return null;
   let user = await prisma.user.findUnique({ where: { email: e } });
   if (!user) {
     user = await prisma.user.create({

@@ -1,7 +1,15 @@
 import { z } from "zod";
-import { zodMessage, requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
+import { zodMessage, requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped, ApiError } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
-import { verifyTotp, generateBackupCodes, hashBackupCode } from "@/lib/twofa";
+import {
+  verifyTotp,
+  generateBackupCodes,
+  hashBackupCode,
+  isTwoFactorLocked,
+  recordTwoFactorFailure,
+  clearTwoFactorFailures,
+  TWOFA_LOCKED_ERROR,
+} from "@/lib/twofa";
 import { sendTwoFactorStateEmail } from "@/lib/mail";
 import bcrypt from "bcryptjs";
 
@@ -21,6 +29,9 @@ export async function POST(req: Request) {
     if (limited) return limited;
     const userLimited = await enforceUserRateLimit(userId, "2fa-confirm", 5, 60_000);
     if (userLimited) return fail(userLimited);
+    // Cumulative brake (lib/twofa.ts): enrollment verifies a code against the
+    // pending secret, so it is a second-factor check like any other.
+    if (await isTwoFactorLocked(userId)) return fail(new ApiError(429, TWOFA_LOCKED_ERROR));
     const bodyRaw = await readBodyCapped(req, 8 * 1024);
     if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
     const body = schema.parse(JSON.parse(bodyRaw.raw));
@@ -30,7 +41,17 @@ export async function POST(req: Request) {
     });
     if (user.totpEnabled) return ok({ alreadyEnabled: true });
     if (!(await bcrypt.compare(body.password, user.passwordHash))) return fail(new Error("invalid-password"));
-    if (!verifyTotp(user.totpPendingSecret, body.token)) return fail(new Error("invalid-code"));
+    if (!verifyTotp(user.totpPendingSecret, body.token)) {
+      await recordTwoFactorFailure(userId);
+      return fail(new Error("invalid-code"));
+    }
+    // Deliberately NOT claimed against replay (claimTotpCode): the code was
+    // checked against the secret this caller just minted, and the same 30s code
+    // is legitimately presented again a moment later when the freshly enabled
+    // account signs in — claiming it here would lock the owner out of their own
+    // next login (and is exactly what e2e/2fa.spec.ts does). Reaching this
+    // comparison already requires the account password.
+    await clearTwoFactorFailures(userId);
 
     const codes = generateBackupCodes();
     // The claim IS the write: whoever flips totpEnabled false→true owns this

@@ -1,5 +1,6 @@
 import { prisma } from "../lib/prisma";
 import { getMailer } from "../lib/mail";
+import { clearTwoFactorFailures } from "../lib/twofa";
 
 // Operator-only 2FA reset. There is deliberately no API route for this: the
 // only in-app ways to clear the second factor require a live TOTP code or a
@@ -20,6 +21,19 @@ async function main() {
 
   const user = await prisma.user.findUnique({ where: { email: e } });
   if (!user) throw new Error(`user not found: ${e}`);
+
+  // The cumulative second-factor brake (lib/twofa.ts, 20 failures / 24h) has no
+  // in-app exit: once it trips, every route that accepts a second factor refuses
+  // the account, so clearing it is part of what this script is for. Cleared
+  // before the early return below, because a hostile enrollment can leave the
+  // counter behind after the 2FA state itself has been removed.
+  const brakeCleared = await clearTwoFactorFailures(user.id);
+  if (!brakeCleared) {
+    console.warn(
+      "[reset-2fa] the failed-attempt counter could NOT be cleared (Redis unreachable) — re-run once it is back, or wait out its 24h window",
+    );
+  }
+
   if (!user.totpEnabled && !user.totpSecret && !user.totpPendingSecret) {
     console.log(`[reset-2fa] ${e} has no 2FA configured — nothing to do`);
     return;

@@ -116,31 +116,14 @@ function getRedis(): Redis | null {
   return redis;
 }
 
-// Process-local fallback so a Redis outage fails closed (per-instance) instead
-// of letting a valid 5-minute ticket be replayed to mint unlimited sessions.
+// One-use markers for pre-auth tickets, so a valid 5-minute ticket cannot be
+// replayed to mint unlimited sessions. Backed by claimOnce below, which keeps a
+// process-local mirror when Redis is out of reach.
 const seenJtis = new Map<string, number>();
 
 // Returns true when the jti was freshly reserved (single-use enforcement).
 async function reserveJti(jti: string, ttlSec: number): Promise<boolean> {
-  const now = Date.now();
-  for (const [k, exp] of seenJtis) {
-    if (exp <= now) seenJtis.delete(k);
-  }
-  const c = getRedis();
-  if (!c) {
-    if (seenJtis.has(jti)) return false;
-    seenJtis.set(jti, now + ttlSec * 1000);
-    return true;
-  }
-  try {
-    await connecting;
-    const res = await c.set(`2fa:jti:${jti}`, "1", "EX", ttlSec, "NX");
-    return res === "OK";
-  } catch {
-    if (seenJtis.has(jti)) return false;
-    seenJtis.set(jti, now + ttlSec * 1000);
-    return true;
-  }
+  return claimOnce(seenJtis, `2fa:jti:${jti}`, ttlSec);
 }
 
 export async function createPreAuthToken(email: string): Promise<string> {
@@ -168,8 +151,156 @@ export async function verifyPreAuthToken(token: string, email: string): Promise<
   }
 }
 
+// ---- Cumulative per-account second-factor brake --------------------------
+
+// The per-minute limiters on the 2FA routes bound a burst, not a campaign.
+// verifyTotp accepts one step of clock drift either way, so 3 of the million
+// 6-digit codes are valid at any instant: at the 5 guesses/min those limiters
+// allow, the sustained rate is ~216k guesses a month — ~48% odds of landing on
+// a valid code, per month, for anyone who already knows the password. The
+// password path has carried a cumulative brake for exactly this reason
+// (lib/login-guard.ts, MAX_EMAIL_HARD_FAILURES); the second factor did not.
+//
+// Redis-backed and keyed per ACCOUNT: spreading guesses over source addresses
+// must not dilute a counter whose whole purpose is to bound the total. Cleared
+// by a successful second-factor check and by the recovery paths
+// (reset-password → clearLoginFailures; scripts/reset-2fa.ts) — never by a
+// password login, or an attacker who knows the password could buy another 20
+// guesses by signing in with it.
+export const MAX_2FA_FAILURES = 20;
+export const TWOFA_FAIL_WINDOW_SEC = 24 * 60 * 60;
+
+// What a tripped brake answers with. Deliberately not the burst limiter's
+// "rate-limited": that reads as "retry in a moment" and clears in a minute,
+// while this refuses the account for the rest of a 24h window. lib/api.ts
+// classifies it as a 429 (expectedStatus).
+export const TWOFA_LOCKED_ERROR = "2fa-locked";
+
+type RedisOutcome<T> = { state: "ok"; value: T } | { state: "unconfigured" | "error" };
+
+async function withRedis<T>(fn: (c: Redis) => Promise<T>): Promise<RedisOutcome<T>> {
+  const c = getRedis();
+  if (!c) return { state: "unconfigured" };
+  try {
+    await connecting;
+    return { state: "ok", value: await fn(c) };
+  } catch {
+    return { state: "error" };
+  }
+}
+
+// Process-local mirror of the counter, same shape and same reason as
+// lib/login-guard.ts: with REDIS_URL unset (documented as "in-memory, single
+// instance") the cap still exists per instance rather than disappearing.
+const localFails = new Map<string, { n: number; expires: number }>();
+
+function localFailCount(userId: string): number {
+  const rec = localFails.get(userId);
+  if (!rec) return 0;
+  if (Date.now() > rec.expires) {
+    localFails.delete(userId);
+    return 0;
+  }
+  return rec.n;
+}
+
+function localFailBump(userId: string): void {
+  const rec = localFails.get(userId);
+  if (rec && Date.now() <= rec.expires) {
+    rec.n += 1;
+    return;
+  }
+  localFails.set(userId, { n: 1, expires: Date.now() + TWOFA_FAIL_WINDOW_SEC * 1000 });
+  // Bound the fallback map: drop expired entries once it grows.
+  if (localFails.size > 10_000) {
+    const now = Date.now();
+    for (const [k, v] of localFails) if (now > v.expires) localFails.delete(k);
+  }
+}
+
+// Consulted BEFORE a second factor is verified, on every route that accepts one.
+export async function isTwoFactorLocked(userId: string): Promise<boolean> {
+  const r = await withRedis(async (c) => Number((await c.get(`2fa:fail:${userId}`)) ?? 0));
+  if (r.state === "ok") return r.value >= MAX_2FA_FAILURES;
+  // Fail CLOSED when a configured Redis cannot answer: this counter is the only
+  // thing between a known password and a month-long 6-digit grind, so "the
+  // store is unreachable" must not read as "no failures recorded". With
+  // REDIS_URL unset there is no shared store to consult and the process-local
+  // mirror above enforces the same cap.
+  if (r.state === "error") return true;
+  return localFailCount(userId) >= MAX_2FA_FAILURES;
+}
+
+export async function recordTwoFactorFailure(userId: string): Promise<void> {
+  const r = await withRedis(async (c) => {
+    const key = `2fa:fail:${userId}`;
+    const n = await c.incr(key);
+    if (n === 1) await c.expire(key, TWOFA_FAIL_WINDOW_SEC);
+    return n;
+  });
+  if (r.state !== "ok") localFailBump(userId);
+}
+
+// Returns false when a configured Redis could not be told to forget the
+// counter: the operator script reports that instead of claiming a reset that
+// did not happen (the key expires on its own within the window).
+export async function clearTwoFactorFailures(userId: string): Promise<boolean> {
+  localFails.delete(userId);
+  const r = await withRedis(async (c) => {
+    await c.del(`2fa:fail:${userId}`);
+  });
+  return r.state !== "error";
+}
+
+// ---- TOTP replay rejection ----------------------------------------------
+
+// A code stays valid for ±1 step, i.e. for up to 90s, and nothing stopped the
+// same code being presented twice inside that span: a code read over a shoulder
+// (or off a phishing page's relayed form) kept working for the rest of its
+// window, on every route that accepts one. The first acceptance claims the
+// code; a second one is refused as an invalid code. Only the TOTP path needs
+// this — backup codes are consumed in the database.
+export const TOTP_CODE_REUSE_WINDOW_SEC = 90;
+
+// Process-local mirror of the claims, for the same reason as the pre-auth
+// ticket's jti: single-use must degrade to per-instance, never to unlimited.
+const usedCodes = new Map<string, number>();
+
+// SET NX with a process-local mirror. Shared by the pre-auth ticket's jti and by
+// claimTotpCode below, which is the same problem (one use of a short-lived
+// secret) with a different window.
+async function claimOnce(local: Map<string, number>, key: string, ttlSec: number): Promise<boolean> {
+  const now = Date.now();
+  for (const [k, exp] of local) {
+    if (exp <= now) local.delete(k);
+  }
+  const claimLocally = () => {
+    if (local.has(key)) return false;
+    local.set(key, now + ttlSec * 1000);
+    return true;
+  };
+  const c = getRedis();
+  if (!c) return claimLocally();
+  try {
+    await connecting;
+    const res = await c.set(key, "1", "EX", ttlSec, "NX");
+    return res === "OK";
+  } catch {
+    return claimLocally();
+  }
+}
+
+// Claim a TOTP code for its remaining validity window. Call ONLY after
+// verifyTotp accepted it, and treat a false answer as an invalid code: it means
+// this account already spent that code.
+export async function claimTotpCode(userId: string, code: string): Promise<boolean> {
+  return claimOnce(usedCodes, `2fa:used:${userId}:${code}`, TOTP_CODE_REUSE_WINDOW_SEC);
+}
+
 export function _resetTwoFaForTests() {
   redis = null;
   connecting = null;
   seenJtis.clear();
+  localFails.clear();
+  usedCodes.clear();
 }

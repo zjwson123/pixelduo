@@ -1,8 +1,15 @@
 import bcrypt from "bcryptjs";
 import { z } from "zod";
-import { zodMessage, requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
+import { zodMessage, requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped, ApiError } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
-import { verifyTotp } from "@/lib/twofa";
+import {
+  verifyTotp,
+  isTwoFactorLocked,
+  recordTwoFactorFailure,
+  clearTwoFactorFailures,
+  claimTotpCode,
+  TWOFA_LOCKED_ERROR,
+} from "@/lib/twofa";
 import { sendTwoFactorStateEmail } from "@/lib/mail";
 
 const schema = z.object({
@@ -20,6 +27,10 @@ export async function POST(req: Request) {
     if (limited) return limited;
     const userLimited = await enforceUserRateLimit(userId, "2fa-disable", 5, 60_000);
     if (userLimited) return fail(userLimited);
+    // Cumulative brake (lib/twofa.ts) before any comparison: turning the second
+    // factor off is the downgrade an attacker who knows the password wants, so
+    // it is bound by the same counter as the login step.
+    if (await isTwoFactorLocked(userId)) return fail(new ApiError(429, TWOFA_LOCKED_ERROR));
     const bodyRaw = await readBodyCapped(req, 8 * 1024);
     if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
     const body = schema.parse(JSON.parse(bodyRaw.raw));
@@ -28,8 +39,17 @@ export async function POST(req: Request) {
       select: { passwordHash: true, totpSecret: true, totpEnabled: true, email: true },
     });
     if (!user.totpEnabled) return ok({ alreadyDisabled: true });
+    // A wrong password is deliberately not a brake failure: it has its own
+    // guard, and counting it here would let a stolen session lock the owner out
+    // of the second factor (and so out of this route's own recovery) for a day.
     if (!(await bcrypt.compare(body.password, user.passwordHash))) return fail(new Error("invalid-password"));
-    if (!verifyTotp(user.totpSecret, body.token)) return fail(new Error("invalid-code"));
+    // Replay rejection: a code observed inside its ±1 step window must not also
+    // be able to turn the second factor off.
+    if (!verifyTotp(user.totpSecret, body.token) || !(await claimTotpCode(userId, body.token))) {
+      await recordTwoFactorFailure(userId);
+      return fail(new Error("invalid-code"));
+    }
+    await clearTwoFactorFailures(userId);
     await prisma.$transaction([
       prisma.user.update({
         where: { id: userId },
