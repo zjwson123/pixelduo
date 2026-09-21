@@ -10,6 +10,13 @@ x-appenv: &appenv
   NEXTAUTH_URL: ${NEXTAUTH_URL:?set NEXTAUTH_URL, e.g. https://pixelduo.ai}
   SMTP_URL: ${SMTP_URL:-}
   EMAIL_FROM: ${EMAIL_FROM:-}
+  # Must be set: without it production refuses to send feedback notifications
+  # (see feedbackMailRefusal in lib/mail.ts) rather than mailing users' messages
+  # to the address hardcoded there. The compose anchor is the only path by which
+  # this variable reaches the containers.
+  FEEDBACK_TO: ${FEEDBACK_TO:-}
+  FEEDBACK_WEBHOOK_URL: ${FEEDBACK_WEBHOOK_URL:-}
+  FEEDBACK_WEBHOOK_KIND: ${FEEDBACK_WEBHOOK_KIND:-feishu}
   EMAIL_VERIFY_AUTO: "0"
   PAYMENT_PROVIDER: ${PAYMENT_PROVIDER:?set PAYMENT_PROVIDER (stripe or paddle — mock is forbidden in production)}
   STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}

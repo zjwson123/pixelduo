@@ -10,6 +10,7 @@
 // Exit code 0 only on success, so it works as a deploy gate. `--print` shows the
 // exact JSON without sending anything.
 import { buildWebhookBody, buildWebhookText, postWebhook, webhookKind, webhookUrl } from "../lib/notify";
+import { maskSecretUrl } from "../lib/mail-check";
 
 // The message an operator sees in the group; deliberately the same shape as a
 // real notification (including the reference line) so nothing about the format
@@ -44,7 +45,10 @@ function hint(body: string | undefined, error: string | undefined): string | nul
 
 async function main() {
   const url = webhookUrl();
-  console.log(`webhook:  ${url ?? "(none — FEEDBACK_WEBHOOK_URL is unset)"}`);
+  // Masked: for Feishu/DingTalk/WeCom this URL is the bearer secret itself, and
+  // this script's output is exactly what the deploy docs tell the operator to
+  // relay. `--print` below is the deliberate way to see the payload, not the URL.
+  console.log(`webhook:  ${url ? maskSecretUrl(url) : "(none — FEEDBACK_WEBHOOK_URL is unset)"}`);
   console.log(`kind:     ${webhookKind()}`);
 
   if (process.argv.includes("--print")) {

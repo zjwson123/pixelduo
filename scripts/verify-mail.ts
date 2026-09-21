@@ -13,13 +13,16 @@
 //
 // Exit code is 0 only when the transport reported success, so it is usable as a
 // deploy gate. Use scripts/setup-mail.ts to write the .env values first.
-import { checkDelivery, describeMailFailure } from "../lib/mail-check";
-import { feedbackRecipient, mailDeliverable } from "../lib/mail";
+import { checkDelivery, describeMailFailure, maskSecretUrl } from "../lib/mail-check";
+import { feedbackMailRefusal, feedbackRecipient, mailDeliverable } from "../lib/mail";
 
 async function main() {
   const recipient = process.argv[2] || feedbackRecipient();
 
-  console.log(`transport:  ${mailDeliverable() ? process.env.SMTP_URL : "(none — log-only DevMailer)"}`);
+  // Masked, not verbatim: SMTP_URL's userinfo IS the SMTP password, and the
+  // admin console's failure banner tells the operator to run this script and
+  // relay what it printed (see maskSecretUrl for the whole reasoning).
+  console.log(`transport:  ${mailDeliverable() ? maskSecretUrl(process.env.SMTP_URL) : "(none — log-only DevMailer)"}`);
   console.log(`from:       ${process.env.EMAIL_FROM || "(default)"}`);
   console.log(`recipient:  ${recipient}`);
   console.log(`feedback to: ${feedbackRecipient()}`);
@@ -34,7 +37,16 @@ async function main() {
   }
 
   console.error(`\n[FAIL] ${result.error ?? "delivery failed"}`);
-  if (!mailDeliverable()) {
+  if (feedbackMailRefusal()) {
+    // A deployment that never named a recipient cannot be validated by this
+    // script, and pretending otherwise would hide the misconfiguration it is
+    // meant to catch.
+    console.error(
+      "       Nothing is wrong with the SMTP settings themselves — but production refuses to notify\n" +
+        "       the built-in default address. Name the mailbox your team reads, then re-run:\n" +
+        '       FEEDBACK_TO="support@yourdomain.com" npx tsx scripts/verify-mail.ts',
+    );
+  } else if (!mailDeliverable()) {
     console.error(
       "       Set SMTP_URL + EMAIL_FROM (docs/deploy.md has the provider list) and re-run, or:\n" +
         "       npx tsx scripts/setup-mail.ts <provider> <credential> [from-address]\n" +

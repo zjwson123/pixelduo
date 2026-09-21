@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { createHash } from "crypto";
 import {
   ApiError,
   enforceRateLimit,
@@ -9,6 +10,7 @@ import {
   requireUserId,
   zodMessage,
 } from "@/lib/api";
+import { envLimit, rateLimit } from "@/lib/rate-limit";
 import { prisma } from "@/lib/prisma";
 import { sendFeedbackEmail } from "@/lib/mail";
 import { notifyFeedback } from "@/lib/notify";
@@ -42,6 +44,63 @@ async function optionalUser(): Promise<{ id: string; email: string; plan: string
     select: { id: true, email: true, plan: true },
   });
   return user;
+}
+
+// The notification half of a submission is the expensive half: every one is a
+// mail the operator pays for — out of the SMTP quota that verification and
+// password-reset mail share, so a flood does not merely annoy, it can stop real
+// users from receiving their links — plus a post into a group chat. The per-IP
+// and per-account limits above bound ONE sender; they say nothing about the
+// total, and N source addresses deliver up to 5N messages per 10 minutes, each
+// with an attacker-chosen Reply-To. This ceiling is global and hourly.
+//
+// Exceeding it NEVER drops the message: the row is stored and the id is
+// returned exactly as before, because the console is the record and a cap must
+// not cost a user their report. Only the outbound notification is suppressed,
+// and the suppression is announced in the log (once per window) so an operator
+// whose ceiling is being hit is not left wondering why the inbox went quiet.
+const NOTIFY_WINDOW_MS = 3600_000;
+const DEFAULT_NOTIFY_LIMIT = 60;
+let lastCapWarning = 0;
+
+function notifyLimit(): number {
+  // Read per call, not at module load: the tests raise it the same way CI does
+  // for REGISTER_RATE_LIMIT, and a typo falls back to the ceiling rather than
+  // removing it (see envLimit).
+  return envLimit(process.env.FEEDBACK_NOTIFY_LIMIT, DEFAULT_NOTIFY_LIMIT);
+}
+
+// A retry loop — a form resubmitted after a network blip, a client that retries
+// on timeout — resends byte-identical content, and one notification per attempt
+// means the cheapest possible flood is an honest retry. Collapsing identical
+// submissions for a few minutes costs the operator nothing (the first copy is
+// already in their inbox, same body) and removes that multiplier.
+const DUPLICATE_WINDOW_MS = 10 * 60_000;
+
+// Hashed, so the Redis keys of a message queue do not become a second, longer
+// lived copy of user feedback (the row in Postgres is the record).
+function submissionFingerprint(email: string, category: string, message: string): string {
+  return createHash("sha256").update(`${email}\u0000${category}\u0000${message}`).digest("hex");
+}
+
+// True when the outbound notification must be skipped. Never true for the
+// stored row: the caller stores first and notifies second either way.
+async function notificationSuppressed(email: string, category: string, message: string): Promise<boolean> {
+  const repeat = await rateLimit(`feedback:dup:${submissionFingerprint(email, category, message)}`, 1, DUPLICATE_WINDOW_MS);
+  if (!repeat.ok) return true;
+
+  const limit = notifyLimit();
+  const global = await rateLimit("feedback:notify-global", limit, NOTIFY_WINDOW_MS);
+  if (global.ok) return false;
+
+  const now = Date.now();
+  if (now - lastCapWarning > DUPLICATE_WINDOW_MS) {
+    lastCapWarning = now;
+    console.warn(
+      `[feedback] notification ceiling reached (${limit} per hour) — submissions are still stored and visible in the admin console, but mail/webhook notifications are suppressed for ~${global.retryAfterSec ?? 0}s`,
+    );
+  }
+  return true;
 }
 
 export async function POST(req: Request) {
@@ -81,6 +140,12 @@ export async function POST(req: Request) {
       },
       select: { id: true, createdAt: true },
     });
+
+    if (await notificationSuppressed(email, body.category, body.message)) {
+      // Deliberately still a success: the message IS received, and telling the
+      // sender otherwise would make them retype a report that was already kept.
+      return ok({ received: true, id: row.id, at: row.createdAt });
+    }
 
     await sendFeedbackEmail({
       ref: row.id,

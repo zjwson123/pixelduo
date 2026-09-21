@@ -91,6 +91,14 @@ function expectAccepted(result: { status: number; data: { error?: string } }): v
 
 beforeAll(() => {
   _setMailerForTests(recordingMailer);
+  // This file submits more notifications in one run than the production ceiling
+  // allows per hour, and the ceiling's bucket lives in the shared Redis with a
+  // one-hour window — it is not reset by a new run, so a second run inside the
+  // hour would start seeing suppressed notifications and fail on "mail was
+  // sent". Raised the same way CI raises REGISTER_RATE_LIMIT; the ceiling itself
+  // is exercised with a deliberately low value in
+  // tests/pass15-notify-hardening.test.ts.
+  process.env.FEEDBACK_NOTIFY_LIMIT = "100000";
 });
 
 afterEach(() => {
@@ -100,6 +108,7 @@ afterEach(() => {
 });
 
 afterAll(async () => {
+  delete process.env.FEEDBACK_NOTIFY_LIMIT;
   _setMailerForTests(null);
   await prisma.user.deleteMany({ where: { email: { startsWith: "fb-" } } });
   await prisma.feedback.deleteMany({ where: { email: { contains: "@test.dev" } } });

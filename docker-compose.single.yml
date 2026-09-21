@@ -3,7 +3,8 @@
 # Requires (export or .env): CADDY_DOMAIN, NEXTAUTH_SECRET, NEXTAUTH_URL,
 # MODELVERSE_IMAGE_API_KEY, ARK_IMAGE_API_KEY, DEEPSEEK_API_KEY,
 # VISION_MODERATION_API_KEY (+ BASE_URL), PAYMENT_PROVIDER + keys,
-# SMTP_URL, EMAIL_FROM, SENTRY_DSN, REDIS_PASSWORD, MINIO_ROOT_USER/PASSWORD.
+# SMTP_URL, EMAIL_FROM, FEEDBACK_TO (feedback notifications are refused without
+# it — see lib/mail.ts), SENTRY_DSN, REDIS_PASSWORD, MINIO_ROOT_USER/PASSWORD.
 
 x-appenv: &appenv
   DATABASE_URL: postgresql://pixelduo:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@db:5432/pixelduo
@@ -26,6 +27,13 @@ x-appenv: &appenv
   S3_FORCE_PATH_STYLE: "true"
   SMTP_URL: ${SMTP_URL:?set SMTP_URL}
   EMAIL_FROM: ${EMAIL_FROM:-PixelDuo <no-reply@pixelduo.ai>}
+  # Where user feedback is delivered. Optional here (the stack still starts), but
+  # a production runtime will NOT send feedback mail while it is unset — the
+  # message stays in the admin console instead — because the fallback address is
+  # a personal mailbox baked into lib/mail.ts, not the operator's.
+  FEEDBACK_TO: ${FEEDBACK_TO:-}
+  FEEDBACK_WEBHOOK_URL: ${FEEDBACK_WEBHOOK_URL:-}
+  FEEDBACK_WEBHOOK_KIND: ${FEEDBACK_WEBHOOK_KIND:-feishu}
   EMAIL_VERIFY_AUTO: "0"
   SENTRY_DSN: ${SENTRY_DSN:-}
   SENTRY_ENVIRONMENT: production

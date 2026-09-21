@@ -78,6 +78,13 @@ export default function AdminPage() {
   const [images, setImages] = useState<ImageRow[]>([]);
   const [feedback, setFeedback] = useState<FeedbackRow[]>([]);
   const [unhandled, setUnhandled] = useState(0);
+  // The inbox is paginated server-side (PAGE_SIZE per page). Dropping `total`
+  // made an inbox of 60 look like an inbox of 50: the badge said "60 unhandled"
+  // while the list showed 50, and a submission flood pushed the older reports
+  // out of reach with no sign that anything was missing.
+  const [feedbackPage, setFeedbackPage] = useState(1);
+  const [feedbackTotal, setFeedbackTotal] = useState(0);
+  const [feedbackPageSize, setFeedbackPageSize] = useState(50);
   const [mail, setMail] = useState<MailState>({ deliverable: true, lastAttempt: null });
   const [notify, setNotify] = useState<NotifyState>({ webhook: false });
   const [showHandled, setShowHandled] = useState(false);
@@ -113,17 +120,33 @@ export default function AdminPage() {
 
   const refreshFeedback = useCallback(async () => {
     try {
-      const data = await api<{ feedback: FeedbackRow[]; unhandled: number; mail: MailState; notify: NotifyState }>(
-        `/api/admin/feedback?status=${showHandled ? "all" : "new"}`,
-      );
+      const data = await api<{
+        feedback: FeedbackRow[];
+        total: number;
+        unhandled: number;
+        page: number;
+        pageSize: number;
+        mail: MailState;
+        notify: NotifyState;
+      }>(`/api/admin/feedback?status=${showHandled ? "all" : "new"}&page=${feedbackPage}`);
       setFeedback(data.feedback);
       setUnhandled(data.unhandled);
+      setFeedbackTotal(data.total);
+      setFeedbackPageSize(data.pageSize);
+      // Echoed back rather than assumed: the route clamps ?page=, so a stale
+      // page number (rows handled on the last page) cannot leave the view
+      // pointing past the end. Same value in, same value out — no loop.
+      setFeedbackPage(data.page);
       setMail(data.mail);
       setNotify(data.notify);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "load failed");
     }
-  }, [showHandled]);
+  }, [showHandled, feedbackPage]);
+
+  const feedbackPages = Math.max(1, Math.ceil(feedbackTotal / feedbackPageSize));
+  const feedbackFirst = (feedbackPage - 1) * feedbackPageSize + 1;
+  const feedbackLast = (feedbackPage - 1) * feedbackPageSize + feedback.length;
 
   // The unhandled count drives the tab badge, so it is fetched on mount rather
   // than only after the operator opens the tab — otherwise new messages are
@@ -339,13 +362,49 @@ export default function AdminPage() {
             )}
             <div className="row" style={{ marginBottom: 10 }}>
               <label style={{ fontSize: 13, color: "#7c829a" }}>
-                <input type="checkbox" checked={showHandled} onChange={(e) => setShowHandled(e.target.checked)} />{" "}
+                <input
+                  type="checkbox"
+                  checked={showHandled}
+                  onChange={(e) => {
+                    setShowHandled(e.target.checked);
+                    // A filter change makes the old offset meaningless.
+                    setFeedbackPage(1);
+                  }}
+                />{" "}
                 show handled
               </label>
               <span style={{ marginLeft: "auto", fontSize: 13, color: "#7c829a" }}>
+                {feedback.length === 0 ? "0" : `${feedbackFirst}–${feedbackLast}`} of {feedbackTotal}
+                {" · "}
                 {unhandled} unhandled
               </span>
             </div>
+            {feedbackPages > 1 && (
+              // Reachable pagination, not decoration: without it the 51st
+              // newest message is invisible, and "60 unhandled" in the badge
+              // matches only 50 visible rows.
+              <div className="row" style={{ gap: 8, marginBottom: 10, alignItems: "center" }}>
+                <button
+                  className="btn btn-ghost btn-sm"
+                  disabled={feedbackPage <= 1}
+                  style={{ opacity: feedbackPage <= 1 ? 0.5 : 1 }}
+                  onClick={() => setFeedbackPage((p) => Math.max(1, p - 1))}
+                >
+                  ‹ Newer
+                </button>
+                <button
+                  className="btn btn-ghost btn-sm"
+                  disabled={feedbackPage >= feedbackPages}
+                  style={{ opacity: feedbackPage >= feedbackPages ? 0.5 : 1 }}
+                  onClick={() => setFeedbackPage((p) => Math.min(feedbackPages, p + 1))}
+                >
+                  Older ›
+                </button>
+                <span style={{ fontSize: 12, color: "#7c829a" }}>
+                  page {feedbackPage} of {feedbackPages} · {feedbackPageSize} per page, nothing deleted
+                </span>
+              </div>
+            )}
             {feedback.length === 0 && <p style={{ color: "#7c829a", fontSize: 13 }}>Nothing here yet.</p>}
             {feedback.map((f) => (
               <div key={f.id} className="card" style={{ padding: 14, marginBottom: 10 }}>

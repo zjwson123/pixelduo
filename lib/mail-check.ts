@@ -3,16 +3,79 @@
 // The readme-shaped reason this is not inline in the CLI: when the CLI is
 // imported, process.argv belongs to the importer, so reading the recipient from
 // argv silently targeted the wrong address.
-import { feedbackRecipient, mailDeliverable, sendFeedbackEmailWithReceipt } from "./mail";
+//
+// maskSecretUrl() lives here as well: this module is already what both mail
+// scripts import, and scripts/verify-webhook.ts prints a group-bot token the
+// same way, so "what may a pre-flight print" has exactly one answer.
+import { feedbackMailRefusal, feedbackRecipient, mailDeliverable, sendFeedbackEmailWithReceipt } from "./mail";
 
 export interface DeliveryCheck {
   ok: boolean;
-  /** SMTP_URL in use, or null when mail is not configured at all. */
+  /** SMTP_URL in use (credential masked), or null when mail is not configured at all. */
   transport: string | null;
   recipient: string;
   response?: string;
   messageId?: string;
   error?: string;
+}
+
+// Every URL this app asks an operator to paste into it IS a credential:
+// SMTP_URL carries the SMTP password in its userinfo, and a Feishu/WeCom/
+// DingTalk group-bot URL is nothing but a token (Feishu puts it in the last
+// path segment; DingTalk's access_token= and WeCom's key= live in the query).
+// The docs and the admin console's failure banner tell the operator to run
+// these pre-flight scripts and relay what they printed, so echoing the value
+// verbatim discloses the outbound-mail credential — or a bot token that can
+// post as the bot — into a ticket, a chat or a CI log. scripts/setup-mail.ts
+// already masked exactly that for its own one-line summary, so the codebase had
+// two answers for the same secret and the verification path gave the wrong one.
+//
+// Keep what a human needs in order to spot the real first-run mistakes (scheme,
+// host, port, which endpoint shape) and replace each secret with a length hint:
+// enough to confirm "this is the value I pasted", unusable to authenticate.
+// Deliberately no "first N characters" prefix — 2-4 characters of a credential
+// is still credential material.
+
+// What a bot token looks like in a path: Feishu's is a 36-character uuid, and
+// nothing shorter than this is a credential on any provider this app supports.
+const PATH_TOKEN = /^[A-Za-z0-9._~-]{16,}$/;
+
+export function maskSecretUrl(url: string | null | undefined): string {
+  if (!url) return "(unset)";
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    // An unparseable value (a stray quote, a pasted line break) may hold the
+    // credential anywhere in it, so never echo it back.
+    return "(unparseable URL)";
+  }
+  const secret = (value: string) => `…(${value.length} chars)`;
+  // Presets percent-encode the userinfo, so measure the decoded form: the
+  // operator counts the characters they pasted.
+  const decoded = (value: string) => {
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      return value;
+    }
+  };
+  const userinfo = parsed.username
+    ? `${secret(decoded(parsed.username) + (parsed.password ? `:${decoded(parsed.password)}` : ""))}@`
+    : "";
+  const segments = parsed.pathname.split("/");
+  const last = segments.length - 1;
+  // Only a token-shaped segment is treated as a secret: Feishu's bot URL ends in
+  // a 36-character uuid and must be masked, while "…/hook" and "…/send" are how
+  // the operator recognises which endpoint they configured. Everything that
+  // carries a value — userinfo, query — is always masked.
+  if (last > 0 && PATH_TOKEN.test(decoded(segments[last]))) segments[last] = secret(decoded(segments[last]));
+  const query = [...new Set(parsed.searchParams.keys())]
+    .map((key) => `${key}=${secret(decoded(parsed.searchParams.get(key) ?? ""))}`)
+    .join("&");
+  // The fragment is dropped rather than masked: nothing in these URLs uses one,
+  // and it is the one part of a URL that can hold a secret of unknown shape.
+  return `${parsed.protocol}//${userinfo}${parsed.host}${segments.join("/")}${query ? `?${query}` : ""}`;
 }
 
 // Turn a transport error into the fix. Every one of these has been the actual
@@ -53,6 +116,13 @@ export async function checkDelivery(opts?: { recipient?: string; note?: string }
       error: "SMTP_URL is not set, so mail goes to the server log instead of a mailbox",
     };
   }
+  // Asked before the send so a production deployment that never named its own
+  // mailbox fails as a configuration refusal instead of a transport error —
+  // the send itself refuses too (lib/mail.ts), this is the readable reason.
+  const refusal = feedbackMailRefusal();
+  if (refusal) {
+    return { ok: false, transport: maskSecretUrl(process.env.SMTP_URL), recipient, error: refusal };
+  }
   try {
     const receipt = await sendFeedbackEmailWithReceipt({
       ref: "verify-mail",
@@ -66,7 +136,7 @@ export async function checkDelivery(opts?: { recipient?: string; note?: string }
     });
     return {
       ok: !receipt.rejected?.length,
-      transport: process.env.SMTP_URL ?? null,
+      transport: maskSecretUrl(process.env.SMTP_URL),
       recipient,
       response: receipt.response,
       messageId: receipt.messageId,
@@ -75,7 +145,7 @@ export async function checkDelivery(opts?: { recipient?: string; note?: string }
   } catch (e) {
     return {
       ok: false,
-      transport: process.env.SMTP_URL ?? null,
+      transport: maskSecretUrl(process.env.SMTP_URL),
       recipient,
       error: e instanceof Error ? e.message : String(e),
     };

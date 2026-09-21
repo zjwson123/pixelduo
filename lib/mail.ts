@@ -2,6 +2,7 @@ import nodemailer, { type Transporter } from "nodemailer";
 import fs from "fs";
 import path from "path";
 import { captureError } from "./observability";
+import { isProductionRuntime } from "./runtime-env";
 import {
   verificationHtml,
   resetHtml,
@@ -106,6 +107,19 @@ export function lastMailAttempt(): MailAttempt | null {
 
 export function _resetMailAttemptForTests() {
   lastAttempt = null;
+}
+
+// A refusal is not a transport failure, but the operator's question is the same
+// one ("did anyone get told about this?") and the answer has to live in the same
+// place: the console reads lastMailAttempt() and nothing else.
+function recordMailRefusal(reason: string) {
+  lastAttempt = {
+    at: new Date().toISOString(),
+    ok: false,
+    to: "(none — FEEDBACK_TO is unset)",
+    subject: "feedback (refused)",
+    error: reason,
+  };
 }
 
 // The single choke point every outbound mail passes through, so the record is
@@ -290,22 +304,44 @@ export async function sendTwoFactorStateEmail(to: string, enabled: boolean): Pro
 }
 
 // Where user feedback is delivered. The operator's address is the default so a
-// deployment that configures nothing still reaches a human; FEEDBACK_TO
-// overrides it (a support alias, a ticketing inbox, a mailing list).
+// developer's local run (and the test suite) still reads as "reaches a human";
+// FEEDBACK_TO overrides it (a support alias, a ticketing inbox, a mailing list).
+//
+// The default is a personal mailbox and it is NOT a deployment destination —
+// see feedbackMailRefusal() below for why production never uses it.
 export const FEEDBACK_TO_DEFAULT = "zhaijunwei0@gmail.com";
 export function feedbackRecipient(): string {
   return process.env.FEEDBACK_TO || FEEDBACK_TO_DEFAULT;
 }
 
-// Notify the operator of a submitted message. Plain text on purpose: the body
-// is user-written, and a text part cannot be an HTML injection surface in a
-// mail client. Reply-To is the reporter, so answering in the mail client goes
-// to them rather than back to the app's own From address.
+// Why feedback mail can be refused before it is sent, or null when it may go.
 //
-// Deliberately NOT sendSafely: a mail outage must not turn a stored message
-// into an error for the person who wrote it. The row is the record (it is what
-// the admin console's feedback tab lists) and the failure is reported instead —
-// same bargain as the 2FA state mail below.
+// The built-in default is someone's personal Gmail. Every compose file
+// forwarded SMTP_URL and EMAIL_FROM but not FEEDBACK_TO, so the documented
+// container flow — set SMTP_URL, done — delivered every reporter's message
+// body, their address, account id, plan, page and User-Agent to a third party
+// while the operator's own inbox stayed empty and nothing anywhere reported a
+// problem. A variable that reaches the app only if someone remembers to add it
+// to a compose anchor is not a control, so production refuses to guess: with
+// FEEDBACK_TO unset it declines to send at all, and says so through
+// lastMailAttempt() (the admin console's "last outgoing mail failed" banner)
+// plus captureError(). The message itself is still stored — the row is the
+// record, and a missing recipient must never discard a user's report.
+//
+// Development and test keep the old behaviour: there the mailer is usually the
+// log-only DevMailer anyway, and the pre-flight scripts and the test suite rely
+// on the default being a real address.
+export function feedbackMailRefusal(env: NodeJS.ProcessEnv = process.env): string | null {
+  if ((env.FEEDBACK_TO ?? "").trim()) return null;
+  if (!isProductionRuntime(env)) return null;
+  return (
+    `FEEDBACK_TO is not set — refusing to send feedback notification to the built-in default address (${FEEDBACK_TO_DEFAULT}). ` +
+    "Set FEEDBACK_TO to a mailbox your team reads (docs/deploy.md); the message is stored and visible in the admin console either way."
+  );
+}
+
+// Everything the operator needs in order to act on a report. Each field is
+// optional except the message: a signed-out report has no account behind it.
 export interface FeedbackNotificationInput {
   ref: string;
   category: string;
@@ -347,8 +383,17 @@ function buildFeedbackNotification(input: FeedbackNotificationInput) {
 // Deliberately NOT sendSafely: a mail outage must not turn a stored message
 // into an error for the person who wrote it. The row is the record (it is what
 // the admin console's feedback tab lists) and the failure is reported instead —
-// same bargain as the 2FA state mail above.
+// same bargain as the 2FA state mail below.
 export async function sendFeedbackEmail(input: FeedbackNotificationInput): Promise<void> {
+  const refusal = feedbackMailRefusal();
+  if (refusal) {
+    // Same slot as a transport failure, so the console's "last outgoing mail
+    // failed" banner carries the reason — a refusal that reported nowhere would
+    // be indistinguishable from "nobody wrote in".
+    recordMailRefusal(refusal);
+    captureError(new Error(refusal), { mailTo: "feedback", mailSubject: "feedback" });
+    return;
+  }
   const msg = buildFeedbackNotification(input);
   try {
     await deliver(msg.to, msg.subject, msg.text, undefined, msg.replyTo);
@@ -362,7 +407,14 @@ export async function sendFeedbackEmail(input: FeedbackNotificationInput): Promi
 // receives feedback mail" is a deployment claim that has to be evidenced by the
 // receiving MTA's own acceptance line, and that is the one thing the app's own
 // send path deliberately does not surface.
+//
+// A refusal THROWS here rather than being recorded and skipped: for the app a
+// suppressed notification is a stored row the operator can still read, but for
+// the pre-flight it is the whole point of running the script, so it has to come
+// back as a non-zero exit instead of a green "delivery OK" line.
 export async function sendFeedbackEmailWithReceipt(input: FeedbackNotificationInput): Promise<MailReceipt> {
+  const refusal = feedbackMailRefusal();
+  if (refusal) throw new Error(refusal);
   const msg = buildFeedbackNotification(input);
   return deliver(msg.to, msg.subject, msg.text, undefined, msg.replyTo);
 }

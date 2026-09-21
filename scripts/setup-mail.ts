@@ -10,6 +10,8 @@
 import fs from "fs";
 import path from "path";
 import { MAIL_PRESETS, findPreset, schemeForPort } from "../lib/mail-presets";
+import { maskSecretUrl } from "../lib/mail-check";
+import { feedbackMailRefusal } from "../lib/mail";
 
 const [providerId, ...rest] = process.argv.slice(2);
 
@@ -77,18 +79,25 @@ const next = `${kept ? `${kept}\n` : ""}SMTP_URL="${smtpUrl}"\nEMAIL_FROM="${ema
 fs.chmodSync(envPath, 0o600);
 fs.writeFileSync(envPath, next);
 
-const masked = (s: string) => (s.length > 8 ? `${s.slice(0, 4)}…(${s.length} chars)` : "…");
-// Mask the whole userinfo segment — it may itself contain '@' (mailbox
-// providers authenticate as the address), so a naive first-'@' match garbles
-// the display of a perfectly valid URL.
-const shownUrl = smtpUrl.replace(/^([a-z]+:\/\/).*@([^@]*)$/, (_, scheme: string, host: string) =>
-  `${scheme}${masked(credential)}@${host}`,
-);
+// Masked by the shared helper, not by a local copy: the credential in this URL
+// is the same secret scripts/verify-mail.ts prints, and two masking routines
+// meant two answers to "is this output safe to paste into a ticket" (this one
+// showed the first 4 characters of the password).
+const shownUrl = maskSecretUrl(smtpUrl);
 console.log(`wrote ${envPath}${existing ? ` (backup: ${envPath}.bak)` : ""}`);
 console.log(`  SMTP_URL   = ${shownUrl}`);
 console.log(`  EMAIL_FROM = ${emailFrom}`);
 console.log(`  provider   = ${preset.label}`);
 if (preset.notes) console.log(`  note       = ${preset.notes}`);
+// This script owns SMTP_URL/EMAIL_FROM only; a feedback mail still needs a
+// recipient, and production refuses the built-in default rather than mailing a
+// user's message to whoever wrote the code.
+if (!process.env.FEEDBACK_TO) {
+  console.log(
+    "  FEEDBACK_TO is not set — add FEEDBACK_TO=\"support@yourdomain.com\" to .env and export it here,\n" +
+      "  or the delivery check below (and every production feedback notification) is refused.",
+  );
+}
 
 if (preset.id === "local") {
   console.log("\nNothing will reach a real mailbox with the local sink — it only proves the path.");
@@ -109,8 +118,17 @@ async function main() {
     process.exit(0);
   }
   console.error(`\n[FAIL] ${result.error ?? "delivery failed"}`);
-  const hint = describeMailFailure(result.error ?? "");
-  if (hint) console.error(`       ${hint}`);
+  if (feedbackMailRefusal()) {
+    console.error(
+      "       SMTP_URL and EMAIL_FROM are written and may be perfectly good — but with FEEDBACK_TO unset a\n" +
+        "       production deployment refuses to send user feedback anywhere, and this check now says so.\n" +
+        '       Add FEEDBACK_TO="support@yourdomain.com" to .env (and export it in this shell — these\n' +
+        "       scripts read the environment, not the file) and re-run npx tsx scripts/verify-mail.ts.",
+    );
+  } else {
+    const hint = describeMailFailure(result.error ?? "");
+    if (hint) console.error(`       ${hint}`);
+  }
   console.error("       Values were written to .env; fix them (or re-run this script) and run npx tsx scripts/verify-mail.ts again.");
   process.exit(1);
 }

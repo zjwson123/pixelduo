@@ -24,6 +24,15 @@ services:
       MAIL_DEV_MODE: ${MAIL_DEV_MODE:-1}
       SMTP_URL: ${SMTP_URL:-}
       EMAIL_FROM: ${EMAIL_FROM:-}
+      # Where user feedback goes. Compose forwards only the variables it names
+      # here, so leaving this out of the anchor kept FEEDBACK_TO unreachable in
+      # containers: the documented flow (set SMTP_URL, done) then mailed every
+      # reporter's message to the address baked into lib/mail.ts instead of the
+      # operator's inbox. Production refuses to send feedback at all while this
+      # is unset — set it.
+      FEEDBACK_TO: ${FEEDBACK_TO:-}
+      FEEDBACK_WEBHOOK_URL: ${FEEDBACK_WEBHOOK_URL:-}
+      FEEDBACK_WEBHOOK_KIND: ${FEEDBACK_WEBHOOK_KIND:-feishu}
       EMAIL_VERIFY_AUTO: ${EMAIL_VERIFY_AUTO:-0}
       PAYMENT_PROVIDER: ${PAYMENT_PROVIDER:-mock}
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}

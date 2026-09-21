@@ -8,9 +8,17 @@
 //
 // The URL is operator-supplied configuration, the same trust level as SMTP_URL,
 // so it is not routed through the SSRF-pinned fetcher (that guard exists for
-// provider-supplied URLs). It is still constrained: https only, except for a
-// loopback address which the local test sink uses.
+// provider-supplied URLs). "Trusted operator" is not a reason to let the
+// endpoint pick the destination, though: the POST itself is pinned (https
+// except for the loopback test sink), refuses redirects, refuses to resolve to
+// a private/link-local address, and bounds its reply — see postWebhook.
 import { captureError } from "./observability";
+import { isProductionRuntime } from "./runtime-env";
+// The bounded reader the rest of the codebase uses for an outbound response
+// body (lib/store.ts). Reused rather than re-implemented: the two things that
+// must agree here — "how much may we read" and "is the target acceptable" —
+// already have one answer each in that module.
+import { hostIsPublic, readBodyCapped } from "./store";
 
 export type WebhookKind = "feishu" | "wecom" | "dingtalk" | "raw";
 
@@ -39,6 +47,24 @@ export function buildWebhookBody(kind: WebhookKind, text: string): Record<string
   }
 }
 
+// Feishu's text message type interprets `<at user_id="…">…</at>` (and the
+// `<at email="…">` form) as a real mention directive. The feedback body is
+// written by anyone, signed out and unauthenticated, so a submitter who types
+// that tag makes every LATER notification in the group @-mention the whole ops
+// group — silently, in a message the operator reads as ordinary text. Renaming
+// the tag rather than stripping it keeps the text readable AND shows the
+// operator that someone planted one. Only this form needs handling: DingTalk
+// and WeCom take their mentions from dedicated payload fields (atMobiles /
+// atUserIds) that this module never sends, and their text bodies have no
+// mention syntax at all.
+const MENTION_TAG = /<\s*(\/?\s*at)\b([^>]*)>/gi;
+
+export function neutraliseMentions(text: string): string {
+  // The tag's own spelling is kept, only its delimiters change: an operator
+  // reading the notification sees exactly what was typed.
+  return text.replace(MENTION_TAG, (_match, name: string, attrs: string) => `[${name}${attrs}]`);
+}
+
 export function buildWebhookText(input: NotifyInput): string {
   const who = input.userId ? `${input.email} (user ${input.userId})` : `${input.email} (not signed in)`;
   const context = [who, input.plan ? `plan ${input.plan}` : null, input.page ? `from ${input.page}` : null, input.locale]
@@ -46,7 +72,10 @@ export function buildWebhookText(input: NotifyInput): string {
     .join(" · ");
   // Webhooks truncate around 4KB; the message is already capped at 2000 chars by
   // the route, so this stays well inside it.
-  return `[PixelDuo] 反馈 · ${input.category}\n${context}\n\n${input.message}\n\nref #${input.ref.slice(-8)}`;
+  const text = `[PixelDuo] 反馈 · ${input.category}\n${context}\n\n${input.message}\n\nref #${input.ref.slice(-8)}`;
+  // Applied to the assembled text, not to input.message alone: `email` and
+  // `page` reach the same payload and are just as caller-controlled.
+  return neutraliseMentions(text);
 }
 
 export function webhookUrl(): string | null {
@@ -70,6 +99,35 @@ export function webhookAllowed(url: string): boolean {
   }
 }
 
+// Where a notification may actually be sent, decided at POST time.
+//
+// `webhookAllowed` above is only the scheme half, and it has to stay
+// synchronous (a caller wants a verdict without awaiting DNS). The address half
+// cannot be: a hostname is not a destination until it resolves, and a name that
+// resolves public at check time and internal at connect time is the classic
+// rebinding shape. Both halves are applied to the operator's URL before the
+// request is built, and the same policy is what makes a redirect unsafe to
+// follow — a 307 to http://169.254.169.254/… would otherwise let the endpoint
+// choose the target inside the compose network.
+//
+// Loopback is the documented test exception (tests/notify.test.ts and the local
+// sink listen on 127.0.0.1), and it is kept for development/test runtimes only:
+// a production deployment has no business posting its feedback to its own
+// loopback, and that is exactly the address a rebinding attack wants.
+async function webhookTargetAllowed(url: string): Promise<string | null> {
+  if (!webhookAllowed(url)) {
+    return "FEEDBACK_WEBHOOK_URL must be https (or a loopback address for testing)";
+  }
+  const hostname = new URL(url).hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (hostname === "127.0.0.1" || hostname === "localhost") {
+    return isProductionRuntime() ? "a loopback webhook is a test-only address and is refused in production" : null;
+  }
+  if (!(await hostIsPublic(hostname))) {
+    return "FEEDBACK_WEBHOOK_URL resolves to a private, link-local or reserved address — refusing to post (an endpoint that means to be public must resolve publicly)";
+  }
+  return null;
+}
+
 export interface WebhookResult {
   ok: boolean;
   status?: number;
@@ -78,6 +136,13 @@ export interface WebhookResult {
   error?: string;
 }
 
+// How much of the endpoint's reply we are willing to read. A bot answers with a
+// short JSON ack; the snippet that gets reported is 200 chars of it. Anything
+// past this is not a refusal reason, it is a body someone else decides the size
+// of — res.text() buffered all of it before the slice, so a hostile or merely
+// broken endpoint (a URL pointing at a web page, say) could drive the heap.
+const WEBHOOK_REPLY_MAX_BYTES = 8 * 1024;
+
 // One POST, with the outcome REPORTED instead of captured — the app's own
 // notification path deliberately swallows failures (a stored message must not
 // fail because a webhook is down), but the pre-flight check in
@@ -85,17 +150,48 @@ export interface WebhookResult {
 export async function postWebhook(text: string): Promise<WebhookResult> {
   const url = webhookUrl();
   if (!url) return { ok: false, error: "FEEDBACK_WEBHOOK_URL is not set" };
-  if (!webhookAllowed(url)) {
-    return { ok: false, error: "FEEDBACK_WEBHOOK_URL must be https (or a loopback address for testing)" };
-  }
+  const denied = await webhookTargetAllowed(url);
+  if (denied) return { ok: false, error: denied };
   try {
     const res = await fetch(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(buildWebhookBody(webhookKind(), text)),
       signal: AbortSignal.timeout(5000),
+      // No redirects — every other outbound call in this codebase pins this
+      // (lib/providers/index.ts, lib/safety.ts, lib/router.ts, lib/assistant.ts)
+      // and for the same reason: the follow-up request is issued to an address
+      // the operator never configured, from inside the deployment's network,
+      // with this POST's body. Nothing here needs the header a redirect would
+      // drop, so following one is pure SSRF surface. A 3xx simply fails.
+      redirect: "manual",
     });
-    const body = (await res.text().catch(() => "")).slice(0, 200);
+    if (res.status >= 300 && res.status < 400) {
+      await res.body?.cancel().catch(() => undefined);
+      return {
+        ok: false,
+        status: res.status,
+        error: `the endpoint redirected (${res.status}) instead of accepting the message — point FEEDBACK_WEBHOOK_URL at the final address`,
+      };
+    }
+    let reply: string;
+    try {
+      // Bounded like every other outbound read; an over-cap reply is a failure,
+      // not a truncated success, because the over-cap case is also how a
+      // misconfigured URL (an HTML page, an object store) answers.
+      reply = (await readBodyCapped(res, WEBHOOK_REPLY_MAX_BYTES)).toString("utf8");
+    } catch (e) {
+      // Only readBodyCapped's over-cap sentinel is a verdict about the endpoint;
+      // anything else (the timeout aborting the body, a reset connection) is a
+      // transport error and is reported by the catch below, with its own words.
+      if (!(e instanceof Error) || e.message !== "download-too-large") throw e;
+      return {
+        ok: false,
+        status: res.status,
+        error: `the endpoint answered with more than ${WEBHOOK_REPLY_MAX_BYTES} bytes — that is not a bot acknowledgement`,
+      };
+    }
+    const body = reply.slice(0, 200);
     // Feishu answers 200 with `code`, DingTalk/WeCom sometimes answer 200 with
     // an errcode — so the body is part of the verdict, not just the status.
     const refusedInBody = /"errcode"\s*:\s*(?!0)\d+|"code"\s*:\s*(?!0)\d+/.test(body);

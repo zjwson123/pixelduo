@@ -69,7 +69,8 @@ npm run worker
 
 - 本地无 SMTP 时，验证/重置邮件打印到服务器日志（`[mail:dev]`），点链接即可
 - 验证页要**同时**输入注册时设置的密码：邮件链接证明"你有邮箱"，密码证明"账号是你注册的"。注册接口不校验邮箱归属，攻击者可以拿别人的邮箱预注册并设一个自己知道的密码——只凭链接就能激活的话，之后对方用 Google 登录会直接进到攻击者的账号里（账号劫持）。忘记密码时走"重置密码"即可换掉那把密码
-- 生产设置 `SMTP_URL` 与 `EMAIL_FROM`：一条命令配置并验证——`npx tsx scripts/setup-mail.ts aliyun no-reply@域名 <密码>`（也支持 `qq`/`163`/`resend`/`sendgrid`/`postmark`/`ses`/`gmail`/`local`；不带参数运行会列出全部）。它会写 `.env`（留备份、只改这两个键）并立刻打印接收端应答
+- 生产设置 `SMTP_URL` 与 `EMAIL_FROM`：一条命令配置并验证——`npx tsx scripts/setup-mail.ts aliyun no-reply@域名 <密码>`（也支持 `qq`/`163`/`resend`/`sendgrid`/`postmark`/`ses`/`gmail`/`local`；不带参数运行会列出全部）。它会写 `.env`（留备份、只改这两个键）并立刻打印接收端应答；脚本打印的连接串一律打码（只留方案/主机/端口 + 长度提示），可以放心贴进工单或群聊
+- 用户反馈的收件箱是 `FEEDBACK_TO`，**生产必须显式设置**：代码里的兜底地址是开发者的个人邮箱，生产运行时拒绝使用它——未设置就不发通知邮件、只记一条失败原因（管理台 feedback 标签页可见），留言本身照旧入库。改它不需要动代码
 - 测试/CI 用 `EMAIL_VERIFY_AUTO=1` 让注册自动验证（e2e 默认路径，跳过上面的密码步骤）；本地跑验证 UX 全流程：
 
 ```bash
@@ -162,7 +163,7 @@ curl http://localhost:3000/api/health
   ```bash
   bash scripts/dev-restart.sh     # 重启 :3000 上的 app + worker，并校验 health/页面
   ```
-- **邮件**：本地默认走 `DevMailer`——邮件（含验证/重置链接）打印到 `/tmp/pd-dev-app.log`，不投递。要验证真实发信链路又不想申请账号，用仓库里的 SMTP 接收器：`node scripts/dev-smtp-sink.mjs 2525 /tmp/pd-smtp-inbox.log &` 然后 `SMTP_URL=smtp://127.0.0.1:2525 bash scripts/dev-restart.sh`，收到的完整报文（信封收件人 + 报文头）写在 `/tmp/pd-smtp-inbox.log`。生产发信配置见 [docs/deploy.md](docs/deploy.md)（`SMTP_URL` / `EMAIL_FROM`）
+- **邮件**：本地默认走 `DevMailer`——邮件（含验证/重置链接）打印到 `/tmp/pd-dev-app.log`，不投递。要验证真实发信链路又不想申请账号，用仓库里的 SMTP 接收器：`node scripts/dev-smtp-sink.mjs 2525 /tmp/pd-smtp-inbox.log &` 然后 `SMTP_URL=smtp://127.0.0.1:2525 bash scripts/dev-restart.sh`，收到的完整报文（信封收件人 + 报文头）写在 `/tmp/pd-smtp-inbox.log`。生产发信配置见 [docs/deploy.md](docs/deploy.md)（`SMTP_URL` / `EMAIL_FROM` / `FEEDBACK_TO`）
 
 CI（`.github/workflows/ci.yml`）：Postgres 服务容器下跑单测、构建、e2e。
 
@@ -199,8 +200,8 @@ PW_CHANNEL=chrome npx playwright test   # 本地用系统 Chrome；CI 用自带 
 - 支付主体/备案仍为壳子：Stripe/Paddle Provider 已实现，真实沙箱全流程 + 生产 key 待申请；支付宝/微信待国内主体
 - 邮箱验证 + 找回密码 + 登录防爆破 + 会话吊销 + **TOTP 2FA**（含备用码）+ **OAuth（Google/GitHub，配置即启用）** 已上线
 - 管理后台已上线（`/admin`，管理员角色 + ADMIN 账本闭环 + **feedback 留言收件箱**）
-- 反馈通知两条通道：邮件（`SMTP_URL`，见 docs/deploy.md）与**飞书/企微/钉钉群机器人**（`FEEDBACK_WEBHOOK_URL`，无需域名与 SPF，大陆主机最省事，配好用 `npx tsx scripts/verify-webhook.ts` 一条命令验证）；都未配置时留言仍完整保留在管理台收件箱，且管理台会显示哪个通道可用
-- **用户反馈已上线**（`/feedback`，入口在首页页脚与工作台顶栏）：登录/未登录都能提交，分类 + 正文 + 回复邮箱；通知邮件发到 `FEEDBACK_TO`（默认运维邮箱），`Reply-To` 是留言者，邮箱里直接回复即回复用户；管理台 feedback 标签页可查看/标记已处理，登录状态下提交的留言随账号一并删除（见 [docs/deploy.md](docs/deploy.md)）
+- 反馈通知两条通道：邮件（`SMTP_URL` + `FEEDBACK_TO`，见 docs/deploy.md）与**飞书/企微/钉钉群机器人**（`FEEDBACK_WEBHOOK_URL`，无需域名与 SPF，大陆主机最省事，配好用 `npx tsx scripts/verify-webhook.ts` 一条命令验证）；都未配置时留言仍完整保留在管理台收件箱，且管理台会显示哪个通道可用
+- **用户反馈已上线**（`/feedback`，入口在首页页脚与工作台顶栏）：登录/未登录都能提交，分类 + 正文 + 回复邮箱；通知邮件发到 `FEEDBACK_TO`（生产必填，见上），`Reply-To` 是留言者，邮箱里直接回复即回复用户；限流双轴（每 IP / 每账号 5 条 / 10 分钟）+ **全局出站通知上限**（`FEEDBACK_NOTIFY_LIMIT`，默认 60 条/小时，超限只停通知、留言照旧入库），完全相同的重复提交 10 分钟内只通知一次；管理台 feedback 标签页分页显示 `N–M of 总数`（每页 50 条，可翻页），可查看/标记已处理，登录状态下提交的留言随账号一并删除（见 [docs/deploy.md](docs/deploy.md)）
 - **公开 API 已上线**（`/api/v1/images/generations` + Key 管理 + 文档）；OAuth/支付等外部凭据就绪即启用
 - 图片对象备份：自托管已有 `backup-objects` 每日镜像 + 恢复演练；生产托管对象存储仍需开版本控制/跨区域复制
 - 内容安全：前置关键词过滤 + 后置 vision 审核（`IMAGE_MODERATION=1`，命中即拦截/退款/删图）

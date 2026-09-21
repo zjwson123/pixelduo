@@ -37,12 +37,17 @@
 
 ### 用户反馈（`/feedback`）
 
-留言会存进 `Feedback` 表（管理台 **feedback** 标签页 = 收件箱），同时把通知邮件发到 `FEEDBACK_TO`（未配置时用代码里的默认运维邮箱）。邮件用纯文本，`Reply-To` 是留言者本人，所以在邮箱里直接回复就是回复用户。
+留言会存进 `Feedback` 表（管理台 **feedback** 标签页 = 收件箱），同时把通知邮件发到 `FEEDBACK_TO`。邮件用纯文本，`Reply-To` 是留言者本人，所以在邮箱里直接回复就是回复用户。
 
-- `FEEDBACK_TO`（可选）：改成客服别名/工单邮箱即可，不需要改代码
-- 表单对登录与未登录都开放（登录不上的人也必须能找到你），因此限流是双轴的：每 IP 5 条 / 10 分钟 + 每账号 5 条 / 10 分钟；未登录必须填回复邮箱
+**`FEEDBACK_TO` 在生产环境必须显式设置。** 代码里的兜底地址是开发者的个人邮箱（只为本地调试与测试留一个人收件人），生产运行时**不会**用它：未设置时就不发通知邮件，并把原因写进"最近一次发信失败"（管理台 feedback 标签页会显示），留言本身照旧入库可见。这样"漏配一个变量"的后果是"少一封邮件 + 一条明确报错"，而不是"把用户留言内容、邮箱、账号、套餐、来源页和 User-Agent 发给第三方"。
+
+- `FEEDBACK_TO`（**生产必填**）：客服别名/工单邮箱/邮件列表，改它不需要动代码。三个 Compose 文件的 `x-appenv` 锚点都转发这个变量——Compose 只把 `environment:` 里点名的变量传进容器，这正是以前"文档里写了、容器里配了也不生效"的原因
+- `FEEDBACK_WEBHOOK_URL` / `FEEDBACK_WEBHOOK_KIND`（可选）：见下方群机器人一节，同样只有进了锚点名单才能到达容器
+- `FEEDBACK_NOTIFY_LIMIT`（可选，默认 `60`）：**全局**出站通知上限（条/小时，跨所有来源 IP）。每 IP 5 条 / 10 分钟与每账号 5 条 / 10 分钟只约束单个发送者，N 个来源 IP 就能把通知量放大 N 倍——而每封通知花的是与验证邮件、重置密码邮件共享的 SMTP 配额。超出上限**只停通知**，留言照旧入库、照旧把 id 返回给提交者
+- 表单对登录与未登录都开放（登录不上的人也必须能找到你），因此限流是双轴的：每 IP 5 条 / 10 分钟 + 每账号 5 条 / 10 分钟；未登录必须填回复邮箱。完全相同的重复提交（网络抖动后的重试）在 10 分钟内只通知一次，避免一次重试放大成一串通知
 - 自动附带的定位信息：套餐、界面语言、来源页面（只取路径，不含 query，避免把重置令牌之类带进邮箱）、User-Agent
 - SMTP 故障不会丢留言：先入库再发信，发信失败只记录告警
+- 管理台收件箱按页读取（每页 50 条，界面显示 `N–M of 总数` 并提供上一页/下一页）：总量再大也能翻到任意一条，不会因为后来的刷屏把更早的留言永久顶出视野
 
 **一条命令配置 + 验证投递**（推荐；它会写 `.env`，只改那两个键并留 `.env.bak`，然后立刻发一封真实通知并把接收端应答打出来）：
 
@@ -54,6 +59,10 @@ npx tsx scripts/setup-mail.ts resend <API_KEY> "PixelDuo <no-reply@你的域名>
 npx tsx scripts/setup-mail.ts local 2525                                # 无账号演练（配本地 sink）
 ```
 
+它只写 `SMTP_URL` / `EMAIL_FROM`；`FEEDBACK_TO` 要自己加进 `.env`（并在当前 shell 里 `export`，脚本读的是环境变量而不是文件），否则上面的投递检查会以"生产拒绝用兜底地址"失败——这正是它该有的失败方式。
+
+**脚本打印的连接串一律打码**（形如 `smtps://…(29 chars)@smtp.qq.com:465`、`https://open.feishu.cn/open-apis/bot/v2/hook/…(36 chars)`）：`SMTP_URL` 的 userinfo 就是 SMTP 密码，群机器人 URL 本身就是 token，而文档与失败提示都让运维把脚本输出贴到工单/群里。方案、主机、端口照旧显示——465/587 这类真实的首次配置错误仍然一眼可辨。
+
 **先从大陆网络实测的可达性（2026-09-20，本机同处国内）**：`smtpdm.aliyun.com:465`、`smtp.qq.com:465`、`smtp.163.com:465`、`smtp.resend.com:587`、`smtp.sendgrid.net:587` **可达**；**`smtp.gmail.com:465` 不可达**（被墙）。所以大陆主机请优先 aliyun/qq/163，别用 Gmail SMTP。（部署主机的网络才是决定性的，但同一网络环境下这个结论基本一致。）
 
 **更省事的替代通道：飞书/企微/钉钉群机器人（无需域名、无需 SPF、无需密码）**——在群里添加"自定义机器人"拿到 webhook URL，然后：
@@ -63,7 +72,7 @@ FEEDBACK_WEBHOOK_URL="https://open.feishu.cn/open-apis/bot/v2/hook/xxxx"   # 默
 FEEDBACK_WEBHOOK_KIND="feishu|wecom|dingtalk|raw"                          # 默认 feishu
 ```
 
-留言入库后会同时推送到这个群（`[PixelDuo] 反馈 · <分类>` + 留言者/套餐/来源页 + 参考号），与邮件互不依赖：两个都配就都发，都没配就只留在管理台收件箱。只接受 `https://`（本机回环地址除外），避免机器人 token 明文上网。管理台 feedback 标签页会分别显示两个通道是否已配置。
+留言入库后会同时推送到这个群（`[PixelDuo] 反馈 · <分类>` + 留言者/套餐/来源页 + 参考号），与邮件互不依赖：两个都配就都发，都没配就只留在管理台收件箱。只接受 `https://`（本机回环地址除外），并且目标必须解析到公网地址（私网/链路本地/`169.254.169.254` 这类元数据地址一律拒绝），POST 不跟随重定向、回包只读前 8 KB——端点替我们决定请求发往哪里、或用一个超大响应撑爆进程的路子都被堵掉了。管理台 feedback 标签页会分别显示两个通道是否已配置。
 
 配好之后一条命令验证（等价于邮件侧的 `verify-mail.ts`）：
 
@@ -113,6 +122,16 @@ export PADDLE_API_KEY="pdl_live_..."
 export PADDLE_ENVIRONMENT="production"
 export PADDLE_WEBHOOK_SECRET="..."
 export CADDY_DOMAIN="pixelduo.ai"
+# Mail: production refuses to boot without SMTP_URL (instrumentation.ts).
+# FEEDBACK_TO names the inbox that receives user feedback — a production runtime
+# refuses to send feedback notifications to the built-in fallback address, so
+# leave it out and the admin console reports a refused send instead of delivery.
+export SMTP_URL="smtps://..."
+export EMAIL_FROM="PixelDuo <no-reply@pixelduo.ai>"
+export FEEDBACK_TO="support@yourdomain.com"
+# Optional second channel (Feishu/WeCom/DingTalk group bot, no domain needed):
+# export FEEDBACK_WEBHOOK_URL="https://open.feishu.cn/open-apis/bot/v2/hook/..."
+# export FEEDBACK_WEBHOOK_KIND="feishu"
 export MODELVERSE_IMAGE_API_KEY="..."
 export ARK_IMAGE_API_KEY="..."
 export SENTRY_DSN="https://..."
@@ -176,6 +195,7 @@ web/worker 启动前会由 CI/部署流程执行 `npx prisma migrate deploy`（�
 ## 上线前最后核对（对应 docs/compliance/launch-checklist.md）
 
 - [ ] `NEXTAUTH_URL` / `CADDY_DOMAIN` 为 https 正式域名
+- [ ] 通知通道至少配一条并验证过：`FEEDBACK_TO` 指向运维/客服收件箱（生产未设置时**不发**反馈通知邮件，只记失败），配好后跑 `npx tsx scripts/verify-mail.ts` 拿到接收端 250 应答；或配群机器人并跑 `npx tsx scripts/verify-webhook.ts`
 - [ ] `PAYMENT_PROVIDER=stripe|paddle` + 对应生产 key/webhook secret（两 Provider 已实现；真实沙箱全流程验证后切生产，**禁止 mock 上生产**）
 - [ ] Sentry DSN 生效且收到测试告警
 - [ ] 备份恢复演练已在生产环境复跑
