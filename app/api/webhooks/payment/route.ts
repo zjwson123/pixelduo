@@ -10,6 +10,38 @@ import { NextResponse } from "next/server";
 // Provider webhook payloads are small JSON docs — anything bigger is abuse.
 const WEBHOOK_MAX_BYTES = 256 * 1024;
 
+// A valid signature proves the event really came from the provider. It does
+// NOT prove the payment belongs to the order the event names — the provider
+// signs the custom_data WE attached at checkout, so a mismatch here means the
+// event was produced by a different checkout: a second provider account, a
+// PAYMENT_PROVIDER switch with orders still pending, or provider-side
+// tampering with custom_data. Fulfilling it would hand over the full credits
+// of an order nobody paid for (a $4.99 pack's event naming the $49.99 one).
+//
+// Throwing rather than acking is deliberate, and matches the unresolved-refund
+// path below: the event is NOT persisted, so the provider retries and an
+// operator who corrects the cause still gets the fulfillment, while an
+// attacker's attempt buys nothing but its own retries.
+function assertPaymentMatchesOrder(
+  order: { provider: string; amountUsd: number },
+  event: { provider: string; paidAmountUsd?: number; currency?: string },
+): void {
+  if (order.provider !== event.provider) {
+    throw new Error(`payment-provider-mismatch: order is ${order.provider}, event is ${event.provider}`);
+  }
+  // Prices are USD everywhere (lib/catalog.ts, Order.amountUsd), so any other
+  // currency makes the amount comparison below meaningless — refuse instead of
+  // comparing numbers from two different currencies.
+  if (event.currency && event.currency.toLowerCase() !== "usd") {
+    throw new Error(`payment-currency-mismatch: ${event.currency}`);
+  }
+  // Tolerance mirrors the refund path's 0.005: enough for a provider's cent
+  // rounding, far too small to matter at pack prices.
+  if (event.paidAmountUsd !== undefined && event.paidAmountUsd < order.amountUsd - 0.005) {
+    throw new Error(`payment-underpaid: paid ${event.paidAmountUsd}, order is ${order.amountUsd}`);
+  }
+}
+
 // Idempotent webhook: same eventId processed once. Fully unauthenticated
 // before the signature check, so bound the work first: rate-limit and refuse
 // oversized bodies BEFORE buffering (same pattern as generate/edit/video).
@@ -67,6 +99,10 @@ export async function POST(req: Request) {
       });
       if (event.type === "paid") {
         if (order) {
+          // Only a pending order can still be granted anything (fulfillOrder
+          // claims strictly from "pending"), and only that path can be abused
+          // by an event that names an order it did not pay for.
+          if (order.status === "pending") assertPaymentMatchesOrder(order, event);
           const result = await fulfillOrder(
             order.userId,
             order.id,

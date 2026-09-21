@@ -34,6 +34,10 @@ export class MockProvider implements PaymentProvider {
         status?: string;
         fullRefund?: boolean;
         refundAmountUsd?: number;
+        // Carried through so the route's amount/currency binding is reachable
+        // in tests and demos, exactly as the real providers populate it.
+        paidAmountUsd?: number;
+        currency?: string;
         raw?: unknown;
       };
       if (!body.eventId) return IGNORED_WEBHOOK;
@@ -44,6 +48,8 @@ export class MockProvider implements PaymentProvider {
         orderId: body.orderId,
         fullRefund: typeof body.fullRefund === "boolean" ? body.fullRefund : undefined,
         refundAmountUsd: typeof body.refundAmountUsd === "number" ? body.refundAmountUsd : undefined,
+        paidAmountUsd: typeof body.paidAmountUsd === "number" ? body.paidAmountUsd : undefined,
+        currency: typeof body.currency === "string" ? body.currency : undefined,
         raw: body.raw ?? body,
       };
     } catch {

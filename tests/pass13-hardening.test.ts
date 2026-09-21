@@ -220,7 +220,13 @@ describe("refund grant provenance (pass 13)", () => {
     });
     expect(replacement).not.toBeNull();
     expect(replacement!.amount).toBeGreaterThan(0);
-    expect(replacement!.expiresAt).toBeNull(); // still a non-expiring replacement
+    // Bounded since pass 15 (it used to be `null`): an unbounded replacement let
+    // a user withhold credits that were about to expire and convert them into
+    // credits the sweep could never touch. What this test is about is
+    // provenance, so what matters here is that the replacement is still live
+    // and still attributable to the order.
+    expect(replacement!.expiresAt).not.toBeNull();
+    expect(replacement!.expiresAt!.getTime()).toBeGreaterThan(Date.now());
     expect({ refType: replacement!.refType, refId: replacement!.refId }).toEqual({
       refType: "order",
       refId: order.id,

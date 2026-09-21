@@ -82,6 +82,10 @@ export class StripeProvider implements PaymentProvider {
       let orderId: string | undefined = obj?.client_reference_id ?? obj?.metadata?.orderId;
       let type: "paid" | "refunded" | null = null;
       let fullRefund: boolean | undefined;
+      // What was actually collected, for the route's amount check. amount_total
+      // is in the currency's minor unit (cents for USD).
+      let paidAmountUsd: number | undefined;
+      let currency: string | undefined;
       // async_payment_succeeded: delayed-notification methods (SEPA, Boleto…)
       // settle after checkout.session.completed arrived as unpaid.
       if (
@@ -89,6 +93,8 @@ export class StripeProvider implements PaymentProvider {
         obj?.payment_status === "paid"
       ) {
         type = "paid";
+        if (typeof obj.amount_total === "number") paidAmountUsd = obj.amount_total / 100;
+        if (typeof obj.currency === "string") currency = obj.currency;
       }
       if (event.type === "charge.refunded") {
         type = "refunded";
@@ -120,6 +126,8 @@ export class StripeProvider implements PaymentProvider {
         type,
         orderId,
         fullRefund,
+        paidAmountUsd,
+        currency,
         // Refund webhooks reference the payment intent, not our session id —
         // store the PI id so refunds can resolve the order via providerOrderId.
         providerOrderId: typeof obj?.payment_intent === "string" ? obj.payment_intent : undefined,

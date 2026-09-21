@@ -30,6 +30,18 @@ export interface PaymentWebhookEvent {
   // explicitly — compared against the order amount in the webhook route,
   // which is where the order row is loaded.
   refundAmountUsd?: number;
+  // For "paid": what the provider actually collected, and in which currency.
+  // The route refuses fulfillment when this is BELOW the named order's price.
+  // A signature proves the event is really from the provider, not that it is
+  // the payment FOR the order it names, so without this any signed event
+  // carrying someone else's orderId — a second provider account, a
+  // PAYMENT_PROVIDER switch with orders still pending, provider-side tampering
+  // with our custom_data — buys that order's full grant at the price of the
+  // cheapest one. Undefined means the payload did not state it: recorded, not
+  // treated as a mismatch, because refusing a legitimate fulfillment (money
+  // taken, no credits) is the worse of the two failures.
+  paidAmountUsd?: number;
+  currency?: string;
   raw: unknown;
 }
 

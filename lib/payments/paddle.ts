@@ -104,11 +104,20 @@ export class PaddleProvider implements PaymentProvider {
       if (parsed.event_type === "transaction.completed") {
         if (data.status !== "completed") return IGNORED_WEBHOOK;
         const customData = data.custom_data as Record<string, unknown> | null ?? data.customData as Record<string, unknown> | null;
+        // For the route's amount check. SUBTOTAL, not total: Paddle's total
+        // adds tax, so comparing it against our pre-tax price would let a
+        // 20%-VAT €9 purchase read as "at least $9 collected" and mask a
+        // genuinely underpaid order. Subtotal is the line-item amount we set
+        // at checkout, in cents.
+        const totals = data.totals as { subtotal?: string | number } | undefined;
+        const subtotalNum = totals?.subtotal !== undefined ? Number(totals.subtotal) : NaN;
         return {
           provider: this.name,
           eventId: parsed.event_id,
           type: "paid",
           orderId: typeof customData?.orderId === "string" ? customData.orderId : undefined,
+          paidAmountUsd: Number.isFinite(subtotalNum) ? subtotalNum / 100 : undefined,
+          currency: typeof data.currency_code === "string" ? data.currency_code : undefined,
           providerOrderId: typeof data.id === "string" ? data.id : undefined,
           raw: parsed,
         };

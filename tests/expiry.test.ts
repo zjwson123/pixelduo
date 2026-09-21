@@ -5,6 +5,7 @@ import {
   spendCreditsTx,
   refundCreditsTx,
   PACK_VALIDITY_MS,
+  REFUND_REPLACEMENT_TTL_MS,
 } from "../lib/ledger";
 import { runExpiry } from "../lib/expiry";
 
@@ -61,10 +62,14 @@ describe("credit grants & expiry", () => {
     expect(await grantRemaining("PURCHASE")).toBe(990);
   });
 
-  it("a refund for a grant that expired mid-retry lands in a fresh non-expiring grant", async () => {
+  it("a refund for a grant that expired mid-retry lands in a fresh, bounded grant", async () => {
     // Refunding into the dead grant would hand the expiry sweep a fresh
     // remaining>0 row on an expired grant — the sweep zeroes it and deducts
     // the refund right back out of the balance (user silently loses it).
+    // The replacement is deliberately NOT permanent: an unbounded one lets a
+    // user withhold credits that are about to expire (submit a job seconds
+    // before the deadline) and convert them into credits the sweep can never
+    // touch, farming a known expiry over and over.
     // Uses its own user so the cumulative assertions below are unaffected.
     const u = await prisma.user.create({
       data: { email: `expiry-refund-${Date.now()}@test.dev`, passwordHash: "x" },
@@ -83,13 +88,22 @@ describe("credit grants & expiry", () => {
         refundCreditsTx(tx, u.id, 50, consumption, "job", "j-exp-refund", "late refund"),
       );
       expect(await bal()).toBe(before + 50);
-      await runExpiry(); // must NOT claw the refund back out
-      expect(await bal()).toBe(before + 50);
       const replacement = await prisma.creditGrant.findFirstOrThrow({
         where: { userId: u.id, source: "REFUND" },
       });
       expect(replacement.remaining).toBe(50);
-      expect(replacement.expiresAt).toBeNull();
+      // Bounded, and comfortably in the future: long enough that an ordinary
+      // failure is refunded well before it lapses, short enough that holding
+      // credits across an expiry stops being profitable.
+      expect(replacement.expiresAt).not.toBeNull();
+      expect(replacement.expiresAt!.getTime()).toBeGreaterThan(Date.now());
+      expect(replacement.expiresAt!.getTime()).toBeLessThanOrEqual(
+        Date.now() + REFUND_REPLACEMENT_TTL_MS,
+      );
+      // The sweep must not claw it back out: the replacement is not expired,
+      // so the daily run has nothing to destroy.
+      await runExpiry();
+      expect(await bal()).toBe(before + 50);
       // And the refund grant is spendable (invariant: credits == SUM(remaining)).
       await prisma.$transaction((tx) =>
         spendCreditsTx(tx, u.id, 50, "job", "j-exp-refund-2", "spend replacement"),

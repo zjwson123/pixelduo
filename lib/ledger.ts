@@ -28,6 +28,9 @@ export interface SpendConsumption {
 
 export const PACK_VALIDITY_MS = 365 * 24 * 60 * 60 * 1000; // 12 months
 export const ROLLOVER_RATE = 0.3;
+// How long a refund that had to be re-minted (its funding grant expired while
+// the job was in flight) stays spendable. See refundCreditsTx.
+export const REFUND_REPLACEMENT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 export interface CycleUsage {
   granted: number;
@@ -378,8 +381,8 @@ export async function refundCreditsTx(
         ).map((o) => o.id)
       : [],
   );
-  // The expired/vanished portion is replaced by a fresh non-expiring grant,
-  // and it must carry the PROVENANCE OF THE GRANT IT REPLACES rather than the
+  // The expired/vanished portion is replaced by a fresh grant, and it must
+  // carry the PROVENANCE OF THE GRANT IT REPLACES rather than the
   // job's own ref. Stamping it with the job (refType "job", refId jobId) made
   // the replacement invisible to revokeOrderCreditsTx, which matches on
   // refId = order.id: credits from a failed job whose funding grant expired
@@ -388,6 +391,16 @@ export async function refundCreditsTx(
   // refunded, credits kept. One grant per distinct source ref keeps the amount
   // attributable: a job that straddled two orders' credits must not collapse
   // them into a single lump that only one of the refunds can reach.
+  //
+  // The replacement itself is bounded, not permanent. `expiresAt: null` was
+  // the first fix for the sweep swallowing the refund, and it opened the
+  // mirror image: the spend path is FIFO by expiry, so submitting jobs seconds
+  // before a known expiry (a pack's 12-month date, a cycle end) withholds
+  // credits that would otherwise be destroyed, and the failed job's refund
+  // converts them into credits the sweep can never touch — an expiry that can
+  // be farmed indefinitely. REFUND_REPLACEMENT_TTL_MS is long enough that an
+  // ordinary failure is refunded long before it lapses, and short enough that
+  // the farming loop no longer pays.
   const expiredByRef = new Map<string, { refType: string | null; refId: string | null; amount: number }>();
   let revokedTotal = 0;
   for (const c of consumption) {
@@ -420,7 +433,7 @@ export async function refundCreditsTx(
         source: "REFUND",
         amount: bucket.amount,
         remaining: bucket.amount,
-        expiresAt: null,
+        expiresAt: new Date(Date.now() + REFUND_REPLACEMENT_TTL_MS),
         refType: bucket.refType,
         refId: bucket.refId,
       },
