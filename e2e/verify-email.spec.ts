@@ -2,10 +2,16 @@ import { readFileSync } from "fs";
 import path from "path";
 import { test, expect } from "@playwright/test";
 
-// Requires the dev server to run with EMAIL_VERIFY_AUTO=0 and MAIL_DEV_DIR set
-// (see README / local verification flow). Skipped in CI.
+// Requires the server under test to run with EMAIL_VERIFY_AUTO=0 and
+// MAIL_DEV_DIR set (see README / local verification flow). Both preconditions
+// are checked: ci-local.sh sets MAIL_DEV_DIR for the lifecycle spec but runs
+// this pass with EMAIL_VERIFY_AUTO=1, where registration goes straight to
+// /studio and there is no pending-verification screen to assert on.
 const mailDir = process.env.MAIL_DEV_DIR;
-test.skip(!mailDir, "requires MAIL_DEV_DIR + EMAIL_VERIFY_AUTO=0");
+test.skip(
+  !mailDir || process.env.EMAIL_VERIFY_AUTO === "1",
+  "requires MAIL_DEV_DIR + EMAIL_VERIFY_AUTO=0",
+);
 
 function latestMailLink(email: string, marker: string): string {
   const file = path.join(mailDir!, `${email}.txt`);
@@ -57,7 +63,10 @@ test("register → blocked until verified → verify → 30 credits unlocked", a
   await page.waitForURL("**/studio");
   await expect(page.locator(".verify-banner")).toHaveCount(0);
   await expect(page.locator(".balance")).toContainText("30");
-  await page.locator(".composer .seg button", { hasText: "Seedream 5" }).click();
+  // Same selector as mvp.spec.ts: the model picker on the Image tab is a row of
+  // `.chip`s. This spec sat behind a skip guard for long enough that its old
+  // `.composer .seg button` selector had rotted — `.seg` is the tab list.
+  await page.locator(".composer .chip", { hasText: "Seedream 5" }).click();
   await page.locator("button.generate").click();
   await expect(page.locator(".result-card").first()).toBeVisible({ timeout: 30000 });
 });

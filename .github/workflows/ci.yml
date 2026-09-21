@@ -97,6 +97,13 @@ jobs:
       MIDDLEWARE_AUTH_LIMIT: "1000"
       MIDDLEWARE_API_LIMIT: "10000"
       REGISTER_RATE_LIMIT: "10000"
+      # Email links are built from NEXTAUTH_URL; the specs run against the port
+      # below. MAIL_DEV_DIR makes the log-only mailer write each message to disk
+      # so a spec can follow the link out of it (lib/mail.ts DevMailer) —
+      # without it the reset spec and the pending-verification pass have no way
+      # to read their links.
+      NEXTAUTH_URL: http://localhost:3100
+      MAIL_DEV_DIR: /tmp/pd-mail
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -123,3 +130,25 @@ jobs:
           done
           [ -n "$ok" ] || { echo "app never became healthy"; exit 1; }
       - run: npx playwright test
+      # The pending-verification flow cannot share a process with the
+      # auto-verified one (EMAIL_VERIFY_AUTO is read at registration time), so
+      # that spec gets a second instance of the same build on its own port. The
+      # worker is shared: it polls the database, not either app.
+      - name: Start app in pending-verification mode (port 3101)
+        env:
+          EMAIL_VERIFY_AUTO: "0"
+          NEXTAUTH_URL: http://localhost:3101
+        run: |
+          npx next start -p 3101 &
+          ok=""
+          for i in $(seq 1 45); do
+            if curl -fsS http://localhost:3101/api/health; then ok=1; break; fi
+            sleep 2
+          done
+          [ -n "$ok" ] || { echo "verification-mode app never became healthy"; exit 1; }
+      - name: E2E (pending-verification flow)
+        env:
+          EMAIL_VERIFY_AUTO: "0"
+          NEXTAUTH_URL: http://localhost:3101
+          PW_BASE_URL: http://localhost:3101
+        run: npx playwright test e2e/verify-email.spec.ts

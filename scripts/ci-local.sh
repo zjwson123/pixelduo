@@ -15,14 +15,14 @@ export REGISTER_RATE_LIMIT="10000"
 export STORAGE_DRIVER="local"
 export LOCAL_STORAGE_DIR="data/files"
 
-echo "[1/6] prisma generate + migrate"
+echo "[1/7] prisma generate + migrate"
 npx prisma generate >/dev/null
 npx prisma migrate deploy >/dev/null
 
-echo "[2/6] typecheck (tsc --noEmit)"
+echo "[2/7] typecheck (tsc --noEmit)"
 npx tsc --noEmit
 
-echo "[3/6] unit tests"
+echo "[3/7] unit tests"
 # Mirrors CI: the test-unit job does NOT auto-verify (auth-flow covers the
 # pending-verification flow); only the e2e job sets EMAIL_VERIFY_AUTO=1.
 unset EMAIL_VERIFY_AUTO || true
@@ -32,12 +32,25 @@ docker exec pixelduo-redis redis-cli --scan --pattern 'rl:*' 2>/dev/null \
   | xargs -r -I{} docker exec pixelduo-redis redis-cli del {} >/dev/null 2>&1 || true
 npm test
 
-echo "[4/6] production build"
+echo "[4/7] production build"
 npm run build
 
-echo "[5/6] seed + start app/worker (port 3100)"
+echo "[5/7] seed + start app/worker (port 3100)"
 export EMAIL_VERIFY_AUTO="1" # e2e needs auto-verified registrations
 export PAYMENT_ALLOW_MOCK="1" # test the checkout flow against a prod build
+# Email links are built from NEXTAUTH_URL, and .env's default points at the dev
+# port — a spec that follows a reset link must land on the app it is talking to.
+export NEXTAUTH_URL="http://localhost:3100"
+# Makes the log-only mailer write each message to disk so a spec can read the
+# link out of it (lib/mail.ts DevMailer). Fresh per run: a stale file would hand
+# a spec the previous run's token.
+export MAIL_DEV_DIR="${MAIL_DEV_DIR:-/tmp/pd-ci-mail}"
+rm -rf "$MAIL_DEV_DIR" && mkdir -p "$MAIL_DEV_DIR"
+# The e2e stage shares one Redis and one source IP across every spec, and unlike
+# CI (which gets a fresh instance) repeated local runs accumulate the per-IP
+# route counters until an unrelated limit trips. Same reset as the unit stage.
+docker exec pixelduo-redis redis-cli --scan --pattern 'rl:*' 2>/dev/null \
+  | xargs -r -I{} docker exec pixelduo-redis redis-cli del {} >/dev/null 2>&1 || true
 npx tsx prisma/seed.ts >/dev/null
 npx next start -p 3100 >/tmp/pd-ci-app.log 2>&1 &
 APP_PID=$!
@@ -51,7 +64,27 @@ for i in $(seq 1 30); do
 done
 curl -fsS http://localhost:3100/api/health >/dev/null
 
-echo "[6/6] e2e"
+echo "[6/7] e2e"
 PW_CHANNEL=chrome npx playwright test
+
+# The pending-verification flow cannot share a process with the auto-verified
+# one — EMAIL_VERIFY_AUTO is read at registration time — so that spec gets a
+# second instance of the same build on its own port. The worker is shared: it
+# polls the database, not either app.
+echo "[7/7] e2e (pending-verification flow, port 3101)"
+export EMAIL_VERIFY_AUTO="0"
+export NEXTAUTH_URL="http://localhost:3101"
+npx next start -p 3101 >/tmp/pd-ci-app-verify.log 2>&1 &
+APP2_PID=$!
+trap 'kill $APP_PID $APP2_PID $WORKER_PID 2>/dev/null || true' EXIT
+
+for i in $(seq 1 30); do
+  curl -fsS http://localhost:3101/api/health >/dev/null 2>&1 && break
+  sleep 2
+done
+curl -fsS http://localhost:3101/api/health >/dev/null
+
+PW_BASE_URL="http://localhost:3101" PW_CHANNEL=chrome \
+  npx playwright test e2e/verify-email.spec.ts
 
 echo "CI-LOCAL PASSED — pipeline is green locally"

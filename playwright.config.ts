@@ -5,7 +5,10 @@ export default defineConfig({
   timeout: 60000,
   retries: 1,
   use: {
-    baseURL: "http://localhost:3100",
+    // The verification-flow pass runs its own app instance on its own port
+    // (scripts/ci-local.sh), because the two EMAIL_VERIFY_AUTO modes cannot
+    // share one process.
+    baseURL: process.env.PW_BASE_URL ?? "http://localhost:3100",
     channel: process.env.PW_CHANNEL === "chrome" ? "chrome" : undefined,
     trace: "retain-on-failure",
   },
