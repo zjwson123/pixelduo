@@ -10,6 +10,7 @@ import { bakeWatermark } from "../lib/watermark";
 import { getModel } from "../lib/model-registry";
 import { prisma } from "../lib/prisma";
 import { isPermanentProviderError } from "../lib/worker-errors";
+import { isProductionRuntime } from "../lib/runtime-env";
 
 initObservability("worker");
 
@@ -17,7 +18,24 @@ initObservability("worker");
 // normal provider task finishes, this turns a zombie into a refund.
 const VIDEO_HARD_TIMEOUT_MS = 30 * 60_000;
 
-async function processImageJob(job: {
+// Is this user on the free tier, for the outputs that carry an entitlement
+// (the watermark)? The tier is re-derived from planRenewsAt HERE, where the
+// marking decision is made, rather than trusting User.plan to have been tidied
+// up: User.plan/planRenewsAt are lowered only by lib/rollover.ts's
+// downgradeExpiredPlans(), which runs in the separate `rollover` compose
+// service on a 24-hour loop. Nothing on the generation or delivery path used to
+// consult planRenewsAt, so a customer who bought one month kept the headline
+// entitlement — unwatermarked output — until that sweep happened (up to 24h of
+// clean output for a cycle that had already ended) and forever in any
+// deployment that does not run the service. A paid plan with no cycle end at
+// all is treated the same way, because nothing proves it is live; a live plan
+// (planRenewsAt in the future) is unchanged.
+export function isFreeTier(user: { plan: string; planRenewsAt: Date | null } | null): boolean {
+  if (!user || user.plan === "free") return true;
+  return !user.planRenewsAt || user.planRenewsAt.getTime() <= Date.now();
+}
+
+export async function processImageJob(job: {
   id: string;
   model: string;
   quality: string;
@@ -75,7 +93,7 @@ async function processImageJob(job: {
     // get our badge baked in for free users. Videos carry a UI badge only —
     // file-level video marking would need ffmpeg transcoding.
     const user = await prisma.user.findUnique({ where: { id: job.userId } });
-    const isFree = (user?.plan ?? "free") === "free";
+    const isFree = isFreeTier(user);
 
     // Checkpoint each newly persisted image so a later retry resumes here.
     // Persisting a checkpoint must never fail the generation itself, and the
@@ -105,13 +123,33 @@ async function processImageJob(job: {
             onImage: persistProgress,
           })
         : [];
-    // Checkpointing models (gpt/seedream/wan/mock) already appended their new
-    // images to `saved` via onImage; non-checkpointing paths (both/edit)
-    // return everything here. Merge by storage key so nothing counts twice.
+    // Checkpointing models (gpt/seedream/wan/mock/edit) already appended their
+    // new images to `saved` via onImage; the "both" lanes return everything
+    // here. Merge by storage key so nothing counts twice.
     const seen = new Set(saved.map((i) => i.key));
-    const images = [...saved];
-    for (const img of generated) {
-      if (!seen.has(img.key)) images.push(img);
+    const uncheckpointed = generated.filter((img) => !seen.has(img.key));
+    const images = [...saved, ...uncheckpointed];
+
+    // Objects this attempt stored that no lane checkpointed — in practice all
+    // of "both". Its two lanes deliberately do not thread onImage, because they
+    // run in parallel and each would write its own snapshot over the other's.
+    // Nothing named those objects: not Job.images, which is what failJob
+    // reclaims on a terminal failure, and not storedThisAttempt, which is what
+    // an attempt that lost the queue takes back out itself. Every failure AFTER
+    // generation therefore orphaned the whole batch — the reachable one is
+    // completeJob refusing delivery because the funding order was refunded
+    // mid-flight (job-cancelled-refunded-order), which left 2N stored objects
+    // with no Image row and no key anywhere: invisible to /api/files and to the
+    // GDPR erasure routes.
+    //
+    // One write, AFTER both lanes have settled, of the complete batch: there is
+    // no second writer left to lose an update to, so this does not reintroduce
+    // the race the lanes are kept away from. The keys are recorded for the
+    // abandoned path BEFORE the write, because a refused write is exactly the
+    // case where this attempt must take its own objects back out (see catch).
+    if (uncheckpointed.length > 0) {
+      for (const img of uncheckpointed) storedThisAttempt.push(img.key);
+      await checkpointJobProgress(job.id, images);
     }
 
     const rows = images.map((img) => ({
@@ -195,7 +233,7 @@ async function processImageJob(job: {
   return true;
 }
 
-async function processVideoJob(job: {
+export async function processVideoJob(job: {
   id: string;
   model: string;
   prompt: string;
@@ -294,7 +332,22 @@ async function processVideoJob(job: {
           getStorage().get(job.sourceVideoKey),
           getStorage().get(segmentKey),
         ]);
-        if (srcBuf && segBuf) {
+        // The two reads are NOT interchangeable, and treating them as one
+        // condition charged the caller in full for a URL that 404s: when the
+        // SEGMENT read failed (it was stored seconds ago, so this is a storage
+        // fault, not a missing artifact), videoKey stayed segmentKey and
+        // completeJob wrote an Image row pointing at an object nothing could
+        // read — the job reported success, so there was no refund and no retry.
+        // A missing segment fails transiently instead: the checkpoint still
+        // names it, so failJob requeues, the retry re-downloads it from the
+        // provider under a new key, and the failed one is superseded by
+        // checkpointJobArtifact. Transient (not a "download failed"-class
+        // message) is load-bearing — a permanent classification would fail the
+        // job terminally and refund instead of retrying.
+        if (!segBuf) {
+          throw new Error("segment-missing: the generated video could not be read back from storage");
+        }
+        if (srcBuf) {
           const merged = await concatVideos(srcBuf, segBuf);
           if (merged) {
             const finalKey = newStorageKey("mp4");
@@ -307,7 +360,7 @@ async function processVideoJob(job: {
             console.warn(`[worker ${workerId}] job ${job.id}: concat failed — delivering segment only`);
           }
         } else {
-          console.warn(`[worker ${workerId}] job ${job.id}: source video missing — delivering segment only`);
+          console.warn(`[worker ${workerId}] job ${job.id}: source video missing — delivering the segment alone`);
         }
         // Only when the merge produced a DIFFERENT object. Deleting it
         // unconditionally deleted the file being delivered whenever the concat
@@ -441,4 +494,19 @@ process.on("SIGINT", () => {
   process.exit(0);
 });
 
-main();
+// Running this file IS booting the loop, and that must not happen when the
+// tests import the step functions above to drive one job against the real
+// queue/storage: the loop would never return, and its first tick would claim a
+// job out from under the test. The deployment entry points (docker compose's
+// `npx tsx scripts/worker.ts`, `npm run worker`) do not set VITEST.
+//
+// The cost of the gate is that a VITEST that somehow reaches a deployment turns
+// the worker into a process that runs nothing at all — silently, while jobs
+// pile up unclaimed. So the skip is refused loudly in a production runtime
+// instead: a worker that does not work must not look healthy.
+if (process.env.VITEST && isProductionRuntime()) {
+  throw new Error(
+    "VITEST is set in a production runtime — refusing to start the worker with its loop skipped",
+  );
+}
+if (!process.env.VITEST) main();

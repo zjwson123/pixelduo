@@ -177,7 +177,12 @@ model Image {
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  // /api/files resolves a user-owned asset by (userId, url) — one lookup per
+  // asset a gallery page renders (~60 per page). With only (userId, createdAt)
+  // indexed, the url predicate was a filter over every row the user owns; this
+  // is the same lookup Template solves with its @@index([img]).
   @@index([userId, createdAt])
+  @@index([userId, url])
 }
 
 model Template {
