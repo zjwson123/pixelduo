@@ -13,6 +13,11 @@ import {
   claimTotpCode,
   TWOFA_LOCKED_ERROR,
 } from "@/lib/twofa";
+import {
+  reservePasswordReauth,
+  alertPasswordReauthAbuse,
+  refundPasswordReauth,
+} from "@/lib/login-guard";
 import bcrypt from "bcryptjs";
 
 const schema = z.object({
@@ -43,9 +48,19 @@ export async function POST(req: Request) {
     const body = schema.parse(JSON.parse(bodyRaw.raw));
     const user = await prisma.user.findUniqueOrThrow({
       where: { id: userId },
-      select: { passwordHash: true, totpSecret: true, totpEnabled: true, role: true },
+      select: { email: true, passwordHash: true, totpSecret: true, totpEnabled: true, role: true },
     });
-    if (!(await bcrypt.compare(body.password, user.passwordHash))) return fail(new Error("invalid-password"));
+    // Reserve on the LOGIN guard's counters before the compare
+    // (lib/login-guard.ts). Erasure is irreversible, so the password it asks for
+    // must be as expensive to guess here as it is on the login endpoint — the
+    // per-minute buckets above bound the rate, not the campaign.
+    const attempt = await reservePasswordReauth(user.email, req);
+    if (!attempt.allowed) return fail(new ApiError(429, "rate-limited"));
+    if (!(await bcrypt.compare(body.password, user.passwordHash))) {
+      await alertPasswordReauthAbuse(user.email);
+      return fail(new Error("invalid-password"));
+    }
+    await refundPasswordReauth(user.email, req);
     // The last admin may not erase itself: /admin would become unreachable by
     // anyone (both admin-side mutations refuse to target the caller, so no
     // in-app path could mint a replacement) and recovery would need the

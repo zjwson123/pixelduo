@@ -11,6 +11,11 @@ import {
   TWOFA_LOCKED_ERROR,
 } from "@/lib/twofa";
 import { sendTwoFactorStateEmail } from "@/lib/mail";
+import {
+  reservePasswordReauth,
+  alertPasswordReauthAbuse,
+  refundPasswordReauth,
+} from "@/lib/login-guard";
 import bcrypt from "bcryptjs";
 
 const schema = z.object({ token: z.string().min(6).max(20), password: z.string().min(1).max(100) });
@@ -40,7 +45,15 @@ export async function POST(req: Request) {
       select: { totpPendingSecret: true, totpEnabled: true, passwordHash: true, email: true },
     });
     if (user.totpEnabled) return ok({ alreadyEnabled: true });
-    if (!(await bcrypt.compare(body.password, user.passwordHash))) return fail(new Error("invalid-password"));
+    // The password compare runs before the code check, so it is a full password
+    // oracle: reserve it on the LOGIN guard's counters (lib/login-guard.ts).
+    const attempt = await reservePasswordReauth(user.email, req);
+    if (!attempt.allowed) return fail(new ApiError(429, "rate-limited"));
+    if (!(await bcrypt.compare(body.password, user.passwordHash))) {
+      await alertPasswordReauthAbuse(user.email);
+      return fail(new Error("invalid-password"));
+    }
+    await refundPasswordReauth(user.email, req);
     if (!verifyTotp(user.totpPendingSecret, body.token)) {
       await recordTwoFactorFailure(userId);
       return fail(new Error("invalid-code"));

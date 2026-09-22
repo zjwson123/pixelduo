@@ -1,6 +1,7 @@
 import Redis from "ioredis";
 import { getMailer } from "./mail";
 import { prisma } from "./prisma";
+import { clientIp } from "./rate-limit";
 import { clearTwoFactorFailures } from "./twofa";
 
 // Per-account brute-force guard for the password login. Redis-backed; when
@@ -266,6 +267,60 @@ export async function isLoginBlocked(email: string, ip?: string): Promise<boolea
     async () => Number((await client!.get(pairKey(email, ip))) ?? 0) >= MAX_LOGIN_FAILURES,
     () => localCount(pairKey(email, ip)) >= MAX_LOGIN_FAILURES,
   );
+}
+
+// ---------------------------------------------------------------------------
+// Password re-authentication on a live session.
+//
+// Five routes re-ask for the account password because what they hand out
+// outlives the session: 2fa/setup + 2fa/confirm (bind an authenticator),
+// 2fa/disable (drop the second factor), account/keys (mint a non-expiring
+// pd_live_ key) and account/delete (erase the account). Each one compared the
+// password under a per-minute bucket only — 5/min per IP and 5/min per account,
+// all counting in separate scopes — so a stolen session cookie was an
+// unmetered password oracle: ~15 guesses/minute from one address, no cumulative
+// counter, no alert to the owner, nothing that could ever lock or even notify.
+// Worse than the login endpoint, which counts the SAME guess against
+// (email, IP) and the per-email brake, alerts the owner at 25 and refuses at
+// 100. Every finding the re-auth design exists to stop — an attacker with a
+// leaked cookie — could therefore grind the password slowly and then mint a key
+// that survives every revocation, or enable 2FA with their own authenticator
+// and lock the real owner out (reset-password does not clear totpEnabled).
+//
+// So the re-auth compare reserves on the same counters as the login — one
+// password, one budget, whoever asks for it — and hands the owner the same
+// alert. This adds no lockout surface an attacker does not already have for
+// free (the login endpoint accepts the same guesses with no session at all).
+//
+// `clientIp` returns the literal "unknown" when nothing identifies the caller;
+// that must be undefined here, not a shared bucket, or every unknown-IP caller
+// would count against each other (loginAttemptIp has always worked this way).
+export function reauthIp(req: Request): string | undefined {
+  const ip = clientIp(req);
+  return ip && ip !== "unknown" ? ip : undefined;
+}
+
+// Reserve one password attempt. Call BEFORE the bcrypt compare.
+export function reservePasswordReauth(email: string, req: Request): Promise<LoginAttempt> {
+  return reserveLoginAttempt(email, reauthIp(req));
+}
+
+// The compare failed. The RESERVATION is already the count — reservePasswordReauth
+// increments before the compare, exactly like the login path, where a refused
+// attempt counting nothing and an allowed one counting once is what keeps the
+// brake's arithmetic (10 per (email, IP), 100 per email) meaningful. Recording a
+// second failure here would make every wrong re-auth password cost two, halving
+// the budget the login path grants and mispacing the alert. So this only tells
+// the owner about a campaign, throttled per hour per address, and never awaited
+// into the response.
+export async function alertPasswordReauthAbuse(email: string): Promise<void> {
+  void alertLoginAbuse(email).catch(() => undefined);
+}
+
+// The compare succeeded: refund this reservation from both counters (the login
+// counters only — the second-factor brake is deliberately not cleared).
+export function refundPasswordReauth(email: string, req: Request): Promise<void> {
+  return refundLoginFailures(email, reauthIp(req));
 }
 
 // Tell the account owner that someone is grinding their password. This is the

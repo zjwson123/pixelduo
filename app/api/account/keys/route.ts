@@ -11,6 +11,11 @@ import {
   claimTotpCode,
   TWOFA_LOCKED_ERROR,
 } from "@/lib/twofa";
+import {
+  reservePasswordReauth,
+  alertPasswordReauthAbuse,
+  refundPasswordReauth,
+} from "@/lib/login-guard";
 import bcrypt from "bcryptjs";
 
 const schema = z.object({
@@ -60,9 +65,19 @@ export async function POST(req: Request) {
     const body = schema.parse(JSON.parse(bodyRaw.raw));
     const user = await prisma.user.findUniqueOrThrow({
       where: { id: userId },
-      select: { passwordHash: true, totpSecret: true, totpEnabled: true },
+      select: { email: true, passwordHash: true, totpSecret: true, totpEnabled: true },
     });
-    if (!(await bcrypt.compare(body.password, user.passwordHash))) return fail(new Error("invalid-password"));
+    // Reserve on the LOGIN guard's counters before the compare
+    // (lib/login-guard.ts): what this route mints outlives the session and
+    // survives every revocation, so a leaked cookie must not be able to grind
+    // the password here at 5 guesses/minute with nothing accumulating.
+    const attempt = await reservePasswordReauth(user.email, req);
+    if (!attempt.allowed) return fail(new ApiError(429, "rate-limited"));
+    if (!(await bcrypt.compare(body.password, user.passwordHash))) {
+      await alertPasswordReauthAbuse(user.email);
+      return fail(new Error("invalid-password"));
+    }
+    await refundPasswordReauth(user.email, req);
     if (user.totpEnabled && user.totpSecret) {
       // normalizeBackupCode(undefined) would throw a TypeError → masked 500.
       if (!body.token && !body.backupCode) return fail(new Error("2fa-code-required"));

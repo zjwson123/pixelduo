@@ -35,6 +35,20 @@
 
 标记为测试部署（`PAYMENT_ALLOW_MOCK=1`，CI 与 `ci-local.sh` 使用）时，后三项自动豁免——mock 支付本身在生产已被拒绝，该标记即"这不是真实部署"的声明。
 
+### 会被静默忽略的配置（启动时告警）
+
+`DEEPSEEK_API_KEY` 与 `DEEPSEEK_BASE_URL` 是**一对**（`lib/keys.ts` 原子解析）：只设一个时这一对被整体忽略——AI 润色退回离线模板、智能路由退回静态默认值，而 key 明明就在容器里。三个 Compose 锚点以前只转发 key，于是"按文档配了 key"得到的是一台静默降级的部署。现在两个变量都会被转发，启动时也会有一行告警说明这一点：
+
+```
+[config] DEEPSEEK_API_KEY is set but DEEPSEEK_BASE_URL is not — ...
+```
+
+其它文档里写过、而锚点没点名的变量（`IMAGE_NSFW_ENDPOINT`、`WATERMARK_TEXT`、`CHECKIN_TIMEZONE`、`FEEDBACK_NOTIFY_LIMIT`、`AUTH_MAIL_HOURLY_LIMIT`、`SENTRY_TRACES_SAMPLE_RATE`、`TRUST_X_REAL_IP`）现在也都在锚点里——其中影响最大的是 `IMAGE_NSFW_ENDPOINT`：文档说它"设置后优先于 vision 审核"，但以前它进不了容器，于是"外接审核 + `IMAGE_MODERATION=0`"这套组合既不跑外接审核、也不跑 vision 审核，worker 却照常启动并交付未经审核的图片。
+
+### 认证邮件的全局上限
+
+`AUTH_MAIL_HOURLY_LIMIT`（默认 `300`/小时，全局）：验证邮件 + 重置密码邮件共用同一个 SMTP 配额，而这两个接口都不需要登录、各自只受"每 IP 5 次 / 15 分钟 + 每账号 5 次 / 15 分钟"约束——N 个来源 IP 就是 N 倍邮件量。超出上限时**跳过发信**，并且**同时跳过令牌轮换**，所以用户邮箱里已经收到的那封链接仍然有效（只是不再生成新的）；跳过会写一行日志。另外重置链接的轮换有了 30 分钟宽限期：在此之内重新申请不会作废用户手上正在点的链接——否则任何知道你邮箱的人每 3 分钟请求一次，就能让"找回密码"对你永久失效。
+
 ### 用户反馈（`/feedback`）
 
 留言会存进 `Feedback` 表（管理台 **feedback** 标签页 = 收件箱），同时把通知邮件发到 `FEEDBACK_TO`。邮件用纯文本，`Reply-To` 是留言者本人，所以在邮箱里直接回复就是回复用户。
@@ -103,7 +117,11 @@ npx tsx scripts/verify-mail.ts
 ```bash
 # 1. 克隆代码并构建镜像（或在 CI 推送镜像后改 IMAGE_WEB/IMAGE_WORKER）
 git clone <repo> pixelduo && cd pixelduo
-docker compose build web worker rollover
+# 构建期必须传入站点域名：静态页面里的 og:url / og:image 是构建时烧进去的
+# （app/layout.tsx 的 metadataBase，见 lib/site.ts），缺省时写成
+# http://localhost:3000 —— 页面照常 200，只有分享预览指向构建机的本地地址。
+# robots.txt / sitemap.xml 已改为请求期读取，不受构建环境影响。
+NEXTAUTH_URL="https://pixelduo.ai" docker compose build web worker rollover
 
 # 2. 配置环境变量（也可用 .env.production 或密钥管理器注入）
 export DATABASE_URL="postgresql://..."
@@ -155,7 +173,7 @@ curl -sS https://pixelduo.ai/api/health \
 
 ```bash
 git pull
-docker compose build web worker rollover
+NEXTAUTH_URL="https://pixelduo.ai" docker compose build web worker rollover   # 域名必须带（构建期元数据）
 docker compose -f docker-compose.prod.yml up -d
 ```
 

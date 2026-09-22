@@ -119,6 +119,34 @@ export async function assertPaymentProviderUsable(): Promise<void> {
   }
 }
 
+// Warnings for a configuration that is present and IGNORED.
+//
+// Not assertions: neither state is dangerous, both are worth a line in the log
+// because the product degrades invisibly. getDeepSeekKey()/getDeepSeekBaseUrl()
+// resolve the assistant's key and endpoint as ONE atomic pair (lib/keys.ts) —
+// half of an override is returned as null rather than paired with the other half
+// from some other source. Correct as a security rule, and it made a real
+// misconfiguration silent: the compose anchors forwarded DEEPSEEK_API_KEY and
+// named DEEPSEEK_BASE_URL in none of them, so following the documented "set the
+// key" step produced an assistant that used its offline expander and smart
+// routing its static default while the key sat in the container looking
+// configured. Nothing in the UI says "the assistant is offline", so the operator
+// gets a lesser feature rather than an error.
+export function warnOnHalfSetIntegrations(env: NodeJS.ProcessEnv = process.env): void {
+  const key = env.DEEPSEEK_API_KEY?.trim();
+  const base = env.DEEPSEEK_BASE_URL?.trim();
+  if (key && !base) {
+    console.warn(
+      "[config] DEEPSEEK_API_KEY is set but DEEPSEEK_BASE_URL is not — the pair is resolved atomically, so the key is ignored and the prompt assistant / smart routing fall back to their offline answers. Set both (DEEPSEEK_BASE_URL=https://api.deepseek.com for the vendor API, or your relay's base URL).",
+    );
+  }
+  if (base && !key) {
+    console.warn(
+      "[config] DEEPSEEK_BASE_URL is set but DEEPSEEK_API_KEY is not — the pair is resolved atomically, so the endpoint is ignored and the prompt assistant / smart routing fall back to their offline answers.",
+    );
+  }
+}
+
 export async function register() {
   if (process.env.NEXT_RUNTIME === "nodejs") {
     // A misconfiguration must stop the process, not just reject this promise:
@@ -133,6 +161,7 @@ export async function register() {
       console.error(`[fatal] refusing to start: ${e instanceof Error ? e.message : String(e)}`);
       process.exit(1);
     }
+    warnOnHalfSetIntegrations();
     await import("./sentry.server.config");
   }
   if (process.env.NEXT_RUNTIME === "edge") {

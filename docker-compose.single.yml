@@ -48,6 +48,33 @@ x-appenv: &appenv
   MODELVERSE_IMAGE_API_KEY: ${MODELVERSE_IMAGE_API_KEY:?set MODELVERSE_IMAGE_API_KEY}
   ARK_IMAGE_API_KEY: ${ARK_IMAGE_API_KEY:?set ARK_IMAGE_API_KEY}
   DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+  # The endpoint half of the assistant's credential pair. getDeepSeekKey() and
+  # getDeepSeekBaseUrl() resolve the pair ATOMICALLY (lib/keys.ts), so a
+  # deployment that forwards only the key — which is what every anchor here did,
+  # and what docs/deploy.md's "configure these keys" list implies — leaves the
+  # pair half-set: the key is present in the container and ignored, and the
+  # prompt assistant silently degrades to its offline expander with nothing
+  # looking misconfigured. Set both, or neither (the app warns at boot when only
+  # one is set). If your key belongs to a relay, this is where its base URL goes:
+  # do NOT leave it out and assume the vendor host.
+  DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-}
+  # Knobs that were documented (.env.example, docs/deploy.md) but named by no
+  # compose anchor, i.e. unreachable in every container deployment. The
+  # consequential one is the external moderation detector: documented as taking
+  # precedence over the vision path when set, so an operator who pointed it at
+  # their own detector and set IMAGE_MODERATION=0 got neither that detector
+  # (dropped here) nor a vision audit (switched off), and the worker booted happy
+  # to deliver unaudited output while the product copy promises an AI safety
+  # review on every image.
+  IMAGE_NSFW_ENDPOINT: ${IMAGE_NSFW_ENDPOINT:-}
+  WATERMARK_TEXT: ${WATERMARK_TEXT:-}
+  CHECKIN_TIMEZONE: ${CHECKIN_TIMEZONE:-}
+  FEEDBACK_NOTIFY_LIMIT: ${FEEDBACK_NOTIFY_LIMIT:-}
+  AUTH_MAIL_HOURLY_LIMIT: ${AUTH_MAIL_HOURLY_LIMIT:-}
+  SENTRY_TRACES_SAMPLE_RATE: ${SENTRY_TRACES_SAMPLE_RATE:-}
+  # Only for a deployment whose ingress sets X-Real-IP; with nothing setting it,
+  # trusting the header hands every per-IP limiter a client-chosen bucket.
+  TRUST_X_REAL_IP: ${TRUST_X_REAL_IP:-0}
 
 services:
   caddy:
@@ -77,7 +104,15 @@ services:
     # `docker tag image-gen-web:latest …:prev` either failed outright or tagged
     # an image nothing ever started, and the "rollback" restarted the bad build.
     image: ${IMAGE_WEB:-image-gen-web:latest}
-    build: { context: ., target: web }
+    # The build arg is the site origin for the prerendered OpenGraph tags (see
+    # the Dockerfile / lib/site.ts): without it every share preview points at
+    # http://localhost:3000. Compose reads it from `.env`, which is where
+    # NEXTAUTH_URL already lives for this deployment.
+    build:
+      context: .
+      target: web
+      args:
+        NEXTAUTH_URL: ${NEXTAUTH_URL:-}
     environment: *appenv
     expose: ["3000"]
     healthcheck:
@@ -106,7 +141,13 @@ services:
 
   rollover:
     build: { context: ., target: worker }
-    command: sh -c "while true; do npx tsx scripts/rollover.ts; npx tsx scripts/expire.ts; npx tsx scripts/remind.ts; sleep 86400; done"
+    # Every pass is chained with && and a failure ends the container (instead of
+    # `;`, which discarded each exit status and looped forever): a persistent
+    # failure here — database down, a broken deploy, OOM — used to stop plan
+    # downgrade, credit expiry and the expiry reminders SILENTLY, since the loop
+    # never exited and no healthcheck watches this service. Now the failure is a
+    # restart loop the operator can see, and `restart: unless-stopped` retries it.
+    command: sh -c "while true; do npx tsx scripts/rollover.ts && npx tsx scripts/expire.ts && npx tsx scripts/remind.ts || { echo '[rollover] a maintenance pass failed — exiting for a retry'; exit 1; }; sleep 86400; done"
     environment: *appenv
     depends_on:
       migrate: { condition: service_completed_successfully }

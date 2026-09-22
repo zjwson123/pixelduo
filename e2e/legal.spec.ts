@@ -22,6 +22,24 @@ test("robots and sitemap are published", async ({ request }) => {
   expect(await sitemap.text()).toContain("<urlset");
 });
 
+test("robots and sitemap name the origin actually serving them", async ({ request }) => {
+  // These two are prerendered at build time unless they say otherwise, and the
+  // documented image build carries no NEXTAUTH_URL (.dockerignore excludes
+  // `.env*`), so the shipped artifacts claimed http://localhost:3000: a sitemap
+  // telling crawlers the canonical site is the builder's machine, which is
+  // discarded rather than indexed. Asserting the served origin — not just that
+  // the files exist — is the only way this shows up: the pages answer 200 either
+  // way. The app under test runs on :3100 with NEXTAUTH_URL set to match.
+  const origin = process.env.NEXTAUTH_URL ?? "http://localhost:3100";
+  const robots = await (await request.get("http://localhost:3100/robots.txt")).text();
+  expect(robots).toContain(`Sitemap: ${origin}/sitemap.xml`);
+  expect(robots).not.toContain("localhost:3000");
+
+  const sitemap = await (await request.get("http://localhost:3100/sitemap.xml")).text();
+  expect(sitemap).toContain(`<loc>${origin}</loc>`);
+  expect(sitemap).not.toContain("localhost:3000");
+});
+
 test("security headers are set on HTML responses", async ({ request }) => {
   const res = await request.get("http://localhost:3100/");
   const headers = res.headers();

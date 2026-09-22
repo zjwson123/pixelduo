@@ -184,6 +184,28 @@ export async function createMediaJob(input: CreateMediaJobInput) {
 // same task concurrently.
 export const POLL_INTERVAL_MS = 10_000;
 
+// How long a claiming worker owns a job in the POLLING lane.
+//
+// The 10-second re-poll interval is a cadence, not a work budget: claiming a
+// due poll and then still being busy when the next worker's claim opens is
+// normal, because phase 2 of a video attempt (download up to 100MB under a
+// 120s deadline, store it, then ffmpeg-concat an extend clip under a 180s one)
+// routinely outlives ten seconds. Two workers then ran phase 2 of the same job
+// at once — duplicate downloads, and one object left named by nothing: the
+// later worker's checkpoint write overwrites Job.images with its own key and
+// deletes only the key IT saw at claim time, so the first worker's object ends
+// up in no checkpoint, no Image row and no erasure path.
+//
+// So a claim takes a lease long enough for the whole phase, and the cheap case
+// stays cheap: an attempt that only polls and finds the task still pending calls
+// schedulePoll, which re-arms nextAttemptAt to POLL_INTERVAL_MS. Only an attempt
+// that is actually working holds the longer lease. The cost is recovery latency
+// after a crash mid-phase-2 (up to this long before another worker takes the job
+// over — recoverStuckJobs' 10-minute polling cutoff is the outer bound), which
+// is well inside the 30-minute video budget and far cheaper than an object
+// nobody can reclaim.
+export const POLL_LEASE_MS = 6 * 60_000;
+
 export async function claimNextJob(worker: string) {
   const now = new Date();
   const due = { OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }] };
@@ -203,7 +225,8 @@ export async function claimNextJob(worker: string) {
   }
 
   // 2. Async (video) tasks due for a poll. Status stays "polling"; the CAS
-  //    also matches on nextAttemptAt so only one worker wins the poll slot.
+  //    also matches on nextAttemptAt so only one worker wins the poll slot —
+  //    and holds it for POLL_LEASE_MS, i.e. for as long as phase 2 can take.
   for (let attempt = 0; attempt < 5; attempt++) {
     const candidate = await prisma.job.findFirst({
       where: { status: "polling", ...due },
@@ -212,7 +235,7 @@ export async function claimNextJob(worker: string) {
     if (!candidate) return null;
     const res = await prisma.job.updateMany({
       where: { id: candidate.id, status: "polling", ...due },
-      data: { worker, heartbeatAt: new Date(), nextAttemptAt: new Date(Date.now() + POLL_INTERVAL_MS) },
+      data: { worker, heartbeatAt: new Date(), nextAttemptAt: new Date(Date.now() + POLL_LEASE_MS) },
     });
     if (res.count === 1) return prisma.job.findUnique({ where: { id: candidate.id } });
   }
@@ -329,6 +352,49 @@ export function checkpointKeys(raw: string | null): string[] {
 // back out" (see scripts/worker.ts). Shared so the thrower and the classifier
 // cannot drift apart.
 export const JOB_ABANDONED = "job-abandoned";
+
+// Take back an object an attempt stored, unless the job still names it.
+//
+// An attempt's object is "named by nothing" in two situations, and only one of
+// them is the abandoned checkpoint write: a competing attempt can also deliver
+// its own object and overwrite Job.images, leaving the first attempt's key in no
+// checkpoint and no Image row — unreachable by /api/files, by failJob's reclaim
+// and by the GDPR erasure routes. Deciding by message prefix could not see that
+// second case ("job-not-runnable", not JOB_ABANDONED), so this asks the durable
+// question instead: does anything point at this key?
+//
+// Deliberately conservative — a checkpoint entry this attempt wrote for a RETRY
+// keeps its object (the next attempt resumes from it), and a key already deleted
+// by failJob's terminal reclaim is simply deleted again.
+export async function reclaimStoredArtifact(jobId: string, key: string): Promise<void> {
+  const job = await prisma.job
+    .findUnique({ where: { id: jobId }, select: { images: true } })
+    .catch(() => null);
+  if (job) {
+    // Two shapes live in this column: checkpoint objects ({ key }) while the job
+    // is in flight, bare URL strings after delivery.
+    try {
+      const parsed = JSON.parse(job.images ?? "[]") as unknown;
+      if (Array.isArray(parsed)) {
+        for (const item of parsed) {
+          if (typeof item === "string" && item === key) return;
+          if (
+            typeof item === "object" && item !== null &&
+            (item as { key?: unknown }).key === key
+          ) {
+            return;
+          }
+        }
+      }
+    } catch {
+      // Unreadable column: fall through to the Image check rather than keeping
+      // an object on the strength of a broken string.
+    }
+  }
+  const owned = await prisma.image.count({ where: { jobId, url: key } }).catch(() => 0);
+  if (owned > 0) return;
+  await getStorage().delete(key).catch(() => undefined);
+}
 
 // Statuses a job can still be collecting output in.
 const IN_FLIGHT_STATUSES = ["running", "polling", "queued"] as const;

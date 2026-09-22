@@ -3,6 +3,7 @@ import fs from "fs";
 import path from "path";
 import { captureError } from "./observability";
 import { isProductionRuntime } from "./runtime-env";
+import { rateLimit, envLimit } from "./rate-limit";
 import {
   verificationHtml,
   resetHtml,
@@ -152,6 +153,45 @@ async function deliver(
 
 function baseUrl(): string {
   return process.env.NEXTAUTH_URL ?? "http://localhost:3000";
+}
+
+// Global hourly ceiling on AUTHENTICATION mail (verification links and password
+// resets), shared by every address and every source.
+//
+// The per-IP and per-account limits on those routes bound one sender against
+// one mailbox; they say nothing about the total. Both routes are reachable
+// without a session, both rotate the token they mail, and the addresses an
+// attacker damages are not theirs to choose — but the SMTP quota is: it is
+// shared with receipts, refunds and feedback notifications, and it is the same
+// quota the feedback channel already protects with an hourly ceiling for
+// exactly this reason ("a flood does not merely annoy, it can stop real users
+// from receiving their links"). Verification and reset mail is the higher-value
+// stream and had no ceiling at all, so N source addresses produced N×480 mails
+// per day to one mailbox.
+//
+// Exceeding it never corrupts state: the caller skips the SEND (and, for the
+// reset route, the token rotation with it, so a link already in the user's
+// inbox keeps working) and the failure is announced in the log. It is a valve
+// for an emergency, not a policy — 300/hour is far above any real signup flow.
+const AUTH_MAIL_WINDOW_MS = 3600_000;
+const DEFAULT_AUTH_MAIL_LIMIT = 300;
+let lastAuthMailCapLog = 0;
+
+// Reserve one slot in the hourly budget. False means "do not send": check this
+// BEFORE creating the token a mail would carry, so a suppressed send cannot
+// invalidate a link the user already has.
+export async function reserveAuthMailSend(): Promise<boolean> {
+  const limit = envLimit(process.env.AUTH_MAIL_HOURLY_LIMIT, DEFAULT_AUTH_MAIL_LIMIT);
+  const r = await rateLimit("authmail:global", limit, AUTH_MAIL_WINDOW_MS);
+  if (r.ok) return true;
+  const now = Date.now();
+  if (now - lastAuthMailCapLog > AUTH_MAIL_WINDOW_MS) {
+    lastAuthMailCapLog = now;
+    console.error(
+      `[mail] auth mail ceiling reached (${limit}/hour) — verification and reset mails are being skipped until the window rolls over`,
+    );
+  }
+  return false;
 }
 
 async function sendSafely(to: string, subject: string, text: string, html?: string): Promise<void> {

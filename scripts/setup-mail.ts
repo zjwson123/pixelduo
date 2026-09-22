@@ -69,7 +69,13 @@ if (port !== 465 && smtpUrl.startsWith("smtps://")) {
 // Write .env, touching only the two keys (idempotent, with a backup).
 const envPath = path.resolve(process.cwd(), ".env");
 const existing = fs.existsSync(envPath) ? fs.readFileSync(envPath, "utf8") : "";
-if (existing) fs.writeFileSync(`${envPath}.bak`, existing);
+// The backup gets the SAME restrictive mode as .env, and that has to be set at
+// creation: it holds every secret the previous file did (NEXTAUTH_SECRET,
+// DATABASE_URL, provider keys), and `writeFileSync` would otherwise create it
+// world-readable (0666 & ~umask) next to a 0600 .env — the one copy of the
+// session-signing key that any local account could read, and a forged session
+// is not something the production boot gate can catch.
+if (existing) fs.writeFileSync(`${envPath}.bak`, existing, { mode: 0o600 });
 const kept = existing
   .split("\n")
   .filter((line) => !/^\s*(SMTP_URL|EMAIL_FROM)\s*=/.test(line))

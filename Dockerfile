@@ -8,6 +8,16 @@ RUN npm ci
 FROM node:24-alpine AS builder
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
+# The site origin is read at BUILD time by everything Next prerenders: the
+# OpenGraph/twitter tags' metadataBase (app/layout.tsx) is baked into the HTML of
+# every static page. Without it `next build` writes the http://localhost:3000
+# fallback, so a deployment served share previews pointing at the operator's own
+# machine. It can only arrive as a build ARG: `.dockerignore` deliberately keeps
+# `.env*` out of the build context. Untyped/optional — robots.txt and sitemap.xml
+# read the same value at REQUEST time instead (lib/site.ts), so an unset arg
+# degrades those two rather than the build.
+ARG NEXTAUTH_URL=""
+ENV NEXTAUTH_URL=$NEXTAUTH_URL
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npx prisma generate && npm run build

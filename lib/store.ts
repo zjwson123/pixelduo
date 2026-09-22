@@ -179,6 +179,19 @@ function ipv6Private(host: string): boolean {
   if (h.startsWith("100::")) return true; // 100::/64 discard-only
   if (h.startsWith("64:ff9b:")) return true; // NAT64 (embeds an IPv4)
   if (h.startsWith("2002:")) return true; // 6to4 (embeds an IPv4)
+  // IPv4-COMPATIBLE addresses (::/96): "::7f00:1" is 127.0.0.1 and
+  // "::a9fe:a9fe" is the cloud metadata address, in a spelling the URL parser
+  // does not normalise and the mapped-quad branch above does not catch (there
+  // is no dotted quad). Nothing routes ::/96 today on the platforms this runs
+  // on, but the predicate's whole job is to answer "may we dial this", and
+  // "yes" for an address every IPv4 rule calls internal is the wrong answer —
+  // it only has to be reachable once, on one host, to become an SSRF.
+  const compat = /^::(?:([0-9a-f]{1,4}):)?([0-9a-f]{1,4})$/.exec(h);
+  if (compat) {
+    const hi = parseInt(compat[1] ?? "0", 16);
+    const lo = parseInt(compat[2], 16);
+    return ipv4Private(split32(((hi << 16) | lo) >>> 0));
+  }
   // Embedded dotted quad ("::10.0.0.1", "64:ff9b::10.0.0.1")
   const dm = /(\d+\.\d+\.\d+\.\d+)$/.exec(h);
   if (dm) return ipv4Private(dm[1]);

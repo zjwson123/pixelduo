@@ -5,7 +5,7 @@ import {
   spendCreditsTx,
   refundCreditsTx,
   PACK_VALIDITY_MS,
-  REFUND_REPLACEMENT_TTL_MS,
+  REFUND_REPLACEMENT_GRACE_MS,
 } from "../lib/ledger";
 import { runExpiry } from "../lib/expiry";
 
@@ -94,11 +94,15 @@ describe("credit grants & expiry", () => {
       expect(replacement.remaining).toBe(50);
       // Bounded, and comfortably in the future: long enough that an ordinary
       // failure is refunded well before it lapses, short enough that holding
-      // credits across an expiry stops being profitable.
+      // credits across an expiry stops being profitable. The bound is measured
+      // from the DEADLINE THE REFUND CROSSED, not from now (pass 16): anchored
+      // at `now + grace`, a replacement was an ordinary spendable grant, so the
+      // same job could be failed again after ITS deadline for another fresh
+      // grace — an expiry renewable every grace period, forever.
       expect(replacement.expiresAt).not.toBeNull();
       expect(replacement.expiresAt!.getTime()).toBeGreaterThan(Date.now());
       expect(replacement.expiresAt!.getTime()).toBeLessThanOrEqual(
-        Date.now() + REFUND_REPLACEMENT_TTL_MS,
+        soon.getTime() + REFUND_REPLACEMENT_GRACE_MS,
       );
       // The sweep must not claw it back out: the replacement is not expired,
       // so the daily run has nothing to destroy.

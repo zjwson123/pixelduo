@@ -60,11 +60,29 @@ describe("verification tokens", () => {
     expect(await consumeToken("verify-email", raw2)).toEqual({ ok: false });
   });
 
-  it("invalidates previous unconsumed tokens for the same email", async () => {
+  it("keeps a just-issued link alive across a re-request, and retires an old one", async () => {
+    // Pass 16: a re-request no longer invalidates a token younger than the
+    // rotation grace. That is what stops anyone who knows an address from
+    // killing each reset link before its owner can click it (/forgot-password
+    // needs no session, answers {sent:true} for any address, and allows 5 per 15
+    // minutes per account). Both links land in the same mailbox, so nothing is
+    // widened by the grace.
     const rawA = await createToken("tok-test@authflow.test", "verify-email");
     const rawB = await createToken("tok-test@authflow.test", "verify-email");
-    expect(await consumeToken("verify-email", rawA)).toEqual({ ok: false });
+    expect((await consumeToken("verify-email", rawA)).ok).toBe(true);
     expect((await consumeToken("verify-email", rawB)).ok).toBe(true);
+
+    // The property the grace deliberately keeps: once a token is older than it,
+    // the next request retires that token, so a stale link in an old mail stops
+    // working.
+    const rawC = await createToken("tok-test@authflow.test", "verify-email");
+    await prisma.verificationToken.updateMany({
+      where: { email: "tok-test@authflow.test", purpose: "verify-email", consumedAt: null },
+      data: { createdAt: new Date(Date.now() - 60 * 60 * 1000) },
+    });
+    const rawD = await createToken("tok-test@authflow.test", "verify-email");
+    expect(await consumeToken("verify-email", rawC)).toEqual({ ok: false });
+    expect((await consumeToken("verify-email", rawD)).ok).toBe(true);
   });
 });
 
@@ -181,10 +199,15 @@ describe("token housekeeping", () => {
     await purgeExpiredTokens();
     const after = await prisma.verificationToken.count();
     expect(after).toBeLessThanOrEqual(before);
-    // All tokens belonging to this suite are consumed/expired now.
-    const suiteTokens = await prisma.verificationToken.count({
-      where: { OR: [{ email: { contains: "@authflow.test" } }, { email: "tok-test@authflow.test" }] },
+    // All tokens belonging to this suite are consumed/expired now — except the
+    // ones the pass-16 rotation grace deliberately keeps alive (a fresh link
+    // survives a re-request, so a request that arrived minutes ago leaves its
+    // predecessor usable). The purge's own contract is what this asserts:
+    // nothing consumed and nothing expired survives it.
+    const leftover = await prisma.verificationToken.findMany({
+      where: { email: { contains: "@authflow.test" } },
+      select: { consumedAt: true, expiresAt: true },
     });
-    expect(suiteTokens).toBe(0);
+    expect(leftover.filter((t) => t.consumedAt !== null || t.expiresAt <= new Date())).toEqual([]);
   });
 });

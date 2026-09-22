@@ -7,18 +7,23 @@
 // human saw it". It is deliberately off unless FEEDBACK_WEBHOOK_URL is set.
 //
 // The URL is operator-supplied configuration, the same trust level as SMTP_URL,
-// so it is not routed through the SSRF-pinned fetcher (that guard exists for
-// provider-supplied URLs). "Trusted operator" is not a reason to let the
-// endpoint pick the destination, though: the POST itself is pinned (https
-// except for the loopback test sink), refuses redirects, refuses to resolve to
-// a private/link-local address, and bounds its reply — see postWebhook.
+// so it is not routed through the SSRF-pinned fetchPublicBuffer (that guard
+// exists for provider-supplied URLs, and this one must also accept a loopback
+// sink in development). "Trusted operator" is not a reason to let the endpoint
+// pick the destination, though: the POST itself is pinned (https except for the
+// loopback test sink), refuses redirects, refuses to resolve to a
+// private/link-local address — and runs on the same connect-time-pinned agent
+// as every other outbound call, so a name that resolves public for the check
+// and internal for the connect does not get dialled — and bounds its reply (see
+// postWebhook).
+import { fetch as pinnedFetch } from "undici";
 import { captureError } from "./observability";
 import { isProductionRuntime } from "./runtime-env";
 // The bounded reader the rest of the codebase uses for an outbound response
 // body (lib/store.ts). Reused rather than re-implemented: the two things that
 // must agree here — "how much may we read" and "is the target acceptable" —
 // already have one answer each in that module.
-import { hostIsPublic, readBodyCapped } from "./store";
+import { hostIsPublic, readBodyCapped, ssrfPinnedAgent } from "./store";
 
 export type WebhookKind = "feishu" | "wecom" | "dingtalk" | "raw";
 
@@ -143,6 +148,19 @@ export interface WebhookResult {
 // broken endpoint (a URL pointing at a web page, say) could drive the heap.
 const WEBHOOK_REPLY_MAX_BYTES = 8 * 1024;
 
+// The connect-time pin applies to every destination EXCEPT the documented
+// loopback test sink. This is not a weakening: the pinned agent refuses private
+// addresses by design, so using it on 127.0.0.1 would break the one case
+// webhookTargetAllowed deliberately allows (tests/notify.test.ts,
+// scripts/dev-smtp-sink.mjs' sibling sink, scripts/verify-webhook.ts), and that
+// exemption exists only outside production (`isProductionRuntime` refuses a
+// loopback webhook outright). Exported so a test can assert which path a given
+// URL takes instead of trusting this comment.
+export function webhookDispatcher(url: string): typeof ssrfPinnedAgent | undefined {
+  const hostname = new URL(url).hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  return hostname === "127.0.0.1" || hostname === "localhost" ? undefined : ssrfPinnedAgent;
+}
+
 // One POST, with the outcome REPORTED instead of captured — the app's own
 // notification path deliberately swallows failures (a stored message must not
 // fail because a webhook is down), but the pre-flight check in
@@ -153,11 +171,20 @@ export async function postWebhook(text: string): Promise<WebhookResult> {
   const denied = await webhookTargetAllowed(url);
   if (denied) return { ok: false, error: denied };
   try {
-    const res = await fetch(url, {
+    // undici's fetch, not the global one: only this signature accepts a
+    // dispatcher, which is the whole point (lib/store.ts and lib/safety.ts use
+    // it for the same reason).
+    const res = (await pinnedFetch(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(buildWebhookBody(webhookKind(), text)),
       signal: AbortSignal.timeout(5000),
+      // Pinned at CONNECT time, not just checked before the request: the guard
+      // above resolves the operator's host once, and fetch would otherwise
+      // resolve it a second time on its own — the rebinding shape this file's
+      // header describes and lib/store.ts's guarded fetch closes. The header
+      // claimed the POST was pinned; it was checked and then resolved again.
+      dispatcher: webhookDispatcher(url),
       // No redirects — every other outbound call in this codebase pins this
       // (lib/providers/index.ts, lib/safety.ts, lib/router.ts, lib/assistant.ts)
       // and for the same reason: the follow-up request is issued to an address
@@ -165,7 +192,7 @@ export async function postWebhook(text: string): Promise<WebhookResult> {
       // with this POST's body. Nothing here needs the header a redirect would
       // drop, so following one is pure SSRF surface. A 3xx simply fails.
       redirect: "manual",
-    });
+    })) as unknown as Response;
     if (res.status >= 300 && res.status < 400) {
       await res.body?.cancel().catch(() => undefined);
       return {

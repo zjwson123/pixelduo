@@ -49,6 +49,23 @@ services:
       SENTRY_RELEASE: ${SENTRY_RELEASE:-}
       IMAGE_MODERATION: ${IMAGE_MODERATION:-0}
       VISION_MODERATION_MODEL: ${VISION_MODERATION_MODEL:-gpt-5.4}
+      # Knobs the code reads and .env.example documents which no anchor named —
+      # so in a container they were unreachable, because the anchor is the only
+      # path an env var has into one. IMAGE_NSFW_ENDPOINT is the consequential
+      # one (an operator who sets it and turns IMAGE_MODERATION off got neither
+      # detector); the rest simply fell back to their defaults.
+      IMAGE_NSFW_ENDPOINT: ${IMAGE_NSFW_ENDPOINT:-}
+      WATERMARK_TEXT: ${WATERMARK_TEXT:-}
+      CHECKIN_TIMEZONE: ${CHECKIN_TIMEZONE:-}
+      FEEDBACK_NOTIFY_LIMIT: ${FEEDBACK_NOTIFY_LIMIT:-}
+      AUTH_MAIL_HOURLY_LIMIT: ${AUTH_MAIL_HOURLY_LIMIT:-}
+      SENTRY_TRACES_SAMPLE_RATE: ${SENTRY_TRACES_SAMPLE_RATE:-}
+      TRUST_X_REAL_IP: ${TRUST_X_REAL_IP:-0}
+      # The endpoint half of the assistant's credential pair: lib/keys.ts
+      # resolves key and endpoint together and ignores a half-set pair, so this
+      # must travel with DEEPSEEK_API_KEY. The dev stack normally leaves both
+      # empty and reads the mounted cc-proxy config instead.
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-}
       S3_ENDPOINT: http://storage:9000
       S3_REGION: us-east-1
       S3_BUCKET: pixelduo
@@ -69,6 +86,13 @@ services:
     build:
       context: .
       target: web
+      args:
+        # Baked into the prerendered metadata (og:url / og:image — see the
+        # Dockerfile): the `.env` value at build time, so share previews point at
+        # the real origin. An empty value is survivable — robots.txt and
+        # sitemap.xml read the same value per request (lib/site.ts) — but the
+        # og: tags cannot, so production should have it here.
+        NEXTAUTH_URL: ${NEXTAUTH_URL:-}
     ports:
       # Loopback-only. With no edge in front, publishing on 0.0.0.0 exposes an
       # unencrypted origin AND makes every per-IP limiter (auth, register,
@@ -115,7 +139,13 @@ services:
     build:
       context: .
       target: worker
-    command: sh -c "while true; do npx tsx scripts/rollover.ts; npx tsx scripts/expire.ts; npx tsx scripts/remind.ts; sleep 86400; done"
+    # Every pass is chained with && and a failure ends the container (instead of
+    # `;`, which discarded each exit status and looped forever): a persistent
+    # failure here — database down, a broken deploy, OOM — used to stop plan
+    # downgrade, credit expiry and the expiry reminders SILENTLY, since the loop
+    # never exited and no healthcheck watches this service. Now the failure is a
+    # restart loop the operator can see, and `restart: unless-stopped` retries it.
+    command: sh -c "while true; do npx tsx scripts/rollover.ts && npx tsx scripts/expire.ts && npx tsx scripts/remind.ts || { echo '[rollover] a maintenance pass failed — exiting for a retry'; exit 1; }; sleep 86400; done"
     environment: *appenv
     depends_on:
       migrate:

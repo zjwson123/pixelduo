@@ -55,7 +55,15 @@ export async function bakeWatermark(buf: Buffer): Promise<Buffer> {
     <rect width="100%" height="100%" rx="${Math.round(fontSize / 2)}" fill="rgba(0,0,0,0.55)"/>
     <text x="50%" y="50%" font-family="system-ui, -apple-system, 'PingFang SC', sans-serif" font-size="${fontSize}" fill="rgba(255,255,255,0.92)" text-anchor="middle" dominant-baseline="central">${safeLabel}</text>
   </svg>`;
-  return sharp(buf)
+  // Same cap as the metadata read above, and it has to be repeated here: this is
+  // a second, independent pipeline over the same untrusted buffer, and its
+  // default is sharp's ~268MP. Today the metadata() call throws first for
+  // anything over the cap, so the pipeline is unreachable for a bomb — but that
+  // is an accident of ordering, not a property of this line, and any early
+  // return added between the two re-opens a ~1GB decode of a few hundred KB of
+  // deflate. The ceiling belongs on every sharp() call that touches provider
+  // bytes (lib/safety.ts does the same).
+  return sharp(buf, { limitInputPixels: MAX_INPUT_PIXELS })
     .composite([{ input: Buffer.from(svg), gravity: "southeast" }])
     .png()
     .toBuffer();

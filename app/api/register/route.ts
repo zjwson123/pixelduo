@@ -3,7 +3,7 @@ import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { signupBonus } from "@/lib/ledger";
 import { createToken } from "@/lib/tokens";
-import { sendVerificationEmail } from "@/lib/mail";
+import { sendVerificationEmail, reserveAuthMailSend } from "@/lib/mail";
 import { zodMessage, ok, fail, enforceRateLimit, readBodyCapped } from "@/lib/api";
 import { envLimit } from "@/lib/rate-limit";
 
@@ -39,7 +39,13 @@ export async function POST(req: Request) {
       return ok({ userId: user.id, credits: 30, pendingVerification: false });
     }
     const token = await createToken(email, "verify-email", user.id);
-    await sendVerificationEmail(email, token);
+    // Same global hourly ceiling as the resend route (lib/mail.ts): under a
+    // signup flood the account and its token are still created — the row is the
+    // record, and the user can ask for the link again — but the send is skipped
+    // rather than spent from the SMTP quota that resets and receipts share.
+    if (await reserveAuthMailSend()) {
+      await sendVerificationEmail(email, token);
+    }
     return ok({ userId: user.id, credits: 0, pendingVerification: true });
   } catch (e) {
     if (e instanceof z.ZodError) return fail(zodMessage(e));

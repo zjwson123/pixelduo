@@ -1,4 +1,4 @@
-import { JOB_ABANDONED, checkpointJobArtifact, checkpointJobProgress, checkpointKeys, claimNextJob, completeJob, failJob, heartbeat, recoverStuckJobs, setJobPolling, schedulePoll } from "../lib/queue";
+import { checkpointJobArtifact, checkpointJobProgress, checkpointKeys, claimNextJob, completeJob, failJob, heartbeat, reclaimStoredArtifact, recoverStuckJobs, setJobPolling, schedulePoll } from "../lib/queue";
 import { generateImages, laneCountFor, createVideoTask, pollVideoTask, saveRemoteVideo, mockImageProviderEnabled, type ProviderImage } from "../lib/providers";
 import { modelCost, videoCost } from "../lib/cost";
 import { analyzeAllImagesSequentially, moderationRequested } from "../lib/safety";
@@ -214,17 +214,18 @@ export async function processImageJob(job: {
     console.log(`[worker ${workerId}] job ${job.id} done (${rows.length} images)`);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    const abandoned = msg.startsWith(JOB_ABANDONED);
-    // Not marked terminal: "the job left the queue" covers both a terminal reap
-    // (failJob then early-returns — it is already failed and refunded) and a
-    // retry reap that requeued it (the normal retry transition is the right one;
-    // forcing terminal here would refund a job that was about to be retried).
+    // Not marked terminal: "the job left the queue" (JOB_ABANDONED) covers both
+    // a terminal reap (failJob then early-returns — it is already failed and
+    // refunded) and a retry reap that requeued it (the normal retry transition is
+    // the right one; forcing terminal here would refund a job that was about to
+    // be retried).
     await failJob(job.id, msg, { terminal: isPermanentProviderError(msg) });
-    if (abandoned) {
-      // Another worker moved the job on, so the checkpoint write above was
-      // refused: these objects are named by nothing and are ours to remove.
-      await Promise.all(storedThisAttempt.map((k) => getStorage().delete(k).catch(() => undefined)));
-    }
+    // Whatever this attempt stored that the job no longer names comes back out,
+    // whether the checkpoint write was refused (lib/queue.ts's JOB_ABANDONED) or
+    // a competing attempt delivered its own batch and overwrote the column. See
+    // reclaimStoredArtifact: a checkpoint that still names a key belongs to the
+    // retry that will resume from it, so nothing live is touched.
+    for (const k of storedThisAttempt) await reclaimStoredArtifact(job.id, k);
     console.error(`[worker ${workerId}] job ${job.id} failed: ${msg}`);
     captureError(e, { jobId: job.id, model: job.model, quality: job.quality });
   } finally {
@@ -403,14 +404,18 @@ export async function processVideoJob(job: {
     return true;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    const abandoned = msg.startsWith(JOB_ABANDONED);
-    // See the image catch for why an abandoned attempt is not forced terminal.
+    // Not marked terminal: "the job left the queue" covers both a terminal reap
+    // (failJob then early-returns — it is already failed and refunded) and a
+    // retry reap that requeued it (the normal retry transition is the right one;
+    // forcing terminal here would refund a job that was about to be retried).
     await failJob(job.id, msg, { terminal: isPermanentProviderError(msg) });
-    if (abandoned && storedKey) {
-      // The checkpoint write was refused, so this object is named by nothing —
-      // not by the checkpoint failJob just reclaimed, and not by the one the
-      // retry will resume from.
-      await getStorage().delete(storedKey).catch(() => undefined);
+    if (storedKey) {
+      // The object this attempt stored is removed only if the job does not name
+      // it: a refused checkpoint, and equally a competing attempt that delivered
+      // its own clip and overwrote the checkpoint, would otherwise leave it in
+      // no checkpoint, no Image row and no erasure path (see
+      // reclaimStoredArtifact).
+      await reclaimStoredArtifact(job.id, storedKey);
     }
     console.error(`[worker ${workerId}] job ${job.id} failed: ${msg}`);
     captureError(e, { jobId: job.id, model: job.model });

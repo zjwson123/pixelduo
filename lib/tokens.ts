@@ -12,6 +12,20 @@ function sha256(input: string): string {
   return createHash("sha256").update(input).digest("hex");
 }
 
+// A link younger than this survives a rotation, so asking for a new one does
+// not invalidate the mail the user is reading right now.
+//
+// Invalidation-on-issue exists so a stale link (an old mail still sitting in a
+// mailbox) cannot be used after the user asked for a fresh one. That is worth
+// keeping across hours; inside minutes it is a way to refuse recovery to
+// everyone: /forgot-password needs no session and answers {sent:true} for any
+// address, so whoever knows an address could re-request every ~3 minutes
+// (5/15min per account) and invalidate each reset link before its owner could
+// click it — killing recovery for exactly the account whose password someone is
+// grinding. Both links land in the same mailbox, so a grace window widens
+// nothing: whoever can read one can read the other.
+const ROTATION_GRACE_MS = 30 * 60 * 1000;
+
 // Create a single-use token; previous unconsumed tokens for the same email +
 // purpose are invalidated so only the latest email link works.
 export async function createToken(email: string, purpose: TokenPurpose, userId?: string | null): Promise<string> {
@@ -19,7 +33,12 @@ export async function createToken(email: string, purpose: TokenPurpose, userId?:
   const now = new Date();
   await prisma.$transaction([
     prisma.verificationToken.updateMany({
-      where: { email, purpose, consumedAt: null },
+      where: {
+        email,
+        purpose,
+        consumedAt: null,
+        createdAt: { lt: new Date(now.getTime() - ROTATION_GRACE_MS) },
+      },
       data: { consumedAt: now },
     }),
     prisma.verificationToken.create({

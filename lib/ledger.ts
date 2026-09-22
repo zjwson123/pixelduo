@@ -28,9 +28,13 @@ export interface SpendConsumption {
 
 export const PACK_VALIDITY_MS = 365 * 24 * 60 * 60 * 1000; // 12 months
 export const ROLLOVER_RATE = 0.3;
-// How long a refund that had to be re-minted (its funding grant expired while
-// the job was in flight) stays spendable. See refundCreditsTx.
-export const REFUND_REPLACEMENT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+// How long past its own deadline a credit whose funding grant expired while the
+// job was in flight stays spendable. It is a GRACE on the deadline that was
+// crossed, not a fresh lease: the replacement expires at
+// (crossed deadline + this), so a refund can only ever extend a credit's life
+// ONCE, and a second crossing of a replacement's own deadline ends it. See
+// refundCreditsTx.
+export const REFUND_REPLACEMENT_GRACE_MS = 24 * 60 * 60 * 1000;
 
 export interface CycleUsage {
   granted: number;
@@ -208,7 +212,7 @@ export async function cycleUsageTx(
     if (jobIds.length) {
       const spent = await tx.ledgerEntry.findMany({
         where: { userId, refId: { in: jobIds }, type: { in: ["PRE_AUTH", "REFUND"] } },
-        select: { type: true, creditsDelta: true },
+        select: { type: true, creditsDelta: true, createdAt: true },
       });
       for (const e of spent) {
         // Clawed-back (REVOKE) quota is gone: counting only PRE_AUTH/REFUND
@@ -218,8 +222,21 @@ export async function cycleUsageTx(
         // counted: that is bookkeeping for credits whose validity already ended
         // at the cycle boundary, and including it made the carryover depend on
         // whether the expiry sweep happened to run before the renewal.
+        //
+        // A refund nets this cycle's spend only when it landed INSIDE the
+        // cycle. A refund that arrives after the deadline did not put the credits
+        // back into the measured quota — by then the quota was over, so
+        // refundCreditsTx either re-minted the value as a grant whose life starts
+        // at the crossed deadline (kept outside this cycle's accounting) or
+        // destroyed it — yet netting it cancelled the spend anyway. The user then
+        // held the refunded credits AND collected 30% carryover on quota they had
+        // been refunded for: up to the full carryover amount per cycle, on top of
+        // the credits, repeatable every cycle by draining the quota into jobs
+        // just before the boundary and letting them fail just after it.
         if (e.type === "PRE_AUTH") preAuth += Math.abs(e.creditsDelta);
-        else refund += e.creditsDelta;
+        else if (!funding.expiresAt || e.createdAt.getTime() <= funding.expiresAt.getTime()) {
+          refund += e.creditsDelta;
+        }
       }
     }
   }
@@ -318,8 +335,9 @@ export async function spendCreditsTx(
 // EXCEPT grants that expired (or vanished) while the job sat in retries:
 // the expiry sweep zeroes remaining>0 rows on expired grants and deducts
 // them back out of the balance, which would silently swallow the refund.
-// The expired portion lands in a fresh non-expiring REFUND grant instead,
-// preserving User.credits == SUM(CreditGrant.remaining).
+// The expired portion lands in a REFUND grant that carries the crossed
+// deadline plus a grace (see REFUND_REPLACEMENT_GRACE_MS), preserving
+// User.credits == SUM(CreditGrant.remaining).
 //
 // A grant funded by an order that has since been REFUNDED is never restored:
 // its credits were already clawed back (or are about to be), so restoring them
@@ -359,9 +377,15 @@ export async function refundCreditsTx(
   // The ORDER BY matches spendCreditsTx so two spends/refunds over the same
   // rows always take the grant locks in the same sequence.
   const rows = await tx.$queryRaw<
-    Array<{ id: string; expiresAt: Date | null; refType: string | null; refId: string | null }>
+    Array<{
+      id: string;
+      expiresAt: Date | null;
+      refType: string | null;
+      refId: string | null;
+      source: string;
+    }>
   >(
-    Prisma.sql`SELECT id, "expiresAt", "refType", "refId" FROM "CreditGrant"
+    Prisma.sql`SELECT id, "expiresAt", "refType", "refId", source FROM "CreditGrant"
       WHERE id IN (${Prisma.join(consumption.map((c) => c.grantId))})
       ${GRANT_LOCK_ORDER}
       FOR UPDATE`,
@@ -392,17 +416,37 @@ export async function refundCreditsTx(
   // attributable: a job that straddled two orders' credits must not collapse
   // them into a single lump that only one of the refunds can reach.
   //
-  // The replacement itself is bounded, not permanent. `expiresAt: null` was
-  // the first fix for the sweep swallowing the refund, and it opened the
-  // mirror image: the spend path is FIFO by expiry, so submitting jobs seconds
-  // before a known expiry (a pack's 12-month date, a cycle end) withholds
-  // credits that would otherwise be destroyed, and the failed job's refund
-  // converts them into credits the sweep can never touch — an expiry that can
-  // be farmed indefinitely. REFUND_REPLACEMENT_TTL_MS is long enough that an
-  // ordinary failure is refunded long before it lapses, and short enough that
-  // the farming loop no longer pays.
-  const expiredByRef = new Map<string, { refType: string | null; refId: string | null; amount: number }>();
-  let revokedTotal = 0;
+  // The replacement is bounded, not permanent — and "bounded" has to mean
+  // bounded FROM THE DEADLINE, not from now. `expiresAt: null` was the first
+  // fix for the sweep swallowing the refund, and it opened the mirror image:
+  // the spend path is FIFO by expiry, so submitting jobs seconds before a known
+  // expiry (a pack's 12-month date, a cycle end) withholds credits that would
+  // otherwise be destroyed, and the failed job's refund converts them into
+  // credits the sweep can never touch. Anchoring the replacement at
+  // `now + TTL` only slowed that loop down: the replacement is an ordinary
+  // spendable grant, so it can be drained and re-minted the same way, one fresh
+  // TTL per cycle through it — the balance never expires and one failing job
+  // per week buys it forever (a subscription's cycle-bounded quota included,
+  // which is what makes the plan recurring).
+  //
+  // The refund can only be late by as much as a job can outlive its own
+  // pre-auth — bounded by retries and the 30-minute video hard timeout — so
+  // the honest extension is a grace on the deadline that was crossed:
+  // `deadline + REFUND_REPLACEMENT_GRACE_MS`. A late refund therefore returns
+  // credits with the life they would have had, not a new lease, and the farm
+  // stops at one iteration. Two conditions end a lineage for good:
+  //   - the portion is granted but the grace is over (the job failed long
+  //     after its deadline — the sweep would have destroyed these anyway), and
+  //   - the grant being replaced is itself a REFUND replacement: its life was
+  //     already one grace period, and a grace is not renewable.
+  const expiredByRef = new Map<
+    string,
+    { refType: string | null; refId: string | null; amount: number; expiresAt: Date }
+  >();
+  // Portions that are NOT given back: clawed back by a refunded order, or
+  // lapsed past their grace. Both are deducted from the REFUND ledger entry,
+  // because the balance must not move for credits the user does not receive.
+  let notRestored = 0;
   for (const c of consumption) {
     const row = rows.find((r) => r.id === c.grantId);
     // A vanished grant has no provenance left to inherit — fall back to the
@@ -411,12 +455,40 @@ export async function refundCreditsTx(
       ? { refType: row.refType ?? null, refId: row.refId ?? null }
       : { refType: refType ?? null, refId: refId ?? null };
     if (row && row.refType === "order" && row.refId && refundedOrders.has(row.refId)) {
-      revokedTotal += c.amount;
+      notRestored += c.amount;
       continue;
     }
     if (!row || (row.expiresAt && row.expiresAt.getTime() <= Date.now())) {
-      const key = `${ref.refType ?? ""}|${ref.refId ?? ""}`;
-      const bucket = expiredByRef.get(key) ?? { ...ref, amount: 0 };
+      if (row && row.source === "REFUND") {
+        // The grace was already spent on this lineage. Restoring here would
+        // hand back credits whose deadline has now passed twice over, and the
+        // second replacement could be crossed and refunded again — the farm.
+        notRestored += c.amount;
+        continue;
+      }
+      const deadline = row?.expiresAt ?? null;
+      const expiresAt = new Date(
+        (deadline ?? new Date()).getTime() + REFUND_REPLACEMENT_GRACE_MS,
+      );
+      if (expiresAt.getTime() <= Date.now()) {
+        // Late beyond the grace: the credits' life ended at their deadline and
+        // the sweep would have destroyed them; a refund this late cannot revive
+        // them without making the deadline farmable. Worth a line in the log —
+        // a job can only outlive its pre-auth by ~30 minutes, so reaching here
+        // means the delivery path was down for a day (the operator's problem,
+        // not the customer's) and a refund just silently shrank.
+        console.warn(
+          `[ledger] refund arrived past the grace window for ${c.amount} credit(s) whose grant expired at ${deadline?.toISOString() ?? "unknown"} — not restored (user ${userId})`,
+        );
+        notRestored += c.amount;
+        continue;
+      }
+      // Keyed by provenance AND by the deadline that was crossed: one ref can
+      // cover grants with different deadlines (a job that drew on both a
+      // replacement and the pack grant behind it), and collapsing them would
+      // give the earlier one the later one's life.
+      const key = `${ref.refType ?? ""}|${ref.refId ?? ""}|${deadline?.getTime() ?? "none"}`;
+      const bucket = expiredByRef.get(key) ?? { ...ref, amount: 0, expiresAt };
       bucket.amount += c.amount;
       expiredByRef.set(key, bucket);
       continue;
@@ -433,14 +505,14 @@ export async function refundCreditsTx(
         source: "REFUND",
         amount: bucket.amount,
         remaining: bucket.amount,
-        expiresAt: new Date(Date.now() + REFUND_REPLACEMENT_TTL_MS),
+        expiresAt: bucket.expiresAt,
         refType: bucket.refType,
         refId: bucket.refId,
       },
     });
   }
-  if (amount - revokedTotal > 0) {
-    await addCreditsTx(tx, userId, "REFUND", amount - revokedTotal, refType, refId, note);
+  if (amount - notRestored > 0) {
+    await addCreditsTx(tx, userId, "REFUND", amount - notRestored, refType, refId, note);
   }
 }
 

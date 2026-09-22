@@ -1,8 +1,13 @@
 import type { Metadata } from "next";
+import { siteBase } from "@/lib/site";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  metadataBase: new URL(process.env.NEXTAUTH_URL ?? "http://localhost:3000"),
+  // Read at BUILD time (this metadata is baked into prerendered HTML), so the
+  // image build must carry NEXTAUTH_URL — the Dockerfile takes it as a build ARG
+  // and the composes pass it from `.env`. Without it every page's og:url and
+  // og:image pointed at http://localhost:3000. See lib/site.ts.
+  metadataBase: new URL(siteBase()),
   title: "PixelDuo — Two models. One prompt. Your call.",
   description:
     "Dual-engine AI image studio: GPT Image 2 × Seedream 5, transparent per-image pricing, AI prompt assistant.",

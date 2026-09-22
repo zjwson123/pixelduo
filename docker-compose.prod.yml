@@ -45,6 +45,25 @@ x-appenv: &appenv
   MODELVERSE_IMAGE_API_KEY: ${MODELVERSE_IMAGE_API_KEY:-}
   ARK_IMAGE_API_KEY: ${ARK_IMAGE_API_KEY:-}
   DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+  # The endpoint half of the assistant's credential pair — resolved ATOMICALLY
+  # with the key (lib/keys.ts), so forwarding only the key (which is what this
+  # anchor used to do) leaves it ignored in the container: the prompt assistant
+  # and smart routing silently take their offline fallbacks while the key sits
+  # there looking configured. Set both, or neither; the app warns at boot when
+  # only one is present.
+  DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-}
+  # Documented knobs no anchor named, so they could not reach a container. The
+  # external moderation detector is the one that matters: it is documented as
+  # taking precedence over the vision path when set, so setting it alongside
+  # IMAGE_MODERATION=0 left output unaudited while the product promises a safety
+  # review on every image.
+  IMAGE_NSFW_ENDPOINT: ${IMAGE_NSFW_ENDPOINT:-}
+  WATERMARK_TEXT: ${WATERMARK_TEXT:-}
+  CHECKIN_TIMEZONE: ${CHECKIN_TIMEZONE:-}
+  FEEDBACK_NOTIFY_LIMIT: ${FEEDBACK_NOTIFY_LIMIT:-}
+  AUTH_MAIL_HOURLY_LIMIT: ${AUTH_MAIL_HOURLY_LIMIT:-}
+  SENTRY_TRACES_SAMPLE_RATE: ${SENTRY_TRACES_SAMPLE_RATE:-}
+  TRUST_X_REAL_IP: ${TRUST_X_REAL_IP:-0}
   HOSTNAME: 0.0.0.0
 
 services:
@@ -85,7 +104,13 @@ services:
 
   rollover:
     image: ${IMAGE_WORKER:-image-gen-worker:latest}
-    command: sh -c "while true; do npx tsx scripts/rollover.ts; npx tsx scripts/expire.ts; npx tsx scripts/remind.ts; sleep 86400; done"
+    # Every pass is chained with && and a failure ends the container (instead of
+    # `;`, which discarded each exit status and looped forever): a persistent
+    # failure here — database down, a broken deploy, OOM — used to stop plan
+    # downgrade, credit expiry and the expiry reminders SILENTLY, since the loop
+    # never exited and no healthcheck watches this service. Now the failure is a
+    # restart loop the operator can see, and `restart: unless-stopped` retries it.
+    command: sh -c "while true; do npx tsx scripts/rollover.ts && npx tsx scripts/expire.ts && npx tsx scripts/remind.ts || { echo '[rollover] a maintenance pass failed — exiting for a retry'; exit 1; }; sleep 86400; done"
     environment: *appenv
     restart: unless-stopped
 

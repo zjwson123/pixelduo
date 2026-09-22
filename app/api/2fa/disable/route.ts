@@ -11,6 +11,11 @@ import {
   TWOFA_LOCKED_ERROR,
 } from "@/lib/twofa";
 import { sendTwoFactorStateEmail } from "@/lib/mail";
+import {
+  reservePasswordReauth,
+  alertPasswordReauthAbuse,
+  refundPasswordReauth,
+} from "@/lib/login-guard";
 
 const schema = z.object({
   password: z.string().min(1).max(100),
@@ -39,10 +44,18 @@ export async function POST(req: Request) {
       select: { passwordHash: true, totpSecret: true, totpEnabled: true, email: true },
     });
     if (!user.totpEnabled) return ok({ alreadyDisabled: true });
-    // A wrong password is deliberately not a brake failure: it has its own
-    // guard, and counting it here would let a stolen session lock the owner out
-    // of the second factor (and so out of this route's own recovery) for a day.
-    if (!(await bcrypt.compare(body.password, user.passwordHash))) return fail(new Error("invalid-password"));
+    // A wrong password is deliberately not a SECOND-FACTOR brake failure: that
+    // counter bounds the 6-digit code, and counting password guesses here would
+    // let a stolen session spend the owner's code budget. The password has its
+    // own guard — the login guard, which the per-minute buckets above are not:
+    // reserve the attempt on it before the compare (lib/login-guard.ts).
+    const attempt = await reservePasswordReauth(user.email, req);
+    if (!attempt.allowed) return fail(new ApiError(429, "rate-limited"));
+    if (!(await bcrypt.compare(body.password, user.passwordHash))) {
+      await alertPasswordReauthAbuse(user.email);
+      return fail(new Error("invalid-password"));
+    }
+    await refundPasswordReauth(user.email, req);
     // Replay rejection: a code observed inside its ±1 step window must not also
     // be able to turn the second factor off.
     if (!verifyTotp(user.totpSecret, body.token) || !(await claimTotpCode(userId, body.token))) {

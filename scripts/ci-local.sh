@@ -33,6 +33,13 @@ docker exec pixelduo-redis redis-cli --scan --pattern 'rl:*' 2>/dev/null \
 npm test
 
 echo "[4/7] production build"
+# The build bakes NEXTAUTH_URL into the prerendered metadata (og:url/og:image —
+# see lib/site.ts and the Dockerfile's build ARG), and CI's e2e job exports the
+# same value before `npm run build`. Without it here the built pages carry the
+# http://localhost:3000 fallback, and the e2e assertion that the served origin is
+# the configured one would fail on a tree CI considers green — a divergence
+# between the pipeline this script claims to replicate and the one that runs.
+export NEXTAUTH_URL="http://localhost:3100"
 npm run build
 
 echo "[5/7] seed + start app/worker (port 3100)"
