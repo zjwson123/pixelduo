@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { zodMessage, requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped, ApiError } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
+import { passwordReauthRefusal } from "@/lib/auth";
 import {
   verifyTotp,
   generateBackupCodes,
@@ -45,6 +46,8 @@ export async function POST(req: Request) {
       select: { totpPendingSecret: true, totpEnabled: true, passwordHash: true, email: true },
     });
     if (user.totpEnabled) return ok({ alreadyEnabled: true });
+    const refusal = passwordReauthRefusal(user.passwordHash);
+    if (refusal) return fail(refusal);
     // The password compare runs before the code check, so it is a full password
     // oracle: reserve it on the LOGIN guard's counters (lib/login-guard.ts).
     const attempt = await reservePasswordReauth(user.email, req);

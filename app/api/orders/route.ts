@@ -1,4 +1,4 @@
-import { requireUserId, ok, fail } from "@/lib/api";
+import { requireUserId, ok, fail, enforceUserRateLimit } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
@@ -7,6 +7,8 @@ export const dynamic = "force-dynamic";
 export async function GET() {
   try {
     const userId = await requireUserId();
+    const limited = await enforceUserRateLimit(userId, "orders-list", 60, 60_000);
+    if (limited) return fail(limited);
     const orders = await prisma.order.findMany({
       where: { userId },
       orderBy: { createdAt: "desc" },

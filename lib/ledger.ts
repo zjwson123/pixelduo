@@ -105,6 +105,28 @@ export async function grantCreditsTx(
   await addCreditsTx(tx, userId, source, amount, refType, refId, note);
 }
 
+// One subscription month from `base`, clamped to the target month's last day.
+//
+// `setMonth(getMonth() + 1)` rolls overflow forward: 2026-01-31 became
+// 2026-03-03 (three free days of plan AND of quota, since the SUBSCRIPTION
+// grant is stamped with the same expiry) and 2026-03-31 became 2026-05-01. The
+// gift repeated every month the anchor landed on a 29th-31st, and it also
+// drifted the anchor, so a customer billed on the 31st was renewing on the 3rd
+// within a couple of cycles. Clamping keeps the anchor: Jan 31 → Feb 28/29 →
+// Mar 28, which is what a monthly subscription means.
+export function addBillingMonth(base: Date): Date {
+  const day = base.getDate();
+  const renew = new Date(base);
+  // Move the month while parked on the 1st, so the intermediate state cannot
+  // roll over either.
+  renew.setDate(1);
+  renew.setMonth(renew.getMonth() + 1);
+  // Day 0 of the next month is the last day of the target month.
+  const lastDay = new Date(renew.getFullYear(), renew.getMonth() + 1, 0).getDate();
+  renew.setDate(Math.min(day, lastDay));
+  return renew;
+}
+
 // Canonical grant-lock order. EVERY statement that locks CreditGrant rows must
 // acquire them in this sequence: two transactions locking the same rows in
 // opposite orders deadlock, and Postgres resolves that by aborting one (a 500
@@ -602,8 +624,7 @@ export async function fulfillOrder(
       // Renewal extends from the current cycle end when bought early, otherwise
       // starts a fresh cycle from now.
       const base = user.planRenewsAt && user.planRenewsAt > now ? user.planRenewsAt : now;
-      const renew = new Date(base);
-      renew.setMonth(renew.getMonth() + 1);
+      const renew = addBillingMonth(base);
       // 30% of the unused quota from a just-ended cycle carries into the new
       // one, and only from a cycle that has ACTUALLY ended.
       //
@@ -801,8 +822,13 @@ export async function revokePlanEntitlementTx(
   return res.count === 1;
 }
 
-// Admin compensation: grant non-expiring credits (consumed first like free
-// credits) with an ADMIN ledger entry attributed to the acting admin.
+// Admin compensation: grant non-expiring credits with an ADMIN ledger entry
+// attributed to the acting admin. Spent LAST, not first — only SIGNUP_BONUS and
+// CHECKIN are in the free class of GRANT_LOCK_ORDER, and "never expires" is the
+// attribute that matters here (compensation cannot lapse). The comment used to
+// claim "consumed first like free credits", which is the opposite of what the
+// order does; an operator reading it would believe compensation credits are
+// protected from being spent behind expiring ones.
 export async function adminGrantTx(
   tx: Prisma.TransactionClient,
   userId: string,

@@ -25,7 +25,7 @@ export async function POST(req: Request) {
     // nobody sent is how a user ends up waiting for a link that is not coming.
     // The check precedes the rotation, so the link already in their inbox stays
     // valid either way.
-    if (!(await reserveAuthMailSend())) {
+    if (!(await reserveAuthMailSend("verify"))) {
       return fail(new Error("cannot-send-mail: the mail service is at its hourly limit — try again in a few minutes"));
     }
     const token = await createToken(user.email, "verify-email", user.id);

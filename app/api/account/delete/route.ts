@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { zodMessage, requireUserId, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped, ApiError } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
+import { passwordReauthRefusal } from "@/lib/auth";
 import { deleteObjectsBounded } from "@/lib/storage";
 import { checkpointKeys } from "@/lib/queue";
 import { ADMIN_GUARD_LOCK, assertAnotherAdminRemains } from "@/lib/admin";
@@ -50,6 +51,8 @@ export async function POST(req: Request) {
       where: { id: userId },
       select: { email: true, passwordHash: true, totpSecret: true, totpEnabled: true, role: true },
     });
+    const refusal = passwordReauthRefusal(user.passwordHash);
+    if (refusal) return fail(refusal);
     // Reserve on the LOGIN guard's counters before the compare
     // (lib/login-guard.ts). Erasure is irreversible, so the password it asks for
     // must be as expensive to guess here as it is on the login endpoint — the

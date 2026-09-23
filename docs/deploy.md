@@ -18,8 +18,9 @@
    - `DATABASE_URL`（Postgres，建议开启自动备份 + PITR）
    - `REDIS_URL`（带密码，如 `rediss://...`）
    - `S3_ENDPOINT`（**公网可达**，否则预签名 URL 打不开）、`S3_BUCKET`、`S3_ACCESS_KEY_ID`、`S3_SECRET_ACCESS_KEY`
-4. 生图与审核 Key：`MODELVERSE_IMAGE_API_KEY`、`ARK_IMAGE_API_KEY`、`DEEPSEEK_API_KEY`、`VISION_MODERATION_API_KEY`（无独立 key 时可用 `VISION_MODERATION_BASE_URL` + 同款 ModelVerse key）
-5. `NEXTAUTH_SECRET`（`openssl rand -base64 32` 生成）。它给所有会话 JWT 签名：**少于 32 位或仍是占位符（如 `change-me-…`）时生产环境拒绝启动**（`instrumentation.ts`），不要沿用 `.env.example` 里的示例值
+4. 生图与审核 Key：`MODELVERSE_IMAGE_API_KEY`、`ARK_IMAGE_API_KEY`、`DEEPSEEK_API_KEY`、`VISION_MODERATION_API_KEY`（无独立 key 时可用 `VISION_MODERATION_BASE_URL` + 同款 ModelVerse key）。**审核网关必须是公网 http(s) 地址**：该请求带着审核 key 和待审图片，走的是 SSRF 防护 + DNS 钉死的客户端（与 `IMAGE_NSFW_ENDPOINT` 同一规则），内网/回环地址会被判为不可用 → 任务按"审核不可用"失败并退款，而不是把未审核的图片交付出去
+5. 社交登录（可选）：`GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` 四个**全部**设置才会启用对应 provider（`lib/auth.ts`）；三个 compose 文件均已转发这四个变量，不设置则登录页不显示任何第三方按钮
+6. `NEXTAUTH_SECRET`（`openssl rand -base64 32` 生成）。它给所有会话 JWT 签名：**少于 32 位或仍是占位符（如 `change-me-…`）时生产环境拒绝启动**（`instrumentation.ts`），不要沿用 `.env.example` 里的示例值
 
 ### 生产启动自检（任一不满足即**拒绝启动**，进程退出）
 

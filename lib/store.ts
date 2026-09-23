@@ -135,7 +135,9 @@ function split32(v: number): string {
 
 // Decode inet_aton-style IPv4 literals the URL parser leaves untouched:
 // "2130706433", "0x7f.1", "0177.0.0.1", "127.1" all resolve to loopback.
-function decodeIpv4Literal(host: string): string | null {
+// Exported so a test can pin the forms directly; through hostIsPublic they are
+// indistinguishable from "the hostname did not resolve".
+export function decodeIpv4Literal(host: string): string | null {
   const parts = host.split(".");
   if (parts.length > 4) return null;
   const nums: number[] = [];
@@ -153,6 +155,14 @@ function decodeIpv4Literal(host: string): string | null {
   const head = nums.slice(0, -1);
   const rem = 4 - head.length;
   if (head.some((n) => n > 255)) return null;
+  // A single part IS the whole address: "2130706433" and "0x7f000001" are
+  // loopback. This case was missing (rem is 4 with one part, so every branch
+  // below fell through to null), which contradicted the docstring and made the
+  // decoder a no-op for the commonest form. Not exploitable while every caller
+  // passes url.hostname — WHATWG normalises a pure-numeric host to dotted-quad
+  // before we see it — but the guard was relying on that, and it is exactly the
+  // kind of reliance the DNS fallback exists to stop relying on.
+  if (rem === 4) return split32(last);
   if (rem === 1) return last > 255 ? null : [...head, last].join(".");
   if (rem === 2) return last > 65535 ? null : [...head, (last >> 8) & 255, last & 255].join(".");
   if (rem === 3) return last > 0xffffff ? null : [...head, (last >> 16) & 255, (last >> 8) & 255, last & 255].join(".");

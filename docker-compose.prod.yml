@@ -36,7 +36,7 @@ x-appenv: &appenv
   SENTRY_DSN: ${SENTRY_DSN:-}
   SENTRY_ENVIRONMENT: production
   IMAGE_MODERATION: ${IMAGE_MODERATION:-1}
-  VISION_MODERATION_MODEL: ${VISION_MODERATION_MODEL:-gpt-5.4}
+  VISION_MODERATION_MODEL: ${VISION_MODERATION_MODEL:-gpt-5.6-luna}
   # Set BOTH or NEITHER — the pair is atomic (see getVisionConfig): setting only
   # one is treated as "no vision config", and since IMAGE_MODERATION defaults to
   # on, the worker then refuses to boot rather than delivering unaudited output.
@@ -64,6 +64,33 @@ x-appenv: &appenv
   AUTH_MAIL_HOURLY_LIMIT: ${AUTH_MAIL_HOURLY_LIMIT:-}
   SENTRY_TRACES_SAMPLE_RATE: ${SENTRY_TRACES_SAMPLE_RATE:-}
   TRUST_X_REAL_IP: ${TRUST_X_REAL_IP:-0}
+  # Social sign-in. lib/auth.ts registers the Google/GitHub providers only when
+  # all four are present, and NO anchor named any of them — so social login was
+  # impossible in every container deployment while README.md, docs/release.md
+  # and docs/compliance/launch-checklist.md all described it as "configure the
+  # env and it turns on". Fail-closed (no buttons appear), but a silently
+  # missing feature the docs claimed was shipped.
+  GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+  GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+  GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+  GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+  # The documented remedy for a deployment without SMTP_URL (the boot assertion
+  # names it: "set MAIL_DEV_MODE=1 to accept that"). Only the local compose
+  # forwarded it, so in production the operator was told to do something the
+  # deployment could not express. 0 here: accepting a log-only mailer is a
+  # deliberate act, never a default.
+  MAIL_DEV_MODE: ${MAIL_DEV_MODE:-0}
+  # Edge limits and per-route ceilings the code reads. All fail closed (their
+  # defaults apply) but none could be TIGHTENED in a container, which is the
+  # direction an operator needs after an incident.
+  MIDDLEWARE_AUTH_LIMIT: ${MIDDLEWARE_AUTH_LIMIT:-}
+  MIDDLEWARE_API_LIMIT: ${MIDDLEWARE_API_LIMIT:-}
+  REGISTER_RATE_LIMIT: ${REGISTER_RATE_LIMIT:-}
+  OAUTH_CALLBACK_RATE_LIMIT: ${OAUTH_CALLBACK_RATE_LIMIT:-}
+  OUTBOUND_TIMEOUT_MS: ${OUTBOUND_TIMEOUT_MS:-}
+  # Image-generation keys for the DashScope (Aliyun) family. Its models are
+  # disabled, but the key is still what lib/keys.ts resolves for that gateway.
+  ALIYUN_API_KEY: ${ALIYUN_API_KEY:-}
   HOSTNAME: 0.0.0.0
 
 services:

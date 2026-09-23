@@ -9,8 +9,10 @@ const schema = z.object({
   note: z.string().min(1).max(200),
 });
 
-// Admin credit adjustment: positive = compensation grant (never expires,
-// consumed first), negative = clawback (FIFO, free/admin grants first).
+// Admin credit adjustment: positive = compensation grant (never expires, spent
+// LAST — see GRANT_LOCK_ORDER in lib/ledger.ts; only SIGNUP_BONUS and CHECKIN
+// are ahead of paid credits), negative = clawback (FIFO, free/admin grants
+// first).
 // Rate-limited per IP AND per acting admin: with its sibling below this was one
 // of only two routes that parsed a body with no limit of its own, and it moves
 // up to 1,000,000 credits per request, so a stolen admin session (or a retry
@@ -28,6 +30,18 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     const body = schema.parse(JSON.parse(bodyRaw.raw));
     const user = await prisma.user.findUnique({ where: { id: id }, select: { id: true } });
     if (!user) return fail(new Error("user-not-found"));
+    // Self-targeting is deliberately ALLOWED, and that is a decision rather than
+    // an oversight: an admin can mint credits into ANY account, so refusing the
+    // caller's own id buys no boundary — a stolen admin session registers a
+    // second account (or picks any id from the user list) and grants to that,
+    // one extra request. What a "cannot-grant-self" check does buy is a dead end
+    // for the single-operator install that compensates itself for testing, which
+    // is the flow the admin console and e2e/admin.spec.ts both exercise. The
+    // controls that are real: the per-admin rate limit above, the note field,
+    // and the ledger row every grant writes with refType "admin" / refId = the
+    // acting admin (see pass17-hardening.test.ts, which pins that attribution).
+    // A genuine boundary here would be product work — a two-person rule for
+    // grants above some size — not a self-id check.
     await prisma.$transaction(async (tx) => {
       if (body.delta > 0) await adminGrantTx(tx, user.id, body.delta, body.note, adminId);
       else await adminClawbackTx(tx, user.id, -body.delta, body.note, adminId);

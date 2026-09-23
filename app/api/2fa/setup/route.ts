@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { zodMessage, requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped, ApiError } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
+import { passwordReauthRefusal } from "@/lib/auth";
 import { generateTwoFactorSetup } from "@/lib/twofa";
 import {
   reservePasswordReauth,
@@ -31,6 +32,8 @@ export async function POST(req: Request) {
       select: { email: true, totpEnabled: true, passwordHash: true },
     });
     if (user.totpEnabled) return ok({ alreadyEnabled: true });
+    const refusal = passwordReauthRefusal(user.passwordHash);
+    if (refusal) return fail(refusal);
     // Reserve on the LOGIN guard's counters before the compare (see
     // lib/login-guard.ts): this is a password oracle, and the per-minute
     // buckets above are not a cumulative brake.

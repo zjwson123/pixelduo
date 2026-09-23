@@ -141,7 +141,9 @@ compose 全栈默认带 `backup-objects` 服务（每日镜像 + 保留 7 份；
 
 `GET /api/health` 返回 `ok` / `service` / `db` / `redis` / `storage` / `queue.active`（仅"有没有在跑的任务"；队列深度与 worker 心跳属侦察信息，已刻意不暴露）/ `time`，任一关键依赖异常时 `ok:false`。**注意：`ok:false` 时该路由仍返回 200**，`curl -f` 判不出失败，探活要读 JSON（可复制的冒烟命令见 [docs/release.md](docs/release.md)）。
 
-### 生产部署（Docker Compose）
+### 本地全栈（Docker Compose）
+
+> **这不是生产部署。** 该文件（`docker-compose.yml`）默认 `PAYMENT_ALLOW_MOCK=1`、`MAIL_DEV_MODE=1`、`PAYMENT_PROVIDER=mock`、`NEXTAUTH_URL=http://localhost:3000` —— 前两项正是**关闭生产启动断言**的开关（见 `instrumentation.ts`），并且在 mock 支付下 `/api/checkout` 会直接给任意访问者发积分。生产部署见下方「生产部署」与 [docs/deploy.md](docs/deploy.md)（`docker-compose.prod.yml` + Caddy 自动 HTTPS）。
 
 ```bash
 docker compose up -d --build        # migrate → web(3000) + worker + rollover + db + storage

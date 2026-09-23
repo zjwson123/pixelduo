@@ -28,7 +28,7 @@ export async function POST(req: Request) {
         // instead of being invalidated by a mail that never leaves. The response
         // stays uniform (the check is made after the lookup, so it discloses
         // nothing about the address).
-        if (await reserveAuthMailSend()) {
+        if (await reserveAuthMailSend("reset")) {
           const token = await createToken(email, "reset-password", user.id);
           // Deliberately NOT awaited. A uniform `{sent:true}` body closed the
           // content channel, but the unknown-address path answers in ~1ms while

@@ -13,6 +13,12 @@ const listSchema = z.object({
 export async function GET(req: Request) {
   try {
     const userId = await requireUserId();
+    // Per-ACCOUNT, like every sibling read (jobs 600/min, templates 60/min):
+    // the middleware's per-IP cap is per-instance and IP rotation lifts it, and
+    // this is the most expensive list in the app (a page of rows joined to
+    // their job). 120/min is far above any real browsing cadence.
+    const limited = await enforceUserRateLimit(userId, "gallery-list", 120, 60_000);
+    if (limited) return fail(limited);
     const params = new URL(req.url).searchParams;
     const { type, sort } = listSchema.parse({ type: params.get("type") ?? undefined, sort: params.get("sort") ?? undefined });
     // Registry-derived, including disabled models: history keeps rows from

@@ -2,6 +2,7 @@ import bcrypt from "bcryptjs";
 import { z } from "zod";
 import { zodMessage, requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped, ApiError } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
+import { passwordReauthRefusal } from "@/lib/auth";
 import {
   verifyTotp,
   isTwoFactorLocked,
@@ -44,6 +45,8 @@ export async function POST(req: Request) {
       select: { passwordHash: true, totpSecret: true, totpEnabled: true, email: true },
     });
     if (!user.totpEnabled) return ok({ alreadyDisabled: true });
+    const refusal = passwordReauthRefusal(user.passwordHash);
+    if (refusal) return fail(refusal);
     // A wrong password is deliberately not a SECOND-FACTOR brake failure: that
     // counter bounds the 6-digit code, and counting password guesses here would
     // let a stolen session spend the owner's code budget. The password has its

@@ -11,7 +11,15 @@ import type { CheckoutSession, CreateCheckoutInput, PaymentProvider } from "./ty
 //
 // Event mapping:
 // - transaction.completed → paid (fulfil order)
-// - adjustment.created (action refund|chargeback, status approved) → refunded
+// - adjustment.created AND adjustment.updated (action refund|chargeback, status
+//   approved) → refunded. Both event types are required, not redundant: a
+//   live-account refund is created as `pending_approval` and only becomes
+//   `approved` later, which is delivered as adjustment.updated — the
+//   approval transition. Handing only `adjustment.created` (as this did) meant
+//   the created event was ignored for its status and the approved one for its
+//   type, so a refund that went through the approval flow never revoked a
+//   credit, never downgraded the plan, and never mailed the customer: the money
+//   was refunded provider-side with nothing on our side to notice.
 // Order link: customData.orderId at checkout; refunds resolve via
 // transactionId → Order.providerOrderId.
 export class PaddleProvider implements PaymentProvider {
@@ -122,7 +130,11 @@ export class PaddleProvider implements PaymentProvider {
           raw: parsed,
         };
       }
-      if (parsed.event_type === "adjustment.created") {
+      if (parsed.event_type === "adjustment.created" || parsed.event_type === "adjustment.updated") {
+        // status is the whole decision: `pending_approval` (a live refund before
+        // approval), `rejected` and `reversed` are all ignored, and the same
+        // approved adjustment delivered twice converges — the webhook route's
+        // eventId dedupe plus its paid→refunded CAS make the repeat a no-op.
         if (data.status !== "approved") return IGNORED_WEBHOOK;
         if (data.action !== "refund" && data.action !== "chargeback") return IGNORED_WEBHOOK;
         // Adjustments can be partial (a $1 goodwill refund on a $49.99 pack):

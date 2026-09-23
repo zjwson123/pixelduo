@@ -67,6 +67,30 @@ if (port !== 465 && smtpUrl.startsWith("smtps://")) {
 }
 
 // Write .env, touching only the two keys (idempotent, with a backup).
+//
+// Refuse inside a container: docs/server-setup.md tells operators to run the
+// scripts from the worker image (`docker compose exec worker npx tsx …`), and
+// there `process.cwd()` is the image's /app — the write lands in the container's
+// writable layer, the running web/worker keep their original environment, and
+// the script exits 0 printing "wrote /app/.env" and a delivery-verified result.
+// Nothing reaches the deployment, and the ephemeral file disappears with the
+// next `up --build`. Better to fail loudly and name the two variables to set on
+// the host.
+if (fs.existsSync("/.dockerenv")) {
+  console.error(
+    [
+      "refusing to write .env: this is running INSIDE a container, where the file would be",
+      "written to the image's ephemeral layer and never reach the running services.",
+      "",
+      "Set these on the HOST instead (e.g. in the .env that docker compose reads):",
+      `  SMTP_URL="${smtpUrl}"`,
+      `  EMAIL_FROM="${emailFrom}"`,
+      "",
+      "Then recreate the containers: docker compose up -d --force-recreate web worker",
+    ].join("\n"),
+  );
+  process.exit(1);
+}
 const envPath = path.resolve(process.cwd(), ".env");
 const existing = fs.existsSync(envPath) ? fs.readFileSync(envPath, "utf8") : "";
 // The backup gets the SAME restrictive mode as .env, and that has to be set at

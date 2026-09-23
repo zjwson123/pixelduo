@@ -1,4 +1,5 @@
 import * as Sentry from "@sentry/nextjs";
+import { scrubSentryEvent } from "./lib/sentry-scrub";
 
 // Client-side DSN must be public-safe, i.e. NEXT_PUBLIC_*. There used to be a
 // `?? process.env.SENTRY_DSN` fallback here, which cannot work: Next only
@@ -17,5 +18,10 @@ if (isSentryEnabled) {
     environment: process.env.NEXT_PUBLIC_SENTRY_ENVIRONMENT ?? process.env.SENTRY_ENVIRONMENT ?? "development",
     tracesSampleRate: Number(process.env.NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE ?? 0.1),
     release: process.env.SENTRY_RELEASE,
+    // `httpContextIntegration` puts window.location.href — query string and all
+    // — on every event, and the browser is where the reset/verify token lives.
+    // See lib/sentry-scrub.ts.
+    beforeSend: (event) => scrubSentryEvent(event),
+    beforeSendTransaction: (event) => scrubSentryEvent(event),
   });
 }

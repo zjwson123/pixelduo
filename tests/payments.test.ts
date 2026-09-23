@@ -351,6 +351,63 @@ describe("PaddleProvider", () => {
     expect(bareEvt?.refundAmountUsd).toBeUndefined();
   });
 
+  it("maps the approval transition (adjustment.updated) to refunded, not just the creation", async () => {
+    const p = new PaddleProvider({
+      client: new Paddle("pdl_test_dummy", { environment: Environment.sandbox }),
+      webhookSecret: PADDLE_SECRET,
+    });
+    const base = {
+      id: "adj_live_1",
+      action: "refund",
+      transaction_id: "txn_456",
+      currency_code: "USD",
+      type: "full",
+      items: [],
+      totals: { subtotal: "1999", tax: "0", total: "1999" },
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    const raw = (payload: string) =>
+      p.verifyWebhook(payload, new Headers({ "paddle-signature": paddleSignature(payload, PADDLE_SECRET) }));
+
+    // A live-account refund is CREATED pending_approval and only reaches
+    // `approved` later, delivered as adjustment.updated. The created event must
+    // not revoke anything yet...
+    const pending = paddleEvent("adjustment.created", { ...base, status: "pending_approval" });
+    const pendingResult = await raw(pending);
+    // Ignored (a 200 ack), not rejected (a 400): the adjustment is simply not
+    // actionable yet, and a 400 would make Paddle retry a delivery we took.
+    expect(pendingResult && "ignored" in pendingResult).toBe(true);
+
+    // ...and the approval carries the whole decision, under a DIFFERENT event
+    // type. Handling only `adjustment.created` meant this event was acked as
+    // "not an event type we handle": money refunded provider-side, credits kept,
+    // plan kept, no refund mail — permanently, since both deliveries are 200s
+    // and no retry can fix what was never attempted.
+    const approved = paddleEvent("adjustment.updated", { ...base, status: "approved" });
+    const evt = await asEvent(raw(approved));
+    expect(evt?.type).toBe("refunded");
+    expect(evt?.fullRefund).toBe(true);
+    expect(evt?.providerOrderId).toBe("txn_456");
+    expect(evt?.refundAmountUsd).toBeCloseTo(19.99);
+
+    // A chargeback arrives through the same transition.
+    const chargeback = paddleEvent("adjustment.updated", { ...base, id: "adj_live_2", action: "chargeback", status: "approved" });
+    expect((await asEvent(raw(chargeback)))?.type).toBe("refunded");
+
+    // The statuses that must still be ignored: a rejected approval and a
+    // contested refund that was reversed.
+    for (const status of ["rejected", "reversed"]) {
+      const ignored = paddleEvent("adjustment.updated", { ...base, id: `adj_${status}`, status });
+      const result = await raw(ignored);
+      expect(result && "ignored" in result).toBe(true);
+    }
+    // A partial approval through the updated path stays partial.
+    const partial = paddleEvent("adjustment.updated", { ...base, id: "adj_live_3", status: "approved", type: "partial", totals: { subtotal: "100", tax: "0", total: "100" } });
+    const partialEvt = await asEvent(raw(partial));
+    expect(partialEvt?.fullRefund).toBe(false);
+  });
+
   it("fails at construction when the webhook secret is missing in production", () => {
     const envWas = process.env.NODE_ENV;
     const envPaddleWas = process.env.PADDLE_ENVIRONMENT;

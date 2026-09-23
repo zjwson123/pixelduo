@@ -48,7 +48,11 @@ services:
       SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-}
       SENTRY_RELEASE: ${SENTRY_RELEASE:-}
       IMAGE_MODERATION: ${IMAGE_MODERATION:-0}
-      VISION_MODERATION_MODEL: ${VISION_MODERATION_MODEL:-gpt-5.4}
+      # Default must match lib/keys.ts and .env.example (gpt-5.6-luna): every
+      # anchor used to pin gpt-5.4, a model the gateway does not serve, so a
+      # containerised audit failed on every image — fail-closed (jobs refund) but
+      # it invites "fixing" it by turning IMAGE_MODERATION off.
+      VISION_MODERATION_MODEL: ${VISION_MODERATION_MODEL:-gpt-5.6-luna}
       # Knobs the code reads and .env.example documents which no anchor named —
       # so in a container they were unreachable, because the anchor is the only
       # path an env var has into one. IMAGE_NSFW_ENDPOINT is the consequential
@@ -61,6 +65,18 @@ services:
       AUTH_MAIL_HOURLY_LIMIT: ${AUTH_MAIL_HOURLY_LIMIT:-}
       SENTRY_TRACES_SAMPLE_RATE: ${SENTRY_TRACES_SAMPLE_RATE:-}
       TRUST_X_REAL_IP: ${TRUST_X_REAL_IP:-0}
+      # Social sign-in (all four, or lib/auth.ts registers nothing) and the
+      # per-route limit knobs — none of these was named by any anchor, so a
+      # container deployment could neither enable OAuth nor tighten a limit.
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+      MIDDLEWARE_AUTH_LIMIT: ${MIDDLEWARE_AUTH_LIMIT:-}
+      MIDDLEWARE_API_LIMIT: ${MIDDLEWARE_API_LIMIT:-}
+      REGISTER_RATE_LIMIT: ${REGISTER_RATE_LIMIT:-}
+      OAUTH_CALLBACK_RATE_LIMIT: ${OAUTH_CALLBACK_RATE_LIMIT:-}
+      OUTBOUND_TIMEOUT_MS: ${OUTBOUND_TIMEOUT_MS:-}
       # The endpoint half of the assistant's credential pair: lib/keys.ts
       # resolves key and endpoint together and ignores a half-set pair, so this
       # must travel with DEEPSEEK_API_KEY. The dev stack normally leaves both

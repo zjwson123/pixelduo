@@ -169,27 +169,58 @@ function baseUrl(): string {
 // stream and had no ceiling at all, so N source addresses produced N×480 mails
 // per day to one mailbox.
 //
-// Exceeding it never corrupts state: the caller skips the SEND (and, for the
-// reset route, the token rotation with it, so a link already in the user's
-// inbox keeps working) and the failure is announced in the log. It is a valve
-// for an emergency, not a policy — 300/hour is far above any real signup flow.
+// The budget is SPLIT BY STREAM, which is the fix for a hole the single counter
+// had: `/api/register` is the cheap way to spend it (10/hour/IP and no session
+// needed, while the reset route costs 5/15min/IP plus a known address, and its
+// per-account cap applies only when the address exists). One shared counter
+// therefore let a signup flood suppress PASSWORD RECOVERY for everyone for the
+// rest of the hour — the highest-value mail here, and the only self-service way
+// out of a login-guard lockout — for the price of the least valuable one. Two
+// counters whose limits sum to the same total keep the SMTP-quota bound while
+// making the two streams unable to starve each other: exhausting verification
+// leaves the reset budget untouched, and vice versa. Verified mail is the
+// volume stream (every signup, plus resends) and gets the larger share.
+//
+// Exceeding a ceiling never corrupts state: the caller skips the SEND (and, for
+// the reset route, the token rotation with it, so a link already in the user's
+// inbox keeps working). It is a valve for an emergency, not a policy — 300/hour
+// is far above any real signup flow.
 const AUTH_MAIL_WINDOW_MS = 3600_000;
 const DEFAULT_AUTH_MAIL_LIMIT = 300;
-let lastAuthMailCapLog = 0;
+// The recovery stream is the smaller slice: it needs far less throughput, and
+// an attacker who wants to block recovery should have to spend the harder
+// reset-side budget to do it rather than the trivial register-side one.
+const RESET_MAIL_SHARE = 1 / 3;
+let lastAuthMailCapLog: Record<string, number> = {};
 
-// Reserve one slot in the hourly budget. False means "do not send": check this
-// BEFORE creating the token a mail would carry, so a suppressed send cannot
-// invalidate a link the user already has.
-export async function reserveAuthMailSend(): Promise<boolean> {
-  const limit = envLimit(process.env.AUTH_MAIL_HOURLY_LIMIT, DEFAULT_AUTH_MAIL_LIMIT);
-  const r = await rateLimit("authmail:global", limit, AUTH_MAIL_WINDOW_MS);
+export type AuthMailKind = "verify" | "reset";
+
+function authMailBudget(kind: AuthMailKind, total: number): number {
+  const reset = Math.max(1, Math.floor(total * RESET_MAIL_SHARE));
+  return kind === "reset" ? reset : Math.max(1, total - reset);
+}
+
+// Reserve one slot in a stream's hourly budget. False means "do not send":
+// check this BEFORE creating the token a mail would carry, so a suppressed send
+// cannot invalidate a link the user already has.
+export async function reserveAuthMailSend(kind: AuthMailKind): Promise<boolean> {
+  const total = envLimit(process.env.AUTH_MAIL_HOURLY_LIMIT, DEFAULT_AUTH_MAIL_LIMIT);
+  const limit = authMailBudget(kind, total);
+  const r = await rateLimit(`authmail:${kind}`, limit, AUTH_MAIL_WINDOW_MS);
   if (r.ok) return true;
   const now = Date.now();
-  if (now - lastAuthMailCapLog > AUTH_MAIL_WINDOW_MS) {
-    lastAuthMailCapLog = now;
-    console.error(
-      `[mail] auth mail ceiling reached (${limit}/hour) — verification and reset mails are being skipped until the window rolls over`,
-    );
+  // Throttled to one report per window per stream per process: the operator has
+  // to be able to see this (it is the only signal that users are silently not
+  // receiving links — the alternative was a console line nobody reads), but it
+  // must not become a flood of its own.
+  if (now - (lastAuthMailCapLog[kind] ?? 0) > AUTH_MAIL_WINDOW_MS) {
+    lastAuthMailCapLog[kind] = now;
+    const message =
+      `[mail] ${kind} mail ceiling reached (${limit}/hour${
+        kind === "reset" ? "" : `, of a ${total}/hour total`
+      }) — ${kind === "reset" ? "password reset" : "verification"} mails are being skipped until the window rolls over`;
+    console.error(message);
+    captureError(new Error(message), { scope: "auth-mail-ceiling", stream: kind, limit });
   }
   return false;
 }

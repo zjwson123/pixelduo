@@ -158,8 +158,13 @@ export async function register() {
       assertProductionConfig();
       await assertPaymentProviderUsable();
     } catch (e) {
-      console.error(`[fatal] refusing to start: ${e instanceof Error ? e.message : String(e)}`);
-      process.exit(1);
+      // Write to stderr and exit from the write callback: Docker captures
+      // stdout as a PIPE (not a TTY), where a console.log write is asynchronous
+      // and process.exit() can drop it — the operator then sees a bare restart
+      // loop with no stated reason, which is the exact failure this line exists
+      // to prevent. The exit still happens, so the guarantee is unchanged.
+      const message = `[fatal] refusing to start: ${e instanceof Error ? e.message : String(e)}`;
+      process.stderr.write(`${message}\n`, () => process.exit(1));
     }
     warnOnHalfSetIntegrations();
     await import("./sentry.server.config");

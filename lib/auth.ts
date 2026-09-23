@@ -255,6 +255,29 @@ export function hasUsablePassword(passwordHash: string | null | undefined): bool
   return typeof passwordHash === "string" && passwordHash.startsWith("$2");
 }
 
+// The re-auth guard for the routes that ask for the account password
+// (2fa/setup, 2fa/confirm, 2fa/disable, account/keys, account/delete). An
+// account created through Google/GitHub has NO password — its `passwordHash` is
+// a random hex placeholder — so bcrypt.compare can never succeed and all five
+// routes answered "wrong password" forever, with nothing anywhere able to tell
+// a placeholder from a password its owner forgot. Enabling 2FA, minting a
+// pd_live_ key and the erasure endpoint that docs/compliance/privacy.md names
+// as the deletion path were dead ends for those accounts.
+//
+// Returns the error fail() should answer with, or null when the account can
+// answer the question. Refusing (rather than exempting the compare) is
+// deliberate: an OAuth identity alone must not be enough to bind someone's
+// authenticator or erase the account, and the mailbox is a way out that already
+// exists — an OAuth account's address is verified, so /forgot-password can set
+// a password for it. Hence a message that names the next step instead of a bare
+// refusal. `cannot-` is what fail() maps to a 400 (lib/api.ts).
+export function passwordReauthRefusal(passwordHash: string | null | undefined): Error | null {
+  if (hasUsablePassword(passwordHash)) return null;
+  return new Error(
+    "cannot-reauth-oauth: this account signs in with a social provider and has no password yet — set one with “Forgot password”, then try again",
+  );
+}
+
 // Find-or-create a local account from a verified OAuth identity.
 //
 // `providerEmailVerified` defaults to REFUSAL, not to "no information": making

@@ -1,7 +1,7 @@
 import sharp from "sharp";
 import { getStorage } from "./storage";
 import { getVisionConfig } from "./keys";
-import { MAX_INPUT_PIXELS } from "./watermark";
+import { MAX_INPUT_PIXELS, isRasterImage } from "./watermark";
 import { hostIsPublic, isPublicPort, readJsonCapped, ssrfPinnedAgent, outboundTimeoutMs } from "./store";
 import { fetch as pinnedFetch } from "undici";
 
@@ -83,13 +83,21 @@ async function moderateWithVision(dataUrl: string): Promise<ImageAudit> {
   // refunded failure. Deployments that want no audit must unset
   // IMAGE_MODERATION (or set it to 0) — see moderationRequested().
   if (!cfg) return { checked: false, unavailable: true };
+  // Same canonical guard as the NSFW endpoint below and as fetchPublicBuffer:
+  // this request carries the operator's moderation key AND the image under
+  // audit, and the hostname was previously resolved by the global fetch with
+  // nothing checked — the rebinding shape every other outbound call in this
+  // codebase closed. A gateway that is not a public http(s) host cannot be
+  // audited (fail closed → the worker refunds the job), which is the same
+  // contract IMAGE_NSFW_ENDPOINT has; documented gateways are public hosts.
+  if (!(await isSafeEndpointUrl(cfg.baseUrl))) return { checked: false, unavailable: true };
   try {
     // Timeout after 30s so moderation cannot stall the worker pipeline.
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), outboundTimeoutMs(30_000));
     let res: Response;
     try {
-      res = await fetch(`${cfg.baseUrl}/chat/completions`, {
+      res = (await pinnedFetch(`${cfg.baseUrl}/chat/completions`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.apiKey}` },
         body: JSON.stringify({
@@ -112,7 +120,12 @@ async function moderateWithVision(dataUrl: string): Promise<ImageAudit> {
         // body — i.e. the image under audit — anywhere the Location points) to
         // an address we never validated. Same rule as every provider call.
         redirect: "manual",
-      });
+        // DNS-pinned agent: isSafeEndpointUrl above validates at check time,
+        // this re-validates at connect time, so a rebinding answer between the
+        // two cannot reach an internal address. Same pairing as the NSFW
+        // endpoint below, which had it while this path did not.
+        dispatcher: ssrfPinnedAgent,
+      }) as unknown as Response);
       // Read the body while the timer is still armed: clearing it as soon as
       // the headers land leaves the stream unbounded (see callWithKeys).
       if (!res.ok) {
@@ -146,7 +159,19 @@ const MODERATION_EDGE = 1024;
 // size "1920x1920" (~11 MB as PNG) produced an output that was never moderated
 // while the job reported success and was billed. Downscaling to a reviewable
 // edge keeps every output inside the auditable range.
-async function shrinkForAudit(buf: Buffer): Promise<Buffer> {
+// Exported so a test can pin the refusal directly (the end-to-end audit path
+// fails closed for several independent reasons, which makes it a poor witness
+// for this one).
+export async function shrinkForAudit(buf: Buffer): Promise<Buffer> {
+  // Raster-only, and for the same reason lib/watermark.ts's bake refuses SVG:
+  // `limitInputPixels` bounds DECODED pixels, not the XML parser that an SVG
+  // payload reaches first. The bytes are provider-controlled (this is the
+  // audit path for generated output), and the bake path has enforced this
+  // since the watermark was introduced while this second pipeline over the
+  // same bytes did not. Throwing (rather than shrinking something else) is
+  // what the caller needs: it turns into `unavailable`, and an unauditable
+  // output must not be delivered.
+  if (!isRasterImage(buf)) throw new Error("unsupported-image-format");
   // Same pixel ceiling as the watermark bake (lib/watermark.ts): the image
   // being shrunk is provider-controlled, so an unbounded limit here is a
   // decompression bomb on the audit path instead of the delivery path.

@@ -2,7 +2,9 @@ import sharp from "sharp";
 
 // Raster magic bytes only — provider bytes are untrusted input to libvips,
 // and an SVG payload would reach librsvg's XML parser (entity/filter abuse).
-function isRasterImage(buf: Buffer): boolean {
+// Exported because lib/safety.ts's audit downscale is a second pipeline over
+// the same bytes and had no such check.
+export function isRasterImage(buf: Buffer): boolean {
   if (buf.length >= 4 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return true; // PNG
   if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return true; // JPEG
   if (

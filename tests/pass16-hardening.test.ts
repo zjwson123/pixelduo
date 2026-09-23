@@ -520,21 +520,48 @@ describe("orphaned artifacts (pass 16)", () => {
 // 5. Auth mail ceiling, build-time metadata, split configuration
 // ---------------------------------------------------------------------------
 describe("configuration that used to be silently wrong (pass 16)", () => {
-  it("caps auth mail globally and skips the send past the ceiling", async () => {
+  it("caps auth mail per stream and skips the send past the ceiling", async () => {
     if (!redis) {
       // Without Redis the limiter is process-local and the key is shared with
       // the rest of the suite; the ceiling logic is the same code either way.
       return;
     }
-    const key = "rl:authmail:global";
+    const key = "rl:authmail:verify";
+    // BOTH counters, not just this stream's: a previous test file that exercised
+    // /forgot-password leaves rl:authmail:reset set for the rest of the hour, and
+    // the reset slice is 1 slot at this ceiling.
+    const resetKey = "rl:authmail:reset";
     await redis.del(key);
-    process.env.AUTH_MAIL_HOURLY_LIMIT = "2";
+    await redis.del(resetKey);
+    const limitWas = process.env.AUTH_MAIL_HOURLY_LIMIT;
+    process.env.AUTH_MAIL_HOURLY_LIMIT = "3";
     try {
-      expect(await reserveAuthMailSend()).toBe(true);
-      expect(await reserveAuthMailSend()).toBe(true);
-      expect(await reserveAuthMailSend()).toBe(false);
+      // 3/hour total splits into 2 verification + 1 reset (lib/mail.ts). The
+      // split is the point: a signup flood spends the verification slice and
+      // cannot touch the recovery slice, so password reset keeps working while
+      // verification mails are being skipped.
+      expect(await reserveAuthMailSend("verify")).toBe(true);
+      expect(await reserveAuthMailSend("verify")).toBe(true);
+      expect(await reserveAuthMailSend("verify")).toBe(false);
+      expect(await reserveAuthMailSend("reset")).toBe(true);
+      expect(await reserveAuthMailSend("reset")).toBe(false);
+      // ...and the reset stream is bounded independently of an exhausted
+      // verification stream, not by their sum.
+      expect(await reserveAuthMailSend("verify")).toBe(false);
+      // Two separate counters — the whole point of the split. (A fixed window
+      // increments on every call, the refused ones included, so the exact value
+      // follows the call sequence above; what these assertions pin is that the
+      // budgets are distinct keys and were charged separately.)
+      const verifyCount = Number(await redis.get(key));
+      const resetCount = Number(await redis.get(resetKey));
+      expect(verifyCount).toBeGreaterThan(0);
+      expect(resetCount).toBeGreaterThan(0);
+      expect(verifyCount).toBeGreaterThan(resetCount);
     } finally {
+      if (limitWas === undefined) delete process.env.AUTH_MAIL_HOURLY_LIMIT;
+      else process.env.AUTH_MAIL_HOURLY_LIMIT = limitWas;
       await redis.del(key);
+      await redis.del(resetKey);
     }
   });
 

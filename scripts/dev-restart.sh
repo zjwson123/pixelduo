@@ -41,8 +41,18 @@ fi
 echo "[1/3] stopping stale app + worker"
 pkill -9 -f "next start" || true
 pkill -9 -f "next-server" || true
-pkill -9 -f "tsx scripts/worker" || true
+# The real command line is `node --require …/tsx/dist/preflight.cjs --import …
+# scripts/worker.ts` — the string "tsx scripts/worker" never occurs in it, so
+# this pattern matched nothing: every restart left the old workers polling the
+# same queue (twenty had accumulated, and jobs completed "by themselves" after
+# a restart). Verify the kill instead of trusting the pattern.
+pkill -9 -f "scripts/worker.ts" || true
 sleep 1
+stale_workers="$(ps -eo command | grep -c '[s]cripts/worker\.ts' || true)"
+if [ "$stale_workers" != "0" ]; then
+  echo "ERROR: $stale_workers worker process(es) survived the kill" >&2
+  exit 1
+fi
 if [ -n "$(lsof -ti:3000 || true)" ]; then
   echo "ERROR: port 3000 is still held: $(lsof -ti:3000 | tr '\n' ' ')" >&2
   exit 1

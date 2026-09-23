@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { zodMessage, requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped, ApiError } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
+import { passwordReauthRefusal } from "@/lib/auth";
 import { createApiKey } from "@/lib/apikey";
 import {
   verifyTotp,
@@ -71,6 +72,8 @@ export async function POST(req: Request) {
     // (lib/login-guard.ts): what this route mints outlives the session and
     // survives every revocation, so a leaked cookie must not be able to grind
     // the password here at 5 guesses/minute with nothing accumulating.
+    const refusal = passwordReauthRefusal(user.passwordHash);
+    if (refusal) return fail(refusal);
     const attempt = await reservePasswordReauth(user.email, req);
     if (!attempt.allowed) return fail(new ApiError(429, "rate-limited"));
     if (!(await bcrypt.compare(body.password, user.passwordHash))) {

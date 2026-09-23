@@ -443,8 +443,25 @@ export async function checkpointJobArtifact(
   previous: string | null,
   key: string,
 ): Promise<void> {
-  if (previous && previous !== key) await getStorage().delete(previous).catch(() => undefined);
+  // Order matters, and it is the opposite of what this did: write the
+  // checkpoint FIRST, retire the superseded object after. Deleting first meant
+  // a losing attempt — one the recovery sweep already failed and refunded, or
+  // one whose job a competing attempt has just delivered via completeJob —
+  // destroyed the artifact its own snapshot named *before* the guarded write
+  // could tell it the race was lost. If that snapshot was the delivered file
+  // (W2 claims the job while W1 is mid-phase-2, so W2's `priorKey` is K1; W1
+  // then completes and commits an Image row for K1), the job ends `done` with a
+  // row pointing at a deleted object: paid in full, gallery 404s, /api/files
+  // gone. Nothing could repair it — the pre-auth was already settled.
+  //
+  // On a refused write the throw skips the delete entirely, which is correct:
+  // the checkpoint still names `previous`, so failJob's terminal reclaim and the
+  // caller's own reclaimStoredArtifact of `storedThisAttempt` own the cleanup.
+  // reclaimStoredArtifact rather than delete() because "is this key still named
+  // by anything?" is the durable question — a key that a committed Image row
+  // points at must not be retired as superseded.
   await checkpointJobProgress(jobId, [{ key }]);
+  if (previous && previous !== key) await reclaimStoredArtifact(jobId, previous);
 }
 
 // Recover jobs stuck in "running" or "polling" after a worker crash.

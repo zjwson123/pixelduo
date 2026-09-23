@@ -1,9 +1,11 @@
-import { requireUserId, ok, fail } from "@/lib/api";
+import { requireUserId, ok, fail, enforceUserRateLimit } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 
 export async function GET() {
   try {
     const userId = await requireUserId();
+    const limited = await enforceUserRateLimit(userId, "me", 120, 60_000);
+    if (limited) return fail(limited);
     const user = await prisma.user.findUnique({
       where: { id: userId },
       select: {

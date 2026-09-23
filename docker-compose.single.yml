@@ -19,7 +19,16 @@ x-appenv: &appenv
   PADDLE_ENVIRONMENT: ${PADDLE_ENVIRONMENT:-production}
   PADDLE_WEBHOOK_SECRET: ${PADDLE_WEBHOOK_SECRET:-}
   STORAGE_DRIVER: s3
-  S3_ENDPOINT: http://storage:9000
+  # The endpoint the app PRESIGNS and hands out, not just the one it talks to
+  # from inside the network: lib/storage.ts signs against this value and
+  # app/api/v1/images/generations/[id] returns the resulting URL to the public
+  # API's callers, and the external moderation detector is handed it too — for
+  # an off-network client `http://storage:9000/…` resolves nowhere. Hardcoding
+  # the internal name (as this did) meant the documented API returned unusable
+  # image URLs and an external detector could never fetch an object, with no way
+  # to override it from .env. Set the PUBLIC endpoint (the MinIO reverse-proxy
+  # domain) in production.
+  S3_ENDPOINT: ${S3_ENDPOINT:-http://storage:9000}
   S3_REGION: us-east-1
   S3_BUCKET: pixelduo
   S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER}
@@ -38,7 +47,7 @@ x-appenv: &appenv
   SENTRY_DSN: ${SENTRY_DSN:-}
   SENTRY_ENVIRONMENT: production
   IMAGE_MODERATION: "1"
-  VISION_MODERATION_MODEL: ${VISION_MODERATION_MODEL:-gpt-5.4}
+  VISION_MODERATION_MODEL: ${VISION_MODERATION_MODEL:-gpt-5.6-luna}
   # The pair is atomic: an audit needs BOTH, and half of one must never be
   # paired with half of another source (see getVisionConfig). Left empty this
   # used to guarantee the worker refused to boot — IMAGE_MODERATION is hardcoded
@@ -75,6 +84,21 @@ x-appenv: &appenv
   # Only for a deployment whose ingress sets X-Real-IP; with nothing setting it,
   # trusting the header hands every per-IP limiter a client-chosen bucket.
   TRUST_X_REAL_IP: ${TRUST_X_REAL_IP:-0}
+  # Social sign-in: lib/auth.ts enables the providers only when all four are set,
+  # and no anchor used to name any of them (see docker-compose.prod.yml).
+  GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+  GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+  GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+  GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+  # Named by the boot assertion's remedy ("set MAIL_DEV_MODE=1 to accept a
+  # log-only mailer") but reachable only in the local compose.
+  MAIL_DEV_MODE: ${MAIL_DEV_MODE:-0}
+  MIDDLEWARE_AUTH_LIMIT: ${MIDDLEWARE_AUTH_LIMIT:-}
+  MIDDLEWARE_API_LIMIT: ${MIDDLEWARE_API_LIMIT:-}
+  REGISTER_RATE_LIMIT: ${REGISTER_RATE_LIMIT:-}
+  OAUTH_CALLBACK_RATE_LIMIT: ${OAUTH_CALLBACK_RATE_LIMIT:-}
+  OUTBOUND_TIMEOUT_MS: ${OUTBOUND_TIMEOUT_MS:-}
+  ALIYUN_API_KEY: ${ALIYUN_API_KEY:-}
 
 services:
   caddy:

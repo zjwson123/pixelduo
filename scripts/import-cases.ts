@@ -14,6 +14,10 @@ import fs from "fs";
 import path from "path";
 import { PrismaClient } from "@prisma/client";
 import { getStorage, newStorageKey } from "../lib/storage";
+import { readBodyCapped } from "../lib/store";
+
+// Largest case image worth storing; also the streaming read cap below.
+const MAX_CASE_BYTES = 25 * 1024 * 1024;
 
 // Template sourceUrl is rendered as an href to every logged-in user: only
 // accept plain https URLs so a poisoned upstream repo can't store a
@@ -105,14 +109,18 @@ async function downloadImage(caseId: number, srcPath: string): Promise<string | 
     try {
       const res = await fetch(url, { signal: controller.signal });
       if (!res.ok) return null;
-      buf = Buffer.from(await res.arrayBuffer());
+      // Capped while STREAMING, not after: reading the whole body first made
+      // the 25MB check below too late to be the limit — a hostile or wrong
+      // upstream (or a redirect to a huge file) allocated whatever it liked.
+      // Same helper every app path uses.
+      buf = await readBodyCapped(res, MAX_CASE_BYTES);
     } catch {
       return null;
     } finally {
       clearTimeout(timer);
     }
   }
-  if (!buf || buf.length > 25 * 1024 * 1024) return null;
+  if (!buf || buf.length > MAX_CASE_BYTES) return null;
   const key = newStorageKey("jpg");
   await getStorage().put(key, buf, "image/jpeg");
   return key;
