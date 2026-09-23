@@ -95,12 +95,29 @@ test("password reset: the emailed link rotates the credential and kills sessions
   const key = await mintKey(page, oldPassword);
   expect(await v1Status(page, key)).toBe(400);
 
-  await page.locator("button", { hasText: "Sign out" }).click();
-  await page.waitForResponse(
-    (r) => r.url().includes("/api/auth/signout") && r.request().method() === "POST",
-  );
+  // Sign out. Assert the END STATE (the session is gone) rather than the
+  // request that clears it: the click can land before hydration — then no POST
+  // is ever sent and `waitForResponse` burns its whole timeout — and even when
+  // it fires, signOut() redirects to the callbackUrl ("/") right after the
+  // response resolves, which races our own navigation (ERR_ABORTED, or
+  // "Navigation to /forgot-password is interrupted by another navigation to
+  // /"). Both were observed on CI for this spec. 2fa.spec.ts hit the same race
+  // and self-heals the same way; /api/me is the cheapest way to read the end
+  // state, since the reset flow below assumes a signed-out browser.
+  await expect(async () => {
+    const signOut = page.locator("button", { hasText: "Sign out" });
+    if (await signOut.count()) await signOut.click({ timeout: 5000 });
+    await expect
+      .poll(() => page.evaluate(() => fetch("/api/me").then((r) => r.status)), { timeout: 10_000 })
+      .toBe(401);
+  }).toPass({ timeout: 45_000 });
 
-  await page.goto("/forgot-password");
+  await expect(async () => {
+    await page.goto("/forgot-password");
+    await expect(page.locator("#email")).toBeVisible({ timeout: 3000 });
+    await expect(page).toHaveURL(/\/forgot-password$/, { timeout: 3000 });
+  }).toPass({ timeout: 45_000 });
+
   await page.fill("#email", email);
   await page.click('button[type="submit"]');
   await expect(page.locator("p", { hasText: "a reset link is on its way" })).toBeVisible();
