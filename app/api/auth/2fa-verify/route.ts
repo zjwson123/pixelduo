@@ -24,12 +24,23 @@ const schema = z
 // create the real session.
 export async function POST(req: Request) {
   try {
-    const limited = await enforceRateLimit(req, "2fa", 5, 60_000);
-    if (limited) return limited;
     const su = await requirePartialSession();
     if (!su.totpPending) return fail(new ApiError(403, "2fa-required"));
     const userLimited = await enforceUserRateLimit(su.id, "2fa-verify", 5, 60_000);
     if (userLimited) return fail(userLimited);
+    // Both buckets sit AFTER the session check, and the order is the point: the
+    // per-IP one used to run first, before any credential was examined, so five
+    // anonymous junk bodies ({"token":"123456"}) emptied it and every legitimate
+    // user behind that IP got `429 rate-limited` with no code ever compared —
+    // a second-factor lockout anyone could trigger and sustain, per IP, from
+    // anywhere. Keying it on the account instead is what actually protects
+    // against a stolen partial session (an attacker with the password must
+    // still grind the code); the work a credential-less caller can do here is
+    // bounded one layer up, by proxy.ts's 40/min per-IP auth bucket — the same
+    // arrangement every other route relies on, since `requireVerifiedUser` also
+    // runs before any route-level limiter.
+    const limited = await enforceRateLimit(req, "2fa", 5, 60_000);
+    if (limited) return limited;
     // Cumulative brake, consulted before anything is compared: the per-minute
     // limits above bound a burst, this bounds the campaign (see lib/twofa.ts).
     // It applies to backup codes too — the account is under second-factor

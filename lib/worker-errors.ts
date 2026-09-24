@@ -21,6 +21,14 @@ export function isPermanentProviderError(msg: string): boolean {
     // completeJob): retrying re-bills the provider for output that will be
     // refused again.
     /job-cancelled-refunded-order/i.test(msg) ||
+    // An oversized provider payload is a property of the RESPONSE, not of our
+    // request, so the retry re-calls the billed endpoint and pays again for the
+    // images that were not checkpointed — the same three-times-billed shape as
+    // the download class below, which it is the twin of (both are size refusals
+    // in lib/store.ts). `download-too-large` was on this list; its encode-side
+    // sibling was not, so a gateway answering with a >40MB b64_json quietly
+    // bought the same generation three times and still delivered nothing.
+    /image-too-large/i.test(msg) ||
     /fetch failed|blocked-internal|blocked-port|invalid-url|download-too-large|too-many-redirects|download failed/i.test(
       msg,
     )

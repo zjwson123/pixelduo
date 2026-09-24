@@ -57,8 +57,16 @@ export async function GET(req: Request) {
   try {
     const limited = await enforceRateLimit(req, "health", 60, 60_000);
     if (limited) return limited;
-    const { body } = await probe();
+    const { body, ok: healthy } = await probe();
+    // The status has to carry the verdict, because every consumer reads the
+    // status and none of them parses the body: the container healthcheck in all
+    // three compose files is `wget -qO-` (wget's exit code IS the HTTP status),
+    // and scripts/ci-local.sh waits on `curl -fsS`. Answering 200 for
+    // `{"ok":false}` therefore reported a database-down container as healthy
+    // forever — precisely the state the check exists to surface — and the only
+    // 503 this handler could produce was from its own exception path.
     return NextResponse.json(body, {
+      status: healthy ? 200 : 503,
       headers: { "Cache-Control": "no-store" },
     });
   } catch (e) {

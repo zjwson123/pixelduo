@@ -31,6 +31,12 @@ const schema = z.object({
 export async function GET() {
   try {
     const userId = await requireVerifiedUser();
+    // The one authenticated read left without its own budget when its siblings
+    // got one: each call costs a sessionVersion read plus a key scan, and the
+    // only thing bounding it was the middleware's per-IP bucket, which IP
+    // rotation lifts. Same treatment as ledger / gallery / orders / me.
+    const listLimited = await enforceUserRateLimit(userId, "apikey-list", 60, 60_000);
+    if (listLimited) return fail(listLimited);
     const keys = await prisma.apiKey.findMany({
       where: { userId },
       orderBy: { createdAt: "desc" },

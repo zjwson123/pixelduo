@@ -1,5 +1,5 @@
 import Redis from "ioredis";
-import { getMailer } from "./mail";
+import { getMailer, reserveAuthMailSend } from "./mail";
 import { prisma } from "./prisma";
 import { clientIp } from "./rate-limit";
 import { clearTwoFactorFailures } from "./twofa";
@@ -329,6 +329,26 @@ export function refundPasswordReauth(email: string, req: Request): Promise<void>
 // real spray from the other side. Throttled to one mail per hour per address
 // through a Redis flag, so the attacker cannot use this as a mail bomb against
 // someone whose address they know. Returns true when a mail was sent.
+//
+// It also has to answer to the global mail ceiling, and used to be the one
+// sender that did not: every other auth mail goes through
+// reserveAuthMailSend, while this called the mailer directly, so the
+// deployment's AUTH_MAIL_HOURLY_LIMIT (300/hour by default, the operator's only
+// brake on SMTP spend and sender reputation) simply did not apply here. The
+// per-address flag bounds repeats against ONE address, not volume: N addresses
+// under attack (enumerable through the register route's 409, an accepted
+// residual) meant N alarming "someone is attacking your account" mails an hour
+// out of the operator's verified sending identity, and the shared quota they
+// drained is what makes the CEILINGED verify and reset streams start answering
+// "sent" while sending nothing.
+//
+// Pulled from the same stream as verification rather than given a fourth share
+// of its own: a ceiling with a bucket per sender is not a ceiling. It cannot
+// hijack that stream either — firing once costs the attacker 25 counted
+// failures spread over at least three source IPs (the per-(email,IP) cap is 10),
+// which is far more expensive than the one request the register route charges
+// for the same slot, so this adds no cheaper way to silence verification than
+// the one that already existed.
 export async function alertLoginAbuse(email: string): Promise<boolean> {
   if ((await loginFailures(email)) < MAX_EMAIL_FAILURES) return false;
   const key = `loginalert:${email.toLowerCase()}`;
@@ -344,6 +364,12 @@ export async function alertLoginAbuse(email: string): Promise<boolean> {
     },
   );
   if (!claimed) return false;
+  // The flag is claimed BEFORE the budget is reserved, deliberately: a refused
+  // reservation must not be handed back, or an attacker who keeps failing logins
+  // after the alert fires would leak one slot per attempt through the retry. The
+  // cost is that an alert suppressed by an exhausted ceiling is not retried
+  // within the hour — the same treatment every other ceilinged mail gets.
+  if (!(await reserveAuthMailSend("verify"))) return false;
   const failures = await loginFailures(email);
   try {
     const base = process.env.NEXTAUTH_URL ?? "https://pixelduo.ai";

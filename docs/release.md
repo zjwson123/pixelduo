@@ -33,7 +33,7 @@
 # image-gen-web / image-gen-worker），所以是"先构建、再切到 prod.yml 启动"：
 # NEXTAUTH_URL 必须在这里给出：静态页面的 og:url / og:image 是构建期写死的
 # （app/layout.tsx 的 metadataBase，见 lib/site.ts），缺了就烧成 localhost。
-NEXTAUTH_URL="https://pixelduo.ai" docker compose build web worker rollover
+NEXTAUTH_URL="https://pixelduo.ai" docker compose build migrate web worker rollover
 docker compose -f docker-compose.prod.yml up -d --scale worker=3
 ```
 

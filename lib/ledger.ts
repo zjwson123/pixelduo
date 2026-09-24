@@ -232,10 +232,27 @@ export async function cycleUsageTx(
     });
     const jobIds = jobs.filter((j) => consumesGrant(j.consumption, funding.id)).map((j) => j.id);
     if (jobIds.length) {
-      const spent = await tx.ledgerEntry.findMany({
-        where: { userId, refId: { in: jobIds }, type: { in: ["PRE_AUTH", "REFUND"] } },
-        select: { type: true, creditsDelta: true, createdAt: true },
-      });
+      const spent: Array<{ type: string; creditsDelta: number; createdAt: Date }> = [];
+      // Chunked, and this is load-bearing rather than tidy: Prisma sends an
+      // `in` list as one bind parameter per element and PostgreSQL refuses a
+      // prepared statement past 32,767 of them. A plain `refId: { in: … }` scan
+      // happens to survive (Prisma splits a lone list itself) but this query
+      // also carries `type: { in: […] }`, and the pair defeats that splitting —
+      // the whole call throws `too many bind variables`. `fulfillOrder` awaits
+      // this inside the payment webhook's transaction, so a heavy account (33k
+      // jobs created since its cycle grant; ~1,100/day, well inside what five
+      // inflight jobs can push) made its next RENEWAL fail with a 500 that no
+      // retry can ever clear: the payment is taken, the credits are not
+      // granted, and the provider's retry stream is aimed at the endpoint every
+      // customer's payments share.
+      for (const part of idChunks(jobIds)) {
+        spent.push(
+          ...(await tx.ledgerEntry.findMany({
+            where: { userId, refId: { in: part }, type: { in: ["PRE_AUTH", "REFUND"] } },
+            select: { type: true, creditsDelta: true, createdAt: true },
+          })),
+        );
+      }
       for (const e of spent) {
         // Clawed-back (REVOKE) quota is gone: counting only PRE_AUTH/REFUND
         // treated a fully refunded cycle as "granted and unused", so the next
@@ -299,6 +316,22 @@ export async function cycleUsageTx(
     fundingRefId: funding?.refId ?? null,
     fundingExpiresAt: funding?.expiresAt ?? null,
   };
+}
+
+// PostgreSQL refuses a prepared statement with more than 32,767 bind
+// parameters, and Prisma sends one per element of an `in` list. Prisma splits a
+// lone list itself, but not when the same statement carries a second one, and
+// never for `updateMany` — so every id list that can grow with how much the
+// account has been USED goes through here. Both callers below were real
+// failures: a 33k-job cycle made a paid renewal 500 forever (ledger), and 33k
+// expired grants for one account stalled the expiry sweep for every other
+// account (`progressed` stayed false, which breaks the whole batch loop).
+export const ID_CHUNK = 5_000;
+export function idChunks<T>(items: T[], size = ID_CHUNK): T[][] {
+  if (items.length <= size) return items.length ? [items] : [];
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
 }
 
 // Did a job's pre-auth draw from this specific grant?

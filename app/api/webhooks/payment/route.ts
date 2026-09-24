@@ -1,4 +1,5 @@
 import { ok, fail, enforceRateLimit, readBodyCapped } from "@/lib/api";
+import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { fulfillOrder, revokeOrderCreditsTx, revokePlanEntitlementTx } from "@/lib/ledger";
 import { getPaymentProvider } from "@/lib/payments";
@@ -41,6 +42,11 @@ function assertPaymentMatchesOrder(
     throw new Error(`payment-underpaid: paid ${event.paidAmountUsd}, order is ${order.amountUsd}`);
   }
 }
+
+// A lost race for the PaymentEvent row: the event is already recorded, so this
+// delivery is a duplicate, not a failure. Its own type so the transaction's
+// caller can ACK it instead of turning it into a 500.
+class DuplicatePaymentEvent extends Error {}
 
 // Idempotent webhook: same eventId processed once. Fully unauthenticated
 // before the signature check, so bound the work first: rate-limit and refuse
@@ -88,15 +94,32 @@ export async function POST(req: Request) {
       if (event.type === "refunded" && !order) {
         throw new Error("refund-webhook-order-unresolved");
       }
-      await tx.paymentEvent.create({
-        data: {
-          provider: event.provider,
-          eventId: event.eventId,
-          orderId: order?.id ?? event.orderId ?? null,
-          // Persist only PII-redacted payloads (GDPR/PIPL).
-          rawJson: JSON.stringify(sanitizeWebhookPayload(event.raw)),
-        },
-      });
+      // Two deliveries of the SAME event can be in flight at once: a provider
+      // retry that lands while the first is still waiting on a row lock. Both
+      // pass the findUnique pre-check above, so the loser's insert blocks on the
+      // unique index and fails P2002, which aborted this transaction and
+      // surfaced as a 500. Nothing is ever granted twice (the winner holds the
+      // row), but the 500 is not free: it counts as a FAILED delivery against
+      // the endpoint whose failure streak is what gets endpoints disabled — the
+      // one URL every customer's payment arrives on. A lost insert race proves
+      // the event is already recorded, so the honest answer is the same ACK the
+      // pre-check gives.
+      try {
+        await tx.paymentEvent.create({
+          data: {
+            provider: event.provider,
+            eventId: event.eventId,
+            orderId: order?.id ?? event.orderId ?? null,
+            // Persist only PII-redacted payloads (GDPR/PIPL).
+            rawJson: JSON.stringify(sanitizeWebhookPayload(event.raw)),
+          },
+        });
+      } catch (e) {
+        if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
+          throw new DuplicatePaymentEvent();
+        }
+        throw e;
+      }
       if (event.type === "paid") {
         if (order) {
           // Only a pending order can still be granted anything (fulfillOrder
@@ -195,7 +218,13 @@ export async function POST(req: Request) {
         }
       }
       return null;
+    }).catch((e) => {
+      // The loser of a concurrent same-event race — the row already exists, so
+      // this delivery has nothing left to do and is ACKed, not 500'd.
+      if (e instanceof DuplicatePaymentEvent) return "duplicate" as const;
+      throw e;
     });
+    if (mail === "duplicate") return ok({ processed: true, duplicate: true });
     if (mail?.email) {
       try {
         if (mail.kind === "refund") {

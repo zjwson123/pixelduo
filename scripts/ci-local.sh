@@ -51,7 +51,20 @@ export NEXTAUTH_URL="http://localhost:3100"
 # Makes the log-only mailer write each message to disk so a spec can read the
 # link out of it (lib/mail.ts DevMailer). Fresh per run: a stale file would hand
 # a spec the previous run's token.
-export MAIL_DEV_DIR="${MAIL_DEV_DIR:-/tmp/pd-ci-mail}"
+# ${VAR:-default} only defends the UNSET case: a MAIL_DEV_DIR already exported in
+# the caller's shell (or a typo'd CI variable) was passed straight to `rm -rf`,
+# i.e. this script deleted whatever directory the environment named. Refuse
+# anything that is not recognisably this script's own scratch directory, and
+# never let "/" or an empty value through.
+DEFAULT_MAIL_DEV_DIR="/tmp/pd-ci-mail"
+case "${MAIL_DEV_DIR:-$DEFAULT_MAIL_DEV_DIR}" in
+  /tmp/pd-ci-mail|/tmp/pd-ci-mail/*|/tmp/*|/var/folders/*|"$PWD"/.tmp*) ;;
+  *)
+    echo "refusing to rm -rf MAIL_DEV_DIR='$MAIL_DEV_DIR' — set it to a directory under /tmp (or unset it)" >&2
+    exit 1
+    ;;
+esac
+export MAIL_DEV_DIR="${MAIL_DEV_DIR:-$DEFAULT_MAIL_DEV_DIR}"
 rm -rf "$MAIL_DEV_DIR" && mkdir -p "$MAIL_DEV_DIR"
 # The e2e stage shares one Redis and one source IP across every spec, and unlike
 # CI (which gets a fresh instance) repeated local runs accumulate the per-IP

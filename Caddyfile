@@ -1,5 +1,9 @@
 # PixelDuo production reverse proxy — automatic HTTPS via Let's Encrypt.
-# CADDY_DOMAIN=localhost disables TLS (local prod-mode testing).
+# CADDY_DOMAIN=localhost keeps automatic HTTPS ON (Caddy treats localhost as a
+# local address and issues a certificate from its own internal CA), so a
+# prod-mode local run answers https with a certificate your client does not
+# trust — it does NOT serve plain http. For an http-only local smoke test set
+# CADDY_DOMAIN=":80", or add "auto_https off" to the site block.
 {$CADDY_DOMAIN} {
 	encode gzip
 	reverse_proxy web:3000

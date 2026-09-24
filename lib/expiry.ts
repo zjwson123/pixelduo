@@ -1,6 +1,6 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "./prisma";
-import { addCreditsTx, GRANT_LOCK_ORDER } from "./ledger";
+import { addCreditsTx, GRANT_LOCK_ORDER, idChunks } from "./ledger";
 import { captureError } from "./observability";
 
 const BATCH_SIZE = 200;
@@ -43,10 +43,19 @@ export async function runExpiry(): Promise<number> {
           );
           const sum = grants.reduce((acc, g) => acc + g.remaining, 0);
           if (sum <= 0) return 0;
-          await tx.creditGrant.updateMany({
-            where: { id: { in: grants.map((g) => g.id) }, remaining: { gt: 0 } },
-            data: { remaining: 0 },
-          });
+          // Chunked: `updateMany` never gets Prisma's automatic `in` splitting,
+          // so one account holding 32,768+ expired grants threw `too many bind
+          // variables` here. The throw was caught below as a per-user skip —
+          // which left `progressed` false and therefore broke OUT of the batch
+          // loop, so that account's unswept credits stopped the sweep for every
+          // other account too, indefinitely. The rows are already locked FOR
+          // UPDATE by the statement above, so splitting costs nothing.
+          for (const part of idChunks(grants.map((g) => g.id))) {
+            await tx.creditGrant.updateMany({
+              where: { id: { in: part }, remaining: { gt: 0 } },
+              data: { remaining: 0 },
+            });
+          }
           await addCreditsTx(tx, userId, "EXPIRE", -sum, "none", null, `expired credits (${grants.length} grant(s))`);
           return sum;
         })

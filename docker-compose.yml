@@ -53,6 +53,14 @@ services:
       # containerised audit failed on every image — fail-closed (jobs refund) but
       # it invites "fixing" it by turning IMAGE_MODERATION off.
       VISION_MODERATION_MODEL: ${VISION_MODERATION_MODEL:-gpt-5.6-luna}
+      # The endpoint and key halves that make that model usable. Both production
+      # anchors name them; this one did not, so an operator configuring vision
+      # moderation here — the documented .env.example pair — had it dropped in
+      # the container, and getVisionConfig() then found no env override at all
+      # and silently fell back to the cc-proxy modelverse gateway: a different
+      # endpoint on a different credential than the one just configured.
+      VISION_MODERATION_BASE_URL: ${VISION_MODERATION_BASE_URL:-}
+      VISION_MODERATION_API_KEY: ${VISION_MODERATION_API_KEY:-}
       # Knobs the code reads and .env.example documents which no anchor named —
       # so in a container they were unreachable, because the anchor is the only
       # path an env var has into one. IMAGE_NSFW_ENDPOINT is the consequential
@@ -80,14 +88,31 @@ services:
       # The endpoint half of the assistant's credential pair: lib/keys.ts
       # resolves key and endpoint together and ignores a half-set pair, so this
       # must travel with DEEPSEEK_API_KEY. The dev stack normally leaves both
-      # empty and reads the mounted cc-proxy config instead.
+      # empty and reads the mounted cc-proxy config instead — and naming only
+      # this half meant that setting the pair in .env (the documented way)
+      # created exactly the half-set state the atomic resolver refuses: the key
+      # was absent, so the pair resolved to null AND the cc-proxy fallback was
+      # skipped, and the assistant quietly used its offline expander.
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-}
+      # Pinned to the in-network name ON PURPOSE and not overridable: this single
+      # variable is both the S3 client's endpoint and the host that gets
+      # PRESIGNED into handed-out URLs, and a value an .env override could reach
+      # (http://localhost:9000 for a host-run app) resolves to the container
+      # itself. The production composes take ${S3_ENDPOINT} because there the
+      # bucket is off-network and one public address serves both roles.
       S3_ENDPOINT: http://storage:9000
       S3_REGION: us-east-1
       S3_BUCKET: pixelduo
       S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-pixelduo}
       S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-pixelduo-secret}
       S3_FORCE_PATH_STYLE: "true"
+      # The vendor's own spelling of the Aliyun/DashScope credential. Normally
+      # supplied by the mounted cc-proxy config here, but an operator who sets it
+      # in .env has it dropped unless the anchor names it (lib/keys.ts accepts
+      # either name; the production anchors name only ALIYUN_API_KEY, which is
+      # fixed there too).
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
     depends_on:
       db:
         condition: service_healthy

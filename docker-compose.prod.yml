@@ -1,5 +1,7 @@
 # Production deployment: HTTPS (Caddy) + managed services (Postgres/Redis/S3).
-# Build images locally first: docker compose build web worker rollover
+# Build images locally first: docker compose build migrate web worker rollover
+# (migrate has no build: of its own — it reuses the worker image, so naming it
+# here is what guarantees the image it starts actually exists)
 # then: docker compose -f docker-compose.prod.yml up -d
 name: pixelduo-prod
 
@@ -91,9 +93,33 @@ x-appenv: &appenv
   # Image-generation keys for the DashScope (Aliyun) family. Its models are
   # disabled, but the key is still what lib/keys.ts resolves for that gateway.
   ALIYUN_API_KEY: ${ALIYUN_API_KEY:-}
+  # Same credential under the vendor's own name: getAliyunKey() takes either
+  # (lib/keys.ts) and .env.example documents this spelling, but no anchor named
+  # it, so it was silently discarded in every container deployment.
+  DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+  # Read by sentry.server.config.ts, sentry.edge.config.ts,
+  # instrumentation-client.ts and lib/observability.ts to tag events with the
+  # build they came from. Only the local compose named it, so no production
+  # deployment could set one and every event arrived with no release — the
+  # "which deploy introduced this" question was unanswerable.
+  SENTRY_RELEASE: ${SENTRY_RELEASE:-}
   HOSTNAME: 0.0.0.0
 
 services:
+  # Schema migrations, ahead of anything that touches the tables. The other two
+  # compose files have this service; this one did not, while docs/deploy.md and
+  # docs/release.md both told the operator that migrations run as part of the
+  # deploy. So the documented flow — `docker compose -f docker-compose.prod.yml
+  # up -d` against a fresh managed Postgres — brought up a stack with NO schema,
+  # and it reported healthy: /api/health probes the connection with `SELECT 1`,
+  # which needs no tables, so the container healthcheck and Caddy both passed
+  # while every application route answered `relation "User" does not exist`.
+  migrate:
+    image: ${IMAGE_WORKER:-image-gen-worker:latest}
+    command: npx prisma migrate deploy
+    environment: *appenv
+    restart: "no"
+
   caddy:
     image: caddy:2-alpine
     ports:
@@ -115,6 +141,11 @@ services:
     environment: *appenv
     expose:
       - "3000"
+    # The schema has to exist before the first request. Without this the app
+    # started anyway and answered 500 on every route — see the migrate service.
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health"]
       interval: 10s
@@ -127,6 +158,9 @@ services:
     environment:
       <<: *appenv
       MOCK_IMAGE_PROVIDER: "0"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   rollover:

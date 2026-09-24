@@ -18,6 +18,12 @@ x-appenv: &appenv
   PADDLE_API_KEY: ${PADDLE_API_KEY:-}
   PADDLE_ENVIRONMENT: ${PADDLE_ENVIRONMENT:-production}
   PADDLE_WEBHOOK_SECRET: ${PADDLE_WEBHOOK_SECRET:-}
+  # Checkout return URLs. Named by docker-compose.yml and docker-compose.prod.yml
+  # but not by this anchor, so an operator who set them (documented in
+  # .env.example and docs/deploy.md) got the defaults
+  # (${NEXTAUTH_URL}/studio?paid=1) instead, silently.
+  PAYMENT_SUCCESS_URL: ${PAYMENT_SUCCESS_URL:-}
+  PAYMENT_CANCEL_URL: ${PAYMENT_CANCEL_URL:-}
   STORAGE_DRIVER: s3
   # The endpoint the app PRESIGNS and hands out, not just the one it talks to
   # from inside the network: lib/storage.ts signs against this value and
@@ -45,6 +51,12 @@ x-appenv: &appenv
   FEEDBACK_WEBHOOK_KIND: ${FEEDBACK_WEBHOOK_KIND:-feishu}
   EMAIL_VERIFY_AUTO: "0"
   SENTRY_DSN: ${SENTRY_DSN:-}
+  # Read by sentry.server.config.ts, sentry.edge.config.ts,
+  # instrumentation-client.ts and lib/observability.ts to tag events with the
+  # build they came from. Only docker-compose.yml named it, so no production
+  # deployment could set it: every event arrived without a release, and the
+  # regression question ("which deploy introduced this") was unanswerable.
+  SENTRY_RELEASE: ${SENTRY_RELEASE:-}
   SENTRY_ENVIRONMENT: production
   IMAGE_MODERATION: "1"
   VISION_MODERATION_MODEL: ${VISION_MODERATION_MODEL:-gpt-5.6-luna}
@@ -99,6 +111,11 @@ x-appenv: &appenv
   OAUTH_CALLBACK_RATE_LIMIT: ${OAUTH_CALLBACK_RATE_LIMIT:-}
   OUTBOUND_TIMEOUT_MS: ${OUTBOUND_TIMEOUT_MS:-}
   ALIYUN_API_KEY: ${ALIYUN_API_KEY:-}
+  # The vendor's own name for the same credential. getAliyunKey() accepts either
+  # (lib/keys.ts) and .env.example documents this spelling, but no anchor named
+  # it, so an operator using it had it silently dropped in every container
+  # deployment.
+  DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
 
 services:
   caddy:
@@ -246,7 +263,7 @@ services:
       sh -c 'while true; do
         STAMP=$$(date +%Y%m%d-%H%M%S);
         pg_dump -Fc -f /backups/pixelduo-$${STAMP}.dump.gz;
-        ls -1t /backups/pixelduo-*.dump.gz | tail -n +$$((BACKUP_KEEP + 1)) | while read -r f; do rm -f /backups/$$f; done;
+        ls -1t /backups/pixelduo-*.dump.gz | tail -n +$$((BACKUP_KEEP + 1)) | xargs -r rm -f;
         echo "[backup] $${STAMP} written";
         sleep 86400;
       done'

@@ -122,7 +122,7 @@ git clone <repo> pixelduo && cd pixelduo
 # （app/layout.tsx 的 metadataBase，见 lib/site.ts），缺省时写成
 # http://localhost:3000 —— 页面照常 200，只有分享预览指向构建机的本地地址。
 # robots.txt / sitemap.xml 已改为请求期读取，不受构建环境影响。
-NEXTAUTH_URL="https://pixelduo.ai" docker compose build web worker rollover
+NEXTAUTH_URL="https://pixelduo.ai" docker compose build migrate web worker rollover
 
 # 2. 配置环境变量（也可用 .env.production 或密钥管理器注入）
 export DATABASE_URL="postgresql://..."
@@ -174,13 +174,15 @@ curl -sS https://pixelduo.ai/api/health \
 
 ```bash
 git pull
-NEXTAUTH_URL="https://pixelduo.ai" docker compose build web worker rollover   # 域名必须带（构建期元数据）
+NEXTAUTH_URL="https://pixelduo.ai" docker compose build migrate web worker rollover   # 域名必须带（构建期元数据）
 docker compose -f docker-compose.prod.yml up -d
 ```
 
 ### 迁移
 
-web/worker 启动前会由 CI/部署流程执行 `npx prisma migrate deploy`（迁移是幂等的）。升级含 schema 变更时先跑迁移再切流量。
+`web` / `worker` 现在 `depends_on: migrate`（`condition: service_completed_successfully`），由 compose 先跑一次 `npx prisma migrate deploy`（迁移是幂等的）再启动应用容器 —— 三个 compose 文件里都有这个服务。在此之前 prod.yml 没有 `migrate`，而本文档声称"迁移会由部署流程执行"：按文档在**空库**上 `up -d` 得到的是一个没有 schema 的栈，而且它**看起来是健康的** —— `/api/health` 的数据库探针是 `SELECT 1`，不需要任何表，于是容器健康检查和 Caddy 全部通过，而每个业务路由都在 500（`relation "User" does not exist`）。
+
+手动执行（或 CI 里单独跑）仍然可以：`docker compose -f docker-compose.prod.yml run --rm migrate`。升级含 schema 变更时先跑迁移再切流量。
 
 ### 备份与恢复
 
