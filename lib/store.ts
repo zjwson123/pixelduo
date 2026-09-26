@@ -102,9 +102,52 @@ function isPrivateAddress(address: string): boolean {
   return true; // not an IP literal → refuse
 }
 
-export const ssrfPinnedAgent = new Agent({
-  connect: { lookup: createPublicOnlyLookup() },
-});
+// The pinned agent is the CONNECT-time half of the SSRF defence, and undici's
+// `lookup` hook never runs for an IP literal: net.connect has no name to
+// resolve, so `http://127.0.0.1:9000/`, `http://[::1]/` — and the inet_aton
+// spellings the URL parser normalises — all dial loopback with the lookup
+// bypassed. Every current call site checks hostIsPublic first, so nothing was
+// reachable; the problem was that the guard is DOCUMENTED as the backstop a
+// future call site may lean on ("even if DNS rebinds between the check above and
+// the TCP connect, the connect itself refuses non-public addresses") and for
+// literals it silently was not. Dispatch is where the origin is still known, so
+// the literal case is refused there and the claim becomes true.
+class PublicOnlyAgent extends Agent {
+  constructor() {
+    // The name-resolving half (passes 6/8: validation and connect share one
+    // lookup, so a rebinding between the two cannot land).
+    super({ connect: { lookup: createPublicOnlyLookup() } });
+  }
+
+  dispatch(
+    opts: Parameters<Agent["dispatch"]>[0],
+    handler: Parameters<Agent["dispatch"]>[1],
+  ): boolean {
+    const host = literalHostname(opts.origin);
+    if (host && isPrivateAddress(host)) {
+      // The same signalling DispatcherBase.dispatch uses when the inner dispatch
+      // throws (dispatcher-base.js: `handler.onResponseError(null, err); return
+      // false`): hand the error to the handler and report "not dispatched". The
+      // null is deliberate — that is what undici itself passes there.
+      handler.onResponseError?.(null as never, new Error("blocked-internal-address"));
+      return false;
+    }
+    return super.dispatch(opts, handler);
+  }
+}
+
+export const ssrfPinnedAgent = new PublicOnlyAgent();
+
+/** The hostname of an origin, unwrapped, when it is an IP literal — else null. */
+export function literalHostname(origin: string | URL | undefined): string | null {
+  if (!origin) return null;
+  try {
+    const host = new URL(String(origin)).hostname.replace(/^\[|\]$/g, "");
+    return isIP(host) !== 0 ? host : null;
+  } catch {
+    return null;
+  }
+}
 
 // Ports permitted for any outbound fetch of a URL we do not control. Without
 // this a "public" host could still be probed on internal-ish services

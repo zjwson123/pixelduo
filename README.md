@@ -11,7 +11,7 @@
 
 ## 技术栈
 
-- Next.js 14（App Router）+ React 18 + TypeScript
+- Next.js 16（App Router）+ React 19 + TypeScript
 - **Postgres 16**（Docker Compose 本地实例；生产可换 Neon/Supabase/RDS）+ Prisma 6 迁移
 - 数据库任务队列（`jobs` 表 + worker），上游 `ImageProvider` 抽象（ModelVerse gpt-image-2 / 火山方舟 doubao-seedream-5-0-260128）
 - **积分过期体系**：`CreditGrant`（充值包 12 个月有效、订阅配额到期失效、免费积分永不过期且优先消耗）；消费 FIFO + 行锁，失败退款精确归还原 grant；**订阅到期自动降级 free**（rollover 任务），**未用完配额 30% 在续费时结转至新周期**（仅次月有效）
@@ -27,12 +27,12 @@
 - **上线就绪**：本地复刻 CI 管道 `./scripts/ci-local.sh`（generate/migrate → tsc → 单测 → 构建 → e2e，`CI-LOCAL PASSED`）；发布运行手册 [docs/release.md](docs/release.md)（env 清单/冒烟命令/监控/回滚）
 - **双语落地页**：首页 EN/中文 一键切换（`components/landing.tsx`，导航/卖点/功能/价格/页脚全量翻译，语言偏好存 localStorage）
 - **落地页 FAQ**：计费/积分有效期/退款/内容安全/API/图片归属六问（双语折叠卡片）；品牌化 404/500 页（跟随语言偏好）
-- **内容安全**：前置关键词过滤 + 后置 vision 模型图像审核（`IMAGE_MODERATION=1`，默认 gpt-5.4，命中即拦截 + 自动退款 + 删图）
+- **内容安全**：前置关键词过滤 + 后置 vision 模型图像审核（`IMAGE_MODERATION=1`，默认 gpt-5.6-luna，命中即拦截 + 自动退款 + 删图）
 - **AI 标识**：免费档 gpt-image-2 图片交付前烘焙 "PixelDuo · AI 生成" 水印（sharp，worker 容器含 Noto CJK 字体）
 - NextAuth v4（邮箱+密码 + **OAuth**，JWT 会话）、bcrypt；**邮箱验证 + 密码找回**（单次令牌存 SHA-256 哈希，24h/1h 过期；注册送 30 积分改为验证后发放，未验证账号禁止生图/签到/下单——防薅羊毛）；**登录防爆破**（Redis 按账号 10 次失败/15 分钟锁定）；**会话吊销**（`User.sessionVersion`，重置密码或 `POST /api/auth/revoke-sessions` 后旧 JWT 全部失效）；**TOTP 双因素认证**（otplib + QR，10 个一次性备用码，两步登录，部分会话被 API/页面级拦截，5 分钟单次预认证票据换真会话）；邮件走 `lib/mail.ts`：未配 `SMTP_URL` 时开发模式打印到服务日志，生产接 SES/SendGrid/Resend 等 SMTP
 - 支付壳子：`PaymentProvider` 接口 + MockProvider / **Stripe** / **Paddle**（支付宝/微信待主体接入）
 - **存储抽象**：`STORAGE_DRIVER=local`（私有目录 + 鉴权路由）或 `s3`（MinIO/R2/S3 + 预签名 URL）
-- **限流**：路由级权威限制走 **Redis 全局计数**（`REDIS_URL`，生成 20/min、注册 10/h、结账 10/min、助手 30/min；无 Redis 自动回退单机内存）；中间件内存粗筛（auth 20/min、API 300/min per IP）
+- **限流**：路由级权威限制走 **Redis 全局计数**（`REDIS_URL`，生成 20/min、注册 10/h、结账 10/min、助手 30/min；无 Redis 自动回退单机内存）；中间件内存粗筛（auth 40/min、API 300/min per IP —— 已登录请求按账号分桶，不再和同 IP 上未登录流量抢配额）
 - **Worker 健壮性**：指数退避重试（默认 3 次）、心跳、卡死恢复、终态失败 = 死信 + 退款
 - **监控告警**：Sentry（`@sentry/nextjs`），DSN 未配置时 no-op；API 500 自动上报（业务性错误过滤），worker/cron 异常带上下文上报
 - **备份**：compose `backup` 服务每日 pg_dump（`-Fc` 自定义格式）到 `./backups/`，保留 14 份；`backup-objects` 服务每日把用户图片镜像到 `./backups/objects/`（保留 N 份，可配第二桶异地备份）；恢复演练脚本 `scripts/restore-objects.sh`；手动备份 `./scripts/backup.sh` / `./scripts/backup-objects.sh`
@@ -152,9 +152,9 @@ curl http://localhost:3000/api/health
 
 注意：
 
-- **存储驱动**：compose 默认 `STORAGE_DRIVER=s3`（可用 `.env` 覆盖为 `local`）。切换后需重建相关容器：`STORAGE_DRIVER=s3 docker compose up -d --build`
+- **存储驱动**：compose 固定 `STORAGE_DRIVER=s3`，**不可用 `.env` 覆盖** —— 容器里的 `local` 是每个容器自己的可写层（worker 写、web 读不到，交付的图片全部 404，`compose down` 还会删掉），所以这里不做成开关。宿主机直接 `npm run dev` 时才用 `local`
 - **预签名 URL 的 endpoint**：compose 内部用 `http://storage:9000`，容器间可达；生产环境需把 `S3_ENDPOINT` 配成公网可达地址（如 R2/S3 的公网 endpoint 或 MinIO 反代域名），否则浏览器打不开图片
-- **生图 Key**：web/worker 容器内读不到本机 `~/.cc-proxy/config.json`，需通过环境变量注入 `MODELVERSE_IMAGE_API_KEY` / `ARK_IMAGE_API_KEY` / `DEEPSEEK_API_KEY`；没有 key 时 `MOCK_IMAGE_PROVIDER=1 docker compose up -d` 跑 mock
+- **生图 Key**：compose 会把 `~/.cc-proxy/config.json` 挂进 web/worker（本机开发用）；其它机器上没有这个文件，需要通过环境变量注入 `MODELVERSE_IMAGE_API_KEY` / `ARK_IMAGE_API_KEY` / `DEEPSEEK_API_KEY`（三个名字 compose 都已转发，见 docker-compose.yml 的 appenv）；没有 key 时 `MOCK_IMAGE_PROVIDER=1 docker compose up -d` 跑 mock
 
 ### 本地开发注意
 

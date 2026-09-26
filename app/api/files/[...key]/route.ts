@@ -44,6 +44,67 @@ function sniffContentType(buf: Uint8Array): string {
   return "application/octet-stream";
 }
 
+// Extension fallback for a ranged response that does not start at byte 0: the
+// magic bytes are what sniffContentType() reads, and a mid-file range has none
+// of them (it would be served as application/octet-stream — the exact bug this
+// fallback exists to avoid). Keys are minted by newStorageKey() with these
+// extensions, and /api/files only ever serves objects it stored.
+function contentTypeFromKey(key: string): string | null {
+  const m = /\.([a-z0-9]{2,4})$/i.exec(key);
+  switch ((m?.[1] ?? "").toLowerCase()) {
+    case "mp4":
+      return "video/mp4";
+    case "webm":
+      return "video/webm";
+    case "png":
+      return "image/png";
+    case "jpg":
+    case "jpeg":
+      return "image/jpeg";
+    case "webp":
+      return "image/webp";
+    default:
+      return null;
+  }
+}
+
+/**
+ * Parse a single-range `Range: bytes=…` request against a known object size.
+ *
+ * Returns "ignore" for anything we do not support (no header, a multi-range
+ * request, an unparseable value) — the caller then answers 200 with the whole
+ * object, which is always a valid response. Returns "unsatisfiable" for a range
+ * that lies outside the object, which must be a 416 per RFC 9110 §14.2 (a
+ * browser sends it after a stale seek; answering 200 restarts the download and
+ * 404 hides a perfectly good file).
+ */
+function parseRange(
+  header: string | null,
+  total: number,
+): { start: number; end: number } | "ignore" | "unsatisfiable" {
+  if (!header) return "ignore";
+  const m = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
+  if (!m) return "ignore"; // multi-range or a unit we do not serve
+  const [, rawStart, rawEnd] = m;
+  if (rawStart === "" && rawEnd === "") return "ignore";
+  if (total <= 0) return "unsatisfiable";
+  let start: number;
+  let end: number;
+  if (rawStart === "") {
+    // Suffix range: the LAST n bytes.
+    const n = Number(rawEnd);
+    if (n <= 0) return "unsatisfiable";
+    start = Math.max(0, total - n);
+    end = total - 1;
+  } else {
+    start = Number(rawStart);
+    end = rawEnd === "" ? total - 1 : Math.min(Number(rawEnd), total - 1);
+  }
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return "ignore";
+  if (start >= total || start > end) return "unsatisfiable";
+  return { start, end };
+}
+
 // Authenticated, ownership-scoped image/video serving.
 // Template images (from the Explore gallery) are shared across all users —
 // any logged-in user can fetch them by key, but the key must exist in the
@@ -85,7 +146,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ key: str
     shared = true;
   }
 
-  // Stream the object: the old full-buffer get() materialized up to 100 MB
+  // Streaming the object: the old full-buffer get() materialized up to 100 MB
   // per request in heap. Pull the first chunk to sniff the content type from
   // magic bytes, then replay it ahead of the rest of the stream.
   //
@@ -96,7 +157,29 @@ export async function GET(req: Request, { params }: { params: Promise<{ key: str
   // created — the same N × object-size heap as the get() it replaced, held
   // until the socket drains (Node's requestTimeout caps that at 300s). ~100
   // concurrent slow reads of 2-5 MB objects is a 512 MB container's OOM.
-  const obj = await getStorage().getStream(key);
+  //
+  // Range support (RFC 9110 §14.2): every `<video>` element asks for one, and a
+  // 200 with no Accept-Ranges is what makes the clip non-seekable — Safari
+  // refuses to play such a source at all, and an interrupted download restarts
+  // from zero. Only when the client asked for one do we pay for the extra size
+  // lookup, so the ordinary image/thumbnail path is unchanged.
+  const rangeHeader = req.headers.get("range");
+  let range: { start: number; end: number } | null = null;
+  let total: number | undefined;
+  if (rangeHeader) {
+    total = (await getStorage().size(key)) ?? undefined;
+    if (total === undefined) return new NextResponse("not found", { status: 404, headers: NO_STORE });
+    const parsed = parseRange(rangeHeader, total);
+    if (parsed === "unsatisfiable") {
+      return new NextResponse("range not satisfiable", {
+        status: 416,
+        headers: { ...NO_STORE, "Content-Range": `bytes */${total}`, "Accept-Ranges": "bytes" },
+      });
+    }
+    if (parsed !== "ignore") range = parsed;
+  }
+
+  const obj = await getStorage().getStream(key, range ?? undefined);
   if (!obj) return new NextResponse("not found", { status: 404, headers: NO_STORE });
   const reader = obj.stream.getReader();
   const first = await reader.read();
@@ -106,8 +189,11 @@ export async function GET(req: Request, { params }: { params: Promise<{ key: str
   // Sanitize filename to prevent header injection (CR/LF, quotes, path traversal).
   const rawName = key.split("/").pop() || "image";
   const baseName = rawName.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 128) || "image";
+  // Magic bytes are only meaningful at the start of the OBJECT, not of a range.
+  const sniffed = range && range.start > 0 ? null : sniffContentType(head);
+  const resolvedTotal = obj.total ?? total;
   const headers: Record<string, string> = {
-    "Content-Type": sniffContentType(head),
+    "Content-Type": sniffed ?? contentTypeFromKey(key) ?? "application/octet-stream",
     // Authorization is re-evaluated on EVERY request, so the response must not
     // tell the browser to reuse the bytes for a year without asking again:
     // on a shared browser profile, media fetched by one session was served
@@ -116,8 +202,14 @@ export async function GET(req: Request, { params }: { params: Promise<{ key: str
     // keeps Explore fast); user-owned media is revalidated instead.
     "Cache-Control": shared ? "private, max-age=31536000, immutable" : "private, no-store",
     "X-Content-Type-Options": "nosniff",
+    "Accept-Ranges": "bytes",
   };
-  if (obj.length !== undefined) headers["Content-Length"] = String(obj.length);
+  if (range && resolvedTotal !== undefined) {
+    headers["Content-Range"] = `bytes ${range.start}-${range.end}/${resolvedTotal}`;
+    headers["Content-Length"] = String(range.end - range.start + 1);
+  } else if (obj.length !== undefined) {
+    headers["Content-Length"] = String(obj.length);
+  }
   if (download) {
     headers["Content-Disposition"] = `attachment; filename="${baseName}"`;
   }
@@ -152,6 +244,9 @@ export async function GET(req: Request, { params }: { params: Promise<{ key: str
   });
 
   return new NextResponse(body, {
+    // 206 only when the bytes really are a slice: a range we chose to ignore
+    // (a multi-range request) is answered with the whole object as a 200.
+    status: range ? 206 : 200,
     headers,
   });
 }

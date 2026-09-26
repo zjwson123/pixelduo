@@ -11,6 +11,7 @@
 // typography → "gpt" (GPT Image 2 is strongest at text rendering); realistic
 // photos / portraits / product shots → "seedream" (faster, cheaper).
 import fs from "fs";
+import fsp from "fs/promises";
 import path from "path";
 import { PrismaClient } from "@prisma/client";
 import { getStorage, newStorageKey } from "../lib/storage";
@@ -99,8 +100,26 @@ async function downloadImage(caseId: number, srcPath: string): Promise<string | 
 
   // 1. Local clone — fastest, no rate limits
   const localPath = path.join(LOCAL_IMAGES, filename);
-  if (fs.existsSync(localPath)) {
-    buf = fs.readFileSync(localPath);
+  // lstat, not stat: this script's own instructions tell the operator to clone a
+  // THIRD-PARTY repository, and git stores and restores symlinks. A
+  // `data/images/caseN.jpg` that is a symlink to `/app/.env` was followed by
+  // readFileSync and its bytes were stored as an object and registered as a
+  // Template row — which /api/files serves to ANY signed-in account or API key,
+  // publishing NEXTAUTH_SECRET (enough to forge an admin session), DATABASE_URL
+  // and every provider credential. path.basename stops `../..`, not a symlink.
+  // The size cap below also ran after the read, so a link to a huge file was a
+  // heap spike and a link to a FIFO hung the import.
+  const st = await fsp.lstat(localPath).catch(() => null);
+  if (st && !st.isFile()) {
+    console.warn(`[import] skipping ${filename}: not a regular file (symlink/device?)`);
+    return null;
+  }
+  if (st) {
+    if (st.size > MAX_CASE_BYTES) {
+      console.warn(`[import] skipping ${filename}: over the ${MAX_CASE_BYTES}-byte cap`);
+      return null;
+    }
+    buf = await fsp.readFile(localPath);
   } else {
     // 2. GitHub raw fallback
     const url = `${RAW_BASE}/${filename}`;

@@ -1,5 +1,6 @@
 import bcrypt from "bcryptjs";
 import { z } from "zod";
+import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { signupBonus } from "@/lib/ledger";
 import { createToken } from "@/lib/tokens";
@@ -28,9 +29,23 @@ export async function POST(req: Request) {
     const existing = await prisma.user.findUnique({ where: { email } });
     if (existing) return fail(new Error("email-already-registered"));
     const passwordHash = await bcrypt.hash(body.password, 10);
-    const user = await prisma.user.create({
-      data: { email, passwordHash, name: body.name?.trim() || email.split("@")[0] },
-    });
+    let user;
+    try {
+      user = await prisma.user.create({
+        data: { email, passwordHash, name: body.name?.trim() || email.split("@")[0] },
+      });
+    } catch (e) {
+      // Two concurrent registrations of the same address both pass the lookup
+      // above, and the loser hits the unique index. That is the same conflict the
+      // sequential path answers with a 409 — an unauthenticated caller could
+      // otherwise mint unlimited 500s (and a captured incident each) by racing
+      // its own requests, which is the shape the payment webhook's P2002 handler
+      // already closes.
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
+        return fail(new Error("email-already-registered"));
+      }
+      throw e;
+    }
     // Anti-abuse: the 30-credit signup bonus is granted only after the email
     // is verified. Tests/CI can auto-verify via EMAIL_VERIFY_AUTO=1.
     if (process.env.EMAIL_VERIFY_AUTO === "1") {
@@ -45,9 +60,15 @@ export async function POST(req: Request) {
     // rather than spent from the SMTP quota that resets and receipts share.
     // Separate from the reset stream on purpose: a flood here must not be able
     // to stop password recovery.
-    if (await reserveAuthMailSend("verify")) {
-      await sendVerificationEmail(email, token);
+    //
+    // When the budget is gone the caller is TOLD, with the same
+    // `cannot-send-mail:` refusal the resend route gives — the alternative was
+    // `pendingVerification: true` with no mail behind it, i.e. an instruction to
+    // check an inbox that will stay empty.
+    if (!(await reserveAuthMailSend("verify"))) {
+      return fail(new Error("cannot-send-mail: email budget for this hour is used up — try again shortly"));
     }
+    await sendVerificationEmail(email, token);
     return ok({ userId: user.id, credits: 0, pendingVerification: true });
   } catch (e) {
     if (e instanceof z.ZodError) return fail(zodMessage(e));

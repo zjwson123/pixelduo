@@ -184,7 +184,8 @@ export async function shrinkForAudit(buf: Buffer): Promise<Buffer> {
 // Post-generation safety audit:
 // 1. IMAGE_NSFW_ENDPOINT (external HTTP detector) — legacy pluggable path.
 // 2. IMAGE_MODERATION=1 — vision-model moderation via the cc-proxy gateway
-//    (default gpt-5.4), reading the generated image from the storage driver.
+//    (default gpt-5.6-luna — lib/keys.ts getVisionConfig), reading the generated
+//    image from the storage driver.
 // Without any of these the audit is skipped (checked: false).
 async function isSafeEndpointUrl(rawUrl: string): Promise<boolean> {
   // Same canonical SSRF guard as fetchPublicBuffer (store.ts): hostname

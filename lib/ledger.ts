@@ -887,12 +887,23 @@ export async function adminClawbackTx(
   // racing a spend or a refund cannot deadlock, then TAKEN in this endpoint's
   // own semantic order — free/admin grants first, which is deliberately not
   // the FIFO order the lock uses. Locking order and take order are separate
-  // concerns; conflating them is what made this differ from spendCreditsTx.
+  // concerns; conflating it is what made this differ from spendCreditsTx.
+  //
+  // The `remaining > 0` filter is NOT part of the lock predicate, for the same
+  // reason revokeOrderCreditsTx's is not: a grant sitting at remaining = 0 is
+  // exactly the state a queued or running job leaves its pre-auth in, and it is
+  // the state a clawback racing that job must serialize with — otherwise the
+  // job's later terminal failure restores the credits the admin just took
+  // (refundCreditsTx increments remaining on a grant this statement never
+  // locked) while the ADMIN ledger row records them as removed. The row count
+  // is small (one user's grants), so locking the zero-remaining ones costs
+  // nothing; the test moves into the loop, where it only decides whether there
+  // is anything to take.
   const rows = await tx.$queryRaw<
     Array<{ id: string; remaining: number; source: string; expiresAt: Date | null; createdAt: Date }>
   >(
     Prisma.sql`SELECT id, remaining, source, "expiresAt", "createdAt" FROM "CreditGrant"
-      WHERE "userId" = ${userId} AND remaining > 0
+      WHERE "userId" = ${userId}
       ${GRANT_LOCK_ORDER}
       FOR UPDATE`,
   );

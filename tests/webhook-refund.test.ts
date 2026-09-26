@@ -44,15 +44,42 @@ function webhookRequest(body: unknown): Request {
 }
 
 describe("payment webhook refund handling", () => {
-  it("rejects a refund that resolves no order (5xx → provider retries) and never dedupes it", async () => {
-    // Refund events resolve orders via providerOrderId AFTER the paid event
-    // rewrote it to the provider's payment id. If the paid event is still
-    // retrying, acking the refund would dedupe every future retry away and
-    // lose the revocation permanently — so it must fail instead.
-    const res = await webhookPOST(webhookRequest({ eventId: `evt-unresolved-${Date.now()}`, status: "refunded", orderId: "order-does-not-exist" }));
-    expect(res.status).toBe(500);
-    const dup = await webhookPOST(webhookRequest({ eventId: `evt-unresolved-${Date.now()}`, status: "refunded", orderId: "order-does-not-exist" }));
-    expect(dup.status).toBe(500);
+  it("acks a refund whose order no longer exists, instead of 500-ing forever", async () => {
+    // Our own orderId resolving to nothing means the row is GONE: checkout
+    // creates the order before the provider session (app/api/checkout/route.ts),
+    // so it is there from the start, and the only thing that removes it is an
+    // erasure — account deletion cascades both the Order and the CreditGrants it
+    // funded. Nothing is left to revoke, and a 500 here can never resolve: the
+    // provider would retry until the failure streak disables the one endpoint
+    // every customer's payment arrives on. (Pre-fix this was a 500, deliberately:
+    // the code could not tell "not yet" from "never".)
+    const res = await webhookPOST(
+      webhookRequest({ eventId: `evt-deleted-${Date.now()}`, status: "refunded", orderId: "order-does-not-exist" }),
+    );
+    expect(res.status).toBe(200);
+    expect((await res.json()).processed).toBe(true);
+  });
+
+  it("retries an unresolvable provider-id refund, then acks it and reports it", async () => {
+    // The other shape really can be "not yet": refund events resolve through
+    // providerOrderId, which the paid event only writes on its first
+    // fulfillment, so a refund that lands first must be retried rather than
+    // deduped away. But it can also be permanently unresolvable — an operator
+    // refund from the provider dashboard against a PaymentIntent we never
+    // recorded (a retried payment gets a fresh PI) — so the retries are BOUNDED:
+    // past the bound the event is persisted, acked and captured for an operator,
+    // because a failure streak is what gets the one payment endpoint disabled.
+    const eventId = `evt-unresolved-${Date.now()}`;
+    const body = { eventId, status: "refunded", providerOrderId: "pi-never-recorded" };
+    const statuses: number[] = [];
+    for (let i = 0; i < 27; i++) statuses.push((await webhookPOST(webhookRequest(body))).status);
+    // The first deliveries are 5xx (the paid event may still be retrying)…
+    expect(statuses[0]).toBe(500);
+    // …and the loop ends: the last one is acked, with the event recorded so the
+    // provider's remaining retries are dedupes rather than 500s.
+    expect(statuses[statuses.length - 1]).toBe(200);
+    expect(await prisma.paymentEvent.count({ where: { eventId } })).toBe(1);
+    expect(statuses.filter((s) => s === 500).length).toBeLessThan(statuses.length - 1);
   });
 
   it("revokes credits when a full refund resolves the order", async () => {

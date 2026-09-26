@@ -149,6 +149,7 @@ model Job {
   idempotencyKey String?   @unique
   // Video async task tracking
   providerTaskId String? // external task id from Ark/DashScope
+  taskCreatedAt  DateTime? // when the upstream task was created — the clock the 30-min cap runs on
   durationSec    Int? // video duration (for video jobs)
   refImageKey    String? // reference image storage key (for image editing / image-to-video)
   sourceVideoKey String? // extend input: storage key of the original video being continued

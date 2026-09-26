@@ -23,7 +23,7 @@ import { isProductionRuntime } from "./runtime-env";
 // body (lib/store.ts). Reused rather than re-implemented: the two things that
 // must agree here — "how much may we read" and "is the target acceptable" —
 // already have one answer each in that module.
-import { hostIsPublic, readBodyCapped, ssrfPinnedAgent } from "./store";
+import { hostIsPublic, isPublicPort, readBodyCapped, ssrfPinnedAgent } from "./store";
 
 export type WebhookKind = "feishu" | "wecom" | "dingtalk" | "raw";
 
@@ -97,8 +97,19 @@ export function webhookKind(): WebhookKind {
 export function webhookAllowed(url: string): boolean {
   try {
     const parsed = new URL(url);
-    if (parsed.protocol === "https:") return true;
-    return parsed.protocol === "http:" && (parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost");
+    const loopback = parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost";
+    // Loopback is the documented test exception and it lives on an ephemeral
+    // port, so the allowlist below cannot apply to it — webhookTargetAllowed
+    // refuses loopback outright in production, which is where that matters.
+    if (loopback) return parsed.protocol === "https:" || parsed.protocol === "http:";
+    // Every other guarded outbound path applies the port allowlist (see
+    // isPublicPort); this was the one caller that skipped it, so
+    // FEEDBACK_WEBHOOK_URL=https://<public-ip>:<any-port> was dialled on
+    // whatever port it named. Operator-supplied, so this is hardening rather
+    // than a hole — but drift between the two paths is exactly how the last few
+    // passes found their bugs.
+    if (!isPublicPort(parsed.port)) return false;
+    return parsed.protocol === "https:";
   } catch {
     return false;
   }

@@ -7,6 +7,7 @@ import {
   S3Client,
   PutObjectCommand,
   GetObjectCommand,
+  HeadObjectCommand,
   DeleteObjectCommand,
   HeadBucketCommand,
 } from "@aws-sdk/client-s3";
@@ -14,7 +15,16 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 export interface StorageStream {
   stream: ReadableStream<Uint8Array>;
+  /** Bytes this stream will yield (the range's length when one was asked for). */
   length?: number;
+  /** Full object size, when the driver knows it. */
+  total?: number;
+}
+
+/** A byte range for getStream, both ends inclusive, already validated. */
+export interface ByteRange {
+  start: number;
+  end: number;
 }
 
 export interface StorageDriver {
@@ -22,7 +32,9 @@ export interface StorageDriver {
   get(key: string): Promise<Buffer | null>;
   // Streaming variant for serving large objects (videos): get() materializes
   // the whole object in heap, so /api/files must not use it.
-  getStream(key: string): Promise<StorageStream | null>;
+  getStream(key: string, range?: ByteRange): Promise<StorageStream | null>;
+  /** Full object size, or null when the object is missing/unreadable. */
+  size(key: string): Promise<number | null>;
   delete(key: string): Promise<void>;
   publicUrl(key: string): Promise<string>;
   health(): Promise<boolean>;
@@ -73,15 +85,29 @@ class LocalStorage implements StorageDriver {
     }
   }
 
-  async getStream(key: string): Promise<StorageStream | null> {
+  async getStream(key: string, range?: ByteRange): Promise<StorageStream | null> {
     try {
       const f = this.p(key);
       const stat = await fsp.stat(f);
       if (!stat.isFile()) return null;
+      // createReadStream's end is inclusive, like the Range header it comes
+      // from, so no off-by-one conversion here.
       return {
-        stream: Readable.toWeb(fs.createReadStream(f)) as ReadableStream<Uint8Array>,
-        length: stat.size,
+        stream: Readable.toWeb(
+          fs.createReadStream(f, range ? { start: range.start, end: range.end } : undefined),
+        ) as ReadableStream<Uint8Array>,
+        length: range ? range.end - range.start + 1 : stat.size,
+        total: stat.size,
       };
+    } catch {
+      return null;
+    }
+  }
+
+  async size(key: string): Promise<number | null> {
+    try {
+      const stat = await fsp.stat(this.p(key));
+      return stat.isFile() ? stat.size : null;
     } catch {
       return null;
     }
@@ -141,14 +167,38 @@ class S3Storage implements StorageDriver {
     }
   }
 
-  async getStream(key: string): Promise<StorageStream | null> {
+  async getStream(key: string, range?: ByteRange): Promise<StorageStream | null> {
     try {
-      const r = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }));
+      const r = await this.client.send(
+        new GetObjectCommand({
+          Bucket: this.bucket,
+          Key: key,
+          // Ranged GET server-side: the alternative is downloading the whole
+          // object to serve a 206, which is worse than not supporting Range.
+          ...(range ? { Range: `bytes=${range.start}-${range.end}` } : {}),
+        }),
+      );
       if (!r.Body) return null;
+      // A ranged response reports the range in Content-Range
+      // ("bytes 100-199/2845909"); the total is only in that header, since
+      // ContentLength is now the range's length.
+      const total = r.ContentRange ? Number(r.ContentRange.split("/")[1]) : r.ContentLength;
       return {
         stream: Readable.toWeb(r.Body as Readable) as ReadableStream<Uint8Array>,
         length: r.ContentLength,
+        total: Number.isFinite(total) ? total : undefined,
       };
+    } catch {
+      return null;
+    }
+  }
+
+  async size(key: string): Promise<number | null> {
+    try {
+      // getStream would work, but this answers "how big is it" without opening
+      // a body that then has to be cancelled.
+      const r = await this.client.send(new HeadObjectCommand({ Bucket: this.bucket, Key: key }));
+      return typeof r.ContentLength === "number" ? r.ContentLength : null;
     } catch {
       return null;
     }

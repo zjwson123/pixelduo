@@ -14,8 +14,12 @@ import { isProductionRuntime } from "../lib/runtime-env";
 
 initObservability("worker");
 
-// Hard cap on a single video job (task creation + polling). Long after a
-// normal provider task finishes, this turns a zombie into a refund.
+// Hard cap on a single video job. Long after a normal provider task finishes,
+// this turns a zombie into a refund. One constant, two clocks — see
+// processVideoJob: it bounds the QUEUE wait while no upstream task exists (and
+// runs before the billed call, not after it) and the TASK's own life once
+// providerTaskId/taskCreatedAt are set, so a backlog cannot spend the polling
+// budget of a job that has not been billed yet.
 const VIDEO_HARD_TIMEOUT_MS = 30 * 60_000;
 
 // Is this user on the free tier, for the outputs that carry an entitlement
@@ -244,6 +248,7 @@ export async function processVideoJob(job: {
   sourceVideoKey: string | null;
   extendOfJobId: string | null;
   providerTaskId: string | null;
+  taskCreatedAt: Date | null;
   status: string;
   startedAt: Date | null;
   createdAt: Date;
@@ -261,6 +266,32 @@ export async function processVideoJob(job: {
   // the job has left the queue must take it back out itself.
   let storedKey: string | null = null;
   try {
+    // The hard cap, on TWO clocks — because the two halves of a video job cost
+    // different things.
+    //
+    // Upstream task: billed, created exactly once, and the reason the cap has to
+    // survive re-claims. Measured from taskCreatedAt, NOT createdAt. It used to
+    // be createdAt, so the queue wait came out of the polling budget: a job
+    // claimed 29 minutes after submit created its task (setJobPolling is the
+    // only place that stamps taskCreatedAt) and the next poll killed it a minute
+    // later — the provider generated the video, the caller was refunded, and
+    // nothing was delivered. Queue wait is normal here (5 inflight jobs per
+    // account, one worker per process), so a backlog made every video job a
+    // guaranteed provider loss.
+    //
+    // No task yet: the only clock is createdAt, and the cap bounds the QUEUE
+    // wait (30 minutes) instead. That guard sits ABOVE phase 1 deliberately —
+    // checked only in phase 2, a job that had already waited out its budget
+    // still created (and paid for) a task that the very next poll threw away.
+    const budgetFrom = job.taskCreatedAt ?? job.createdAt;
+    if (Date.now() - new Date(budgetFrom).getTime() > VIDEO_HARD_TIMEOUT_MS) {
+      const msg = "video-timeout: task exceeded 30 minutes";
+      await failJob(job.id, msg, { terminal: true });
+      console.error(
+        `[worker ${workerId}] job ${job.id}: ${msg} (${job.providerTaskId ? "task" : "queue wait"} clock)`,
+      );
+      return true;
+    }
     // Phase 1: create the upstream task exactly once. providerTaskId is the
     // source of truth — re-creating on retry would double-bill the provider.
     if (!job.providerTaskId) {
@@ -302,16 +333,7 @@ export async function processVideoJob(job: {
 
     // Phase 2: poll the existing upstream task (whatever status we were
     // claimed in — polling directly, or running/queued after recovery).
-    // Measured from createdAt, not startedAt: claimNextJob resets startedAt on
-    // every claim, so a recovered job used to get a fresh 30-minute budget each
-    // time. The cap is meant to bound the upstream task — which is created
-    // exactly once — so it has to survive re-claims.
-    if (Date.now() - new Date(job.createdAt).getTime() > VIDEO_HARD_TIMEOUT_MS) {
-      const msg = "video-timeout: task exceeded 30 minutes";
-      await failJob(job.id, msg, { terminal: true });
-      console.error(`[worker ${workerId}] job ${job.id}: ${msg}`);
-      return true;
-    }
+    // The 30-minute cap above already ran, on the task's own clock.
     console.log(`[worker ${workerId}] job ${job.id}: polling video task ${job.providerTaskId}`);
     const status = await pollVideoTask(job.model, job.providerTaskId);
 

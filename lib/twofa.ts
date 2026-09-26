@@ -284,7 +284,17 @@ async function claimOnce(local: Map<string, number>, key: string, ttlSec: number
   try {
     await connecting;
     const res = await c.set(key, "1", "EX", ttlSec, "NX");
-    return res === "OK";
+    if (res === "OK") {
+      // Mirror the accepted claim into the local map too. Redis is the authority
+      // while it answers, but any LATER command in this window can fail on its
+      // own (a restart comes back empty, the connection drops) and a claim that
+      // exists only in Redis is invisible to the fallback — the same code or
+      // ticket could then be presented a second time. That is UNLIMITED reuse,
+      // not the per-instance degradation the header comment promises.
+      local.set(key, now + ttlSec * 1000);
+      return true;
+    }
+    return false;
   } catch {
     return claimLocally();
   }

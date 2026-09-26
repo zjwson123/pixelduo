@@ -18,6 +18,21 @@ ENV NEXT_TELEMETRY_DISABLED=1
 # degrades those two rather than the build.
 ARG NEXTAUTH_URL=""
 ENV NEXTAUTH_URL=$NEXTAUTH_URL
+# The browser-side Sentry DSN is a BUILD-time value too (instrumentation-client.ts
+# is compiled into the client bundle; a runtime env var is far too late). There
+# was no ARG for it and `.dockerignore` keeps `.env*` out of the context, so it
+# had no path into a container build at all: every containerised deployment ran
+# without client error reporting while the server side reported normally.
+ARG NEXT_PUBLIC_SENTRY_DSN=""
+ENV NEXT_PUBLIC_SENTRY_DSN=$NEXT_PUBLIC_SENTRY_DSN
+ARG NEXT_PUBLIC_SENTRY_ENVIRONMENT=""
+ENV NEXT_PUBLIC_SENTRY_ENVIRONMENT=$NEXT_PUBLIC_SENTRY_ENVIRONMENT
+ARG NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE=""
+ENV NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE=$NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE
+# Source-map upload (next.config.mjs). A build secret, so it is an ARG and never
+# an ENV: an ENV would be readable in `docker inspect` on every running container
+# of the image, long after the build that needed it.
+ARG SENTRY_AUTH_TOKEN=""
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npx prisma generate && npm run build
@@ -50,6 +65,7 @@ COPY --from=builder --chown=node:node /app/prisma ./prisma
 RUN rm -rf \
       .env .env.production .env.local \
       docs tests e2e designs data backups public/generated \
+      ./*.md docker-compose*.yml Caddyfile Dockerfile \
       ./*.tsbuildinfo
 # Never run as root: a compromise (sharp/libvips, a dependency) must not get
 # uid 0 inside the container.
@@ -75,9 +91,16 @@ RUN npx prisma generate
 # and the root markdown. None of it is read at runtime: the worker needs
 # package.json, node_modules, prisma/, lib/ and scripts/ only, and
 # prisma/seed.ts's designs/ read is a CI/host-only path.
+#
+# The compose files and Caddyfile are pruned here for the same reason README.md
+# is: they describe the deployment. `.env*` in this list is what protects the
+# build host — a compose file that survived into the image is also where a live
+# S3 key pasted into an override would be readable by anyone who can `docker
+# save` it.
 RUN rm -rf \
       .env .env.production .env.local \
       docs tests e2e designs data backups public/generated public/showcase \
-      ./*.md ./*.tsbuildinfo
+      ./*.md docker-compose*.yml Caddyfile Dockerfile \
+      ./*.tsbuildinfo
 USER node
 CMD ["npx", "tsx", "scripts/worker.ts"]

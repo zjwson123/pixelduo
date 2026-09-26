@@ -1,7 +1,11 @@
 # Production deployment: HTTPS (Caddy) + managed services (Postgres/Redis/S3).
-# Build images locally first: docker compose build migrate web worker rollover
-# (migrate has no build: of its own — it reuses the worker image, so naming it
-# here is what guarantees the image it starts actually exists)
+# Build the images with the DEFAULT file first — that is where the build: blocks
+# (and the NEXTAUTH_URL / NEXT_PUBLIC_SENTRY_DSN build args) live:
+#   NEXTAUTH_URL="https://your-domain" docker compose build migrate web worker rollover
+# This file only NAMES the resulting images (migrate has no build: of its own — it
+# reuses the worker image). Asking THIS file to build silently builds nothing:
+# compose skips a service with no build: block, exits 0 and prints nothing, so the
+# upgrade ran against the previous images and looked like a success.
 # then: docker compose -f docker-compose.prod.yml up -d
 name: pixelduo-prod
 

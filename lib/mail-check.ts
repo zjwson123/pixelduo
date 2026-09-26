@@ -7,7 +7,12 @@
 // maskSecretUrl() lives here as well: this module is already what both mail
 // scripts import, and scripts/verify-webhook.ts prints a group-bot token the
 // same way, so "what may a pre-flight print" has exactly one answer.
-import { feedbackMailRefusal, feedbackRecipient, mailDeliverable, sendFeedbackEmailWithReceipt } from "./mail";
+import {
+  feedbackMailRefusal,
+  feedbackRecipient,
+  mailDeliverable,
+  sendFeedbackEmailToWithReceipt,
+} from "./mail";
 
 export interface DeliveryCheck {
   ok: boolean;
@@ -38,7 +43,9 @@ export interface DeliveryCheck {
 
 // What a bot token looks like in a path: Feishu's is a 36-character uuid, and
 // nothing shorter than this is a credential on any provider this app supports.
-const PATH_TOKEN = /^[A-Za-z0-9._~-]{16,}$/;
+// The colon is in the class for Telegram, whose path segment is
+// `bot<bot-id>:<secret>` — one segment, two credential halves.
+const PATH_TOKEN = /^[A-Za-z0-9._~:-]{16,}$/;
 
 export function maskSecretUrl(url: string | null | undefined): string {
   if (!url) return "(unset)";
@@ -64,12 +71,17 @@ export function maskSecretUrl(url: string | null | undefined): string {
     ? `${secret(decoded(parsed.username) + (parsed.password ? `:${decoded(parsed.password)}` : ""))}@`
     : "";
   const segments = parsed.pathname.split("/");
-  const last = segments.length - 1;
-  // Only a token-shaped segment is treated as a secret: Feishu's bot URL ends in
-  // a 36-character uuid and must be masked, while "…/hook" and "…/send" are how
-  // the operator recognises which endpoint they configured. Everything that
-  // carries a value — userinfo, query — is always masked.
-  if (last > 0 && PATH_TOKEN.test(decoded(segments[last]))) segments[last] = secret(decoded(segments[last]));
+  // EVERY token-shaped segment, not just the last one. Feishu's bot URL ends in
+  // a 36-character uuid, but a trailing slash — the standard copy-paste artefact,
+  // and invisible when you paste a URL — left that last segment EMPTY, so the
+  // real token one segment earlier was echoed in full by
+  // scripts/verify-webhook.ts into a terminal, a CI log or a ticket. A token in
+  // a non-final position (a Telegram-style /bot<token>/sendMessage) was never
+  // considered at all. "…/hook" and "…/send" are not token-shaped, so the
+  // endpoint shape an operator uses to spot a misconfiguration survives.
+  for (let i = 1; i < segments.length; i++) {
+    if (PATH_TOKEN.test(decoded(segments[i]))) segments[i] = secret(decoded(segments[i]));
+  }
   const query = [...new Set(parsed.searchParams.keys())]
     .map((key) => `${key}=${secret(decoded(parsed.searchParams.get(key) ?? ""))}`)
     .join("&");
@@ -124,16 +136,19 @@ export async function checkDelivery(opts?: { recipient?: string; note?: string }
     return { ok: false, transport: maskSecretUrl(process.env.SMTP_URL), recipient, error: refusal };
   }
   try {
-    const receipt = await sendFeedbackEmailWithReceipt({
-      ref: "verify-mail",
-      category: "other",
-      message:
-        opts?.note ?? "Pre-flight delivery check from scripts/verify-mail.ts — no action needed.",
-      email: "verify-mail@pixelduo.ai",
-      page: "/scripts/verify-mail",
-      locale: "en",
-      userAgent: "scripts/verify-mail.ts",
-    });
+    const receipt = await sendFeedbackEmailToWithReceipt(
+      {
+        ref: "verify-mail",
+        category: "other",
+        message:
+          opts?.note ?? "Pre-flight delivery check from scripts/verify-mail.ts — no action needed.",
+        email: "verify-mail@pixelduo.ai",
+        page: "/scripts/verify-mail",
+        locale: "en",
+        userAgent: "scripts/verify-mail.ts",
+      },
+      recipient,
+    );
     return {
       ok: !receipt.rejected?.length,
       transport: maskSecretUrl(process.env.SMTP_URL),

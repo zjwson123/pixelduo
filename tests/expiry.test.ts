@@ -183,3 +183,63 @@ describe("credit grants & expiry", () => {
     expect(await balance()).toBe(before);
   });
 });
+
+describe("one unsweepable account cannot hold the sweep hostage", () => {
+  it("walks past an account whose credits are already broken and still sweeps the rest", async () => {
+    // The invariant-violating account: expired grants still holding credits
+    // while User.credits is already 0, so `addCreditsTx(-sum)` throws
+    // insufficient-credits inside the per-user transaction and those rows can
+    // never be swept. They sit at the head of the `expiresAt asc` order for
+    // ever. The old loop re-queried from the top and stopped when a batch made
+    // no progress, so such an account (or one read in a batch where nothing else
+    // progressed) made the whole run return 0 — silently expiring nothing for
+    // every account behind it.
+    const poisoned = await prisma.user.create({
+      data: { email: `expiry-poisoned-${Date.now()}@test.dev`, passwordHash: "x", credits: 0 },
+    });
+    const healthy = await prisma.user.create({
+      data: { email: `expiry-healthy-${Date.now()}@test.dev`, passwordHash: "x", credits: 40 },
+    });
+    // Earlier deadlines, and enough rows to fill a whole batch (BATCH_SIZE is
+    // 200) — so the sweep reads the unsweepable account ALONE in its first page.
+    // That is the interleaving that used to end the run: nothing in the batch
+    // progresses → `progressed` stays false → break, and every account ordered
+    // behind it is never visited.
+    await prisma.creditGrant.createMany({
+      data: Array.from({ length: 200 }, () => ({
+        userId: poisoned.id,
+        source: "PURCHASE",
+        amount: 1,
+        remaining: 1,
+        expiresAt: new Date(Date.now() - 10 * 60_000),
+      })),
+    });
+    await prisma.creditGrant.create({
+      data: {
+        userId: healthy.id,
+        source: "PURCHASE",
+        amount: 40,
+        remaining: 40,
+        expiresAt: new Date(Date.now() - 60_000),
+      },
+    });
+    try {
+      const swept = await runExpiry();
+      expect(swept).toBeGreaterThanOrEqual(40);
+      const after = await prisma.user.findUniqueOrThrow({
+        where: { id: healthy.id },
+        select: { credits: true },
+      });
+      expect(after.credits).toBe(0);
+      // The broken account is reported, not silently skipped — its rows stay
+      // (nothing can be deducted from a zero balance) and an operator sees why.
+      const poisonedAfter = await prisma.creditGrant.aggregate({
+        where: { userId: poisoned.id },
+        _sum: { remaining: true },
+      });
+      expect(poisonedAfter._sum.remaining).toBe(200);
+    } finally {
+      await prisma.user.deleteMany({ where: { id: { in: [poisoned.id, healthy.id] } } });
+    }
+  });
+});

@@ -15,14 +15,20 @@ export REGISTER_RATE_LIMIT="10000"
 export STORAGE_DRIVER="local"
 export LOCAL_STORAGE_DIR="data/files"
 
-echo "[1/7] prisma generate + migrate"
+echo "[1/8] deployment config (compose render + env-var coverage)"
+# Mirrors CI's `config` job: renders every compose file and asserts that each
+# variable documented in .env.example AND read by the code actually reaches a
+# container. Needs docker (this script already requires it for db/redis).
+npx tsx scripts/check-config.ts
+
+echo "[2/8] prisma generate + migrate"
 npx prisma generate >/dev/null
 npx prisma migrate deploy >/dev/null
 
-echo "[2/7] typecheck (tsc --noEmit)"
+echo "[3/8] typecheck (tsc --noEmit)"
 npx tsc --noEmit
 
-echo "[3/7] unit tests"
+echo "[4/8] unit tests"
 # Mirrors CI: the test-unit job does NOT auto-verify (auth-flow covers the
 # pending-verification flow); only the e2e job sets EMAIL_VERIFY_AUTO=1.
 unset EMAIL_VERIFY_AUTO || true
@@ -32,7 +38,7 @@ docker exec pixelduo-redis redis-cli --scan --pattern 'rl:*' 2>/dev/null \
   | xargs -r -I{} docker exec pixelduo-redis redis-cli del {} >/dev/null 2>&1 || true
 npm test
 
-echo "[4/7] production build"
+echo "[5/8] production build"
 # The build bakes NEXTAUTH_URL into the prerendered metadata (og:url/og:image —
 # see lib/site.ts and the Dockerfile's build ARG), and CI's e2e job exports the
 # same value before `npm run build`. Without it here the built pages carry the
@@ -42,7 +48,7 @@ echo "[4/7] production build"
 export NEXTAUTH_URL="http://localhost:3100"
 npm run build
 
-echo "[5/7] seed + start app/worker (port 3100)"
+echo "[6/8] seed + start app/worker (port 3100)"
 export EMAIL_VERIFY_AUTO="1" # e2e needs auto-verified registrations
 export PAYMENT_ALLOW_MOCK="1" # test the checkout flow against a prod build
 # Email links are built from NEXTAUTH_URL, and .env's default points at the dev
@@ -84,14 +90,14 @@ for i in $(seq 1 30); do
 done
 curl -fsS http://localhost:3100/api/health >/dev/null
 
-echo "[6/7] e2e"
+echo "[7/8] e2e"
 PW_CHANNEL=chrome npx playwright test
 
 # The pending-verification flow cannot share a process with the auto-verified
 # one — EMAIL_VERIFY_AUTO is read at registration time — so that spec gets a
 # second instance of the same build on its own port. The worker is shared: it
 # polls the database, not either app.
-echo "[7/7] e2e (pending-verification flow, port 3101)"
+echo "[8/8] e2e (pending-verification flow, port 3101)"
 export EMAIL_VERIFY_AUTO="0"
 export NEXTAUTH_URL="http://localhost:3101"
 npx next start -p 3101 >/tmp/pd-ci-app-verify.log 2>&1 &

@@ -116,15 +116,10 @@ npx tsx scripts/verify-mail.ts
 ## 部署步骤
 
 ```bash
-# 1. 克隆代码并构建镜像（或在 CI 推送镜像后改 IMAGE_WEB/IMAGE_WORKER）
-git clone <repo> pixelduo && cd pixelduo
-# 构建期必须传入站点域名：静态页面里的 og:url / og:image 是构建时烧进去的
-# （app/layout.tsx 的 metadataBase，见 lib/site.ts），缺省时写成
-# http://localhost:3000 —— 页面照常 200，只有分享预览指向构建机的本地地址。
-# robots.txt / sitemap.xml 已改为请求期读取，不受构建环境影响。
-NEXTAUTH_URL="https://pixelduo.ai" docker compose build migrate web worker rollover
-
-# 2. 配置环境变量（也可用 .env.production 或密钥管理器注入）
+# 1. 先配置环境变量（也可用 .env.production 或密钥管理器注入）
+#    顺序不能反：`docker compose build` 会先对整个文件做变量插值，而默认
+#    compose 文件里 NEXTAUTH_SECRET 是 ${NEXTAUTH_SECRET:?...}（缺失即报错），
+#    所以先 build 会在全新 clone 上直接失败 —— 一步都还没走。
 export DATABASE_URL="postgresql://..."
 export REDIS_URL="rediss://..."
 export S3_ENDPOINT="https://<account>.r2.cloudflarestorage.com"
@@ -148,6 +143,16 @@ export CADDY_DOMAIN="pixelduo.ai"
 export SMTP_URL="smtps://..."
 export EMAIL_FROM="PixelDuo <no-reply@pixelduo.ai>"
 export FEEDBACK_TO="support@yourdomain.com"
+
+# 2. 构建镜像（必须用默认文件构建：build: 段与 NEXTAUTH_URL /
+#    NEXT_PUBLIC_SENTRY_DSN 等构建参数都在 docker-compose.yml 里；
+#    docker-compose.prod.yml 只声明镜像名，对它执行 build 不会构建任何东西，
+#    却会以 0 退出，看起来像成功 —— 升级实际跑的还是旧镜像）
+#    构建期必须传入站点域名：静态页面里的 og:url / og:image 是构建时烧进去的
+#    （app/layout.tsx 的 metadataBase，见 lib/site.ts），缺省时写成
+#    http://localhost:3000 —— 页面照常 200，只有分享预览指向构建机的本地地址。
+#    robots.txt / sitemap.xml 已改为请求期读取，不受构建环境影响。
+NEXTAUTH_URL="https://pixelduo.ai" docker compose build migrate web worker rollover
 # Optional second channel (Feishu/WeCom/DingTalk group bot, no domain needed):
 # export FEEDBACK_WEBHOOK_URL="https://open.feishu.cn/open-apis/bot/v2/hook/..."
 # export FEEDBACK_WEBHOOK_KIND="feishu"

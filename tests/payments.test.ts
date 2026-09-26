@@ -467,3 +467,54 @@ describe("PaddleProvider", () => {
   });
 
 });
+
+describe("StripeProvider amount binding", () => {
+  // Same env dance as the describe above: the provider refuses to construct
+  // without a key while PAYMENT_PROVIDER names stripe.
+  beforeAll(() => {
+    process.env.PAYMENT_PROVIDER = "stripe";
+    process.env.STRIPE_SECRET_KEY = "sk_test_dummy";
+  });
+  afterAll(() => {
+    delete process.env.STRIPE_SECRET_KEY;
+  });
+
+  it("reports the pre-discount subtotal, so an authorized discount is not an underpayment", async () => {
+    // The webhook route refuses a payment below the order amount
+    // (app/api/webhooks/payment/route.ts assertPaymentMatchesOrder). Comparing
+    // amount_total made every legitimate discounted payment a permanent failure:
+    // an operator applying a coupon or customer credit from the Stripe dashboard
+    // produced payment-underpaid → 500 → the event was never persisted, so every
+    // provider retry reproduced it — money taken, credits never granted, on the
+    // one endpoint all payments share. amount_subtotal is the price WE set at
+    // checkout; a discount we authorized is not an underpayment.
+    const p = new StripeProvider({ webhookSecret: WEBHOOK_SECRET });
+    const payload = stripeEvent("checkout.session.completed", {
+      amount_subtotal: 4999,
+      amount_total: 2499, // 50% coupon applied from the dashboard
+      currency: "usd",
+    });
+    const headers = new Headers({ "stripe-signature": stripeSignature(payload, WEBHOOK_SECRET) });
+    const evt = await asEvent(p.verifyWebhook(payload, headers));
+    expect(evt?.type).toBe("paid");
+    expect(evt?.paidAmountUsd).toBe(49.99);
+  });
+
+  it("still reports an actually-underpaid session as underpaid", async () => {
+    // The check keeps its teeth: a session built for a cheaper amount has a
+    // cheap subtotal too, so the route refuses it.
+    const p = new StripeProvider({ webhookSecret: WEBHOOK_SECRET });
+    const payload = stripeEvent("checkout.session.completed", { amount_subtotal: 100, amount_total: 100 });
+    const headers = new Headers({ "stripe-signature": stripeSignature(payload, WEBHOOK_SECRET) });
+    const evt = await asEvent(p.verifyWebhook(payload, headers));
+    expect(evt?.paidAmountUsd).toBe(1);
+  });
+
+  it("falls back to amount_total when the subtotal is absent", async () => {
+    const p = new StripeProvider({ webhookSecret: WEBHOOK_SECRET });
+    const payload = stripeEvent("checkout.session.completed", { amount_total: 999 });
+    const headers = new Headers({ "stripe-signature": stripeSignature(payload, WEBHOOK_SECRET) });
+    const evt = await asEvent(p.verifyWebhook(payload, headers));
+    expect(evt?.paidAmountUsd).toBe(9.99);
+  });
+});

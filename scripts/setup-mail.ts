@@ -106,8 +106,17 @@ const kept = existing
   .join("\n")
   .replace(/\n+$/, "");
 const next = `${kept ? `${kept}\n` : ""}SMTP_URL="${smtpUrl}"\nEMAIL_FROM="${emailFrom}"\n`;
-fs.chmodSync(envPath, 0o600);
-fs.writeFileSync(envPath, next);
+// Create-then-chmod, not chmod-then-create: on the fresh-host path this script
+// exists for (no .env yet) the chmod ran first and died with ENOENT — the
+// one-command setup wrote nothing, printed a stack trace, and never reached its
+// delivery check. The mode still comes from the file creation, so the new file
+// is never briefly world-readable.
+if (existing) {
+  fs.chmodSync(envPath, 0o600);
+  fs.writeFileSync(envPath, next);
+} else {
+  fs.writeFileSync(envPath, next, { mode: 0o600 });
+}
 
 // Masked by the shared helper, not by a local copy: the credential in this URL
 // is the same secret scripts/verify-mail.ts prints, and two masking routines

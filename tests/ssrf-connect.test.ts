@@ -2,7 +2,7 @@ import { createServer, type Server } from "http";
 import { once } from "events";
 import { Agent, fetch as undiciFetch } from "undici";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createPublicOnlyLookup, hostIsPublic, fetchPublicBuffer } from "../lib/store";
+import { createPublicOnlyLookup, hostIsPublic, fetchPublicBuffer, ssrfPinnedAgent, literalHostname } from "../lib/store";
 
 // Regression cover for the connect-time SSRF pin. The guard's lookup is a
 // dns.lookup replacement, so it must answer with the SAME ARITY net asks for.
@@ -107,5 +107,74 @@ describe("fetchPublicBuffer", () => {
     await expect(
       fetchPublicBuffer("http://127.0.0.1:80/x", { timeoutMs: 500, maxBytes: 10 }),
     ).rejects.toThrow("blocked-internal-url");
+  });
+});
+
+// The dispatch-time half of the same guard. undici's `lookup` hook is never
+// consulted for an IP literal — net.connect has no name to resolve — so
+// `http://127.0.0.1:<port>/` and `http://[::1]/` dialled straight through the
+// pinned agent. Every call site checks hostIsPublic first, so nothing was
+// reachable; the problem was that the guard is documented as the backstop a
+// future call site may lean on, and for literals it silently was not one.
+describe("SSRF connect-time guard on IP literals", () => {
+  let server: Server;
+  let port = 0;
+
+  beforeAll(async () => {
+    server = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.end("payload");
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    port = (server.address() as { port: number }).port;
+  });
+
+  afterAll(async () => {
+    server.close();
+    await once(server, "close");
+  });
+
+  /** The refusal as the caller sees it: undici wraps the dispatcher's error in
+   *  the TypeError it rejects with, so the reason is on the cause chain. */
+  async function refusalOf(url: string): Promise<string> {
+    try {
+      const res = await undiciFetch(url, { dispatcher: ssrfPinnedAgent });
+      await res.body?.cancel().catch(() => undefined);
+      throw new Error(`request to ${url} SUCCEEDED (status ${res.status}) — it must have been refused`);
+    } catch (e) {
+      const cause = (e as { cause?: unknown }).cause;
+      const chain = [e instanceof Error ? e.message : String(e), cause instanceof Error ? cause.message : ""].join(" | ");
+      if (chain.includes("SUCCEEDED")) throw e;
+      return chain;
+    }
+  }
+
+  it("refuses a loopback literal even though the lookup would never run", async () => {
+    expect(await refusalOf(`http://127.0.0.1:${port}/`)).toMatch(/blocked-internal-address/);
+  });
+
+  it("refuses the IPv6 loopback literal", async () => {
+    // IPv4-mapped on purpose: it reaches the same IPv4-only test server, so a
+    // missing refusal shows up as a 200 rather than as a connection error that
+    // would make this pass for the wrong reason.
+    expect(await refusalOf(`http://[::ffff:127.0.0.1]:${port}/`)).toMatch(/blocked-internal-address/);
+    expect(await refusalOf(`http://[::1]:${port}/`)).toMatch(/blocked-internal-address/);
+  });
+
+  it("refuses the inet_aton spelling the URL parser normalises", async () => {
+    expect(await refusalOf(`http://2130706433:${port}/`)).toMatch(/blocked-internal-address/);
+  });
+
+  it("still lets the DNS half do the blocking for a name", async () => {
+    // Not a blanket refusal: `localhost` resolves to a loopback address, so the
+    // refusal comes from the lookup rather than from dispatch.
+    expect(await refusalOf(`http://localhost:${port}/`)).toMatch(/blocked-internal-address/);
+  });
+
+  it("recognises literals the way the agent does", async () => {
+    expect(literalHostname("http://[::1]:8080")).toBe("::1");
+    expect(literalHostname("http://127.0.0.1/x")).toBe("127.0.0.1");
+    expect(literalHostname("https://example.com")).toBeNull();
   });
 });

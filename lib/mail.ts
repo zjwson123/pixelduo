@@ -54,7 +54,26 @@ class SmtpMailer implements Mailer {
   private from: string;
 
   constructor(url: string, from: string) {
-    this.transport = nodemailer.createTransport(url);
+    // Timeouts, because nodemailer's defaults are measured in TENS OF MINUTES
+    // (30s greeting, 2min connect, 10min socket inactivity) and deliver() is
+    // awaited from paths a user is waiting on: /api/feedback, /api/register,
+    // the verification resend, 2FA confirm/disable — and the reminder cron walks
+    // every grant sequentially. A provider that accepts the connection and then
+    // goes quiet used to hold each of those for ten minutes per message.
+    // Receipt and refund mail is already sent after the transaction commits, so
+    // a timeout here costs a notification, never a payment.
+    //
+    // `url` as a FIELD, not as the string overload: nodemailer's second
+    // parameter is message defaults, so `createTransport(url, {timeouts})`
+    // silently ignores them. With `url` inside the options object its own
+    // parseConnectionUrl does the parsing (percent-encoded credentials and all)
+    // and the timeouts are part of the same options bag.
+    this.transport = nodemailer.createTransport({
+      url,
+      connectionTimeout: 10_000,
+      greetingTimeout: 10_000,
+      socketTimeout: 30_000,
+    });
     this.from = from;
   }
 
@@ -488,6 +507,24 @@ export async function sendFeedbackEmailWithReceipt(input: FeedbackNotificationIn
   if (refusal) throw new Error(refusal);
   const msg = buildFeedbackNotification(input);
   return deliver(msg.to, msg.subject, msg.text, undefined, msg.replyTo);
+}
+
+// Same message, to an explicit recipient.
+//
+// scripts/verify-mail.ts takes an address on the command line so an operator can
+// prove a NEW support mailbox receives before pointing FEEDBACK_TO at it — and
+// it REPORTED that address while sending to feedbackRecipient(), so the check
+// printed "[OK] the receiving server accepted" about a mailbox that never got
+// the mail (and suggested passing one, which changed nothing). Threading the
+// recipient through is the whole fix; the message is byte for byte the same.
+export async function sendFeedbackEmailToWithReceipt(
+  input: FeedbackNotificationInput,
+  to: string,
+): Promise<MailReceipt> {
+  const refusal = feedbackMailRefusal();
+  if (refusal) throw new Error(refusal);
+  const msg = buildFeedbackNotification(input);
+  return deliver(to, msg.subject, msg.text, undefined, msg.replyTo);
 }
 
 // True when mail is configured at all. Without SMTP_URL the app uses the

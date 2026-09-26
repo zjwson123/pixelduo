@@ -10,17 +10,39 @@ const BATCH_SIZE = 200;
 // User.credits == SUM(CreditGrant.remaining) before and after.
 export async function runExpiry(): Promise<number> {
   let total = 0;
+  // Cursor pagination, not "re-query from the top and stop when a batch makes no
+  // progress". That stop condition made the sweep hostage to a single account:
+  // an account whose rows can never be swept — the already-broken invariant this
+  // file's own catch reports, e.g. credits already 0 while expired grants still
+  // hold `remaining > 0`, so `addCreditsTx(-sum)` throws insufficient-credits —
+  // stays at the HEAD of the `expiresAt asc` order for ever, and the run that
+  // happened to read it in a batch where nothing else progressed returned 0
+  // without ever sweeping the accounts behind it. Worse, when another account in
+  // the same batch DID progress, the loop kept going and kept re-reading the
+  // unsweepable rows: the sweep looked hung (a test that calls it spins until
+  // its own timeout, and every later sweep of that run races a stale one).
+  // A cursor simply walks past them. The per-user transaction still sweeps ALL of
+  // that account's expired rows, so the walk is short: each step retires 200 rows
+  // from the filter.
+  let cursor: string | null = null;
   for (;;) {
+    // Built separately: a conditional spread inside the same object literal makes
+    // TypeScript try to infer `expiring` from an expression that mentions
+    // `cursor`, which it then infers from `expiring` (TS7022).
+    const page: { cursor?: { id: string }; skip?: number } = cursor
+      ? { cursor: { id: cursor }, skip: 1 }
+      : {};
     const expiring = await prisma.creditGrant.findMany({
+      ...page,
       where: { remaining: { gt: 0 }, expiresAt: { lte: new Date() } },
-      orderBy: { expiresAt: "asc" },
+      orderBy: [{ expiresAt: "asc" }, { id: "asc" }],
       take: BATCH_SIZE,
       select: { id: true, userId: true },
     });
     if (expiring.length === 0) break;
+    cursor = expiring[expiring.length - 1].id;
 
     const userIds = [...new Set(expiring.map((g) => g.userId))];
-    let progressed = false;
     for (const userId of userIds) {
       const expired = await prisma
         .$transaction(async (tx) => {
@@ -72,10 +94,8 @@ export async function runExpiry(): Promise<number> {
         });
       if (expired > 0) {
         total += expired;
-        progressed = true;
       }
     }
-    if (!progressed) break;
   }
   return total;
 }

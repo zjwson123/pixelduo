@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { decode } from "next-auth/jwt";
 import { envLimit } from "./lib/rate-limit";
 
 // Edge-safe in-memory limiter: a cheap first line of defense, per-instance.
@@ -32,7 +33,52 @@ function sweep(now: number) {
   }
 }
 
-export function proxy(req: NextRequest) {
+// The bucket a request is charged to. A VERIFIED session is keyed by its
+// account id; everything else by source IP.
+//
+// The IP alone made this limiter a denial-of-service tool against itself: the
+// bucket is spent before any credential is looked at, so a credential-less
+// flood from a shared egress (CGNAT, a carrier NAT, an office or VPN egress)
+// consumes the budget every authenticated user behind that IP needs — 40
+// requests/minute to /api/auth/* locks the whole IP out of signing in, and 300
+// to /api/* makes the workbench unusable — with no account, no cookie and no
+// knowledge of the victims. That is the shape pass 18 fixed inside
+// /api/auth/2fa-verify; this is the layer in front of all of it.
+//
+// Keying by account is safe here because the id is only used when the JWT
+// VERIFIES (an unverified cookie is attacker-chosen, so hashing it as given
+// would hand out a fresh bucket per request). A session that fails to verify —
+// expired, revoked, forged — falls through to the IP bucket, so this can only
+// GIVE protection to requests that carry a real one; it never takes it away
+// from anonymous callers.
+//
+// What it does not fix: the pre-login routes still run on the IP bucket, and
+// they have to (there is no credential yet to key on), so a hostile egress can
+// still deny the LOGIN flow to its neighbours. Bounding that would mean
+// removing the limiter in front of password verification, which is the
+// bcrypt-amplification brake — a worse trade. Residual, documented.
+async function bucketFor(req: NextRequest, ip: string): Promise<string> {
+  const secret = process.env.NEXTAUTH_SECRET;
+  if (!secret) return `ip:${ip}`;
+  // Both spellings: next-auth picks __Secure- purely from the NEXTAUTH_URL
+  // scheme, and getting that wrong here would silently downgrade every
+  // authenticated request back onto the shared IP bucket.
+  const raw = ["__Secure-next-auth.session-token", "next-auth.session-token"]
+    .map((n) => req.cookies.get(n)?.value)
+    .find((v) => v);
+  if (!raw) return `ip:${ip}`;
+  try {
+    // decode() is what next-auth itself uses to read the session cookie
+    // (salt ""), and it returns null on a token that does not verify.
+    const payload = await decode({ token: raw, secret });
+    const id = payload?.uid ?? payload?.sub;
+    return typeof id === "string" && id ? `u:${id}` : `ip:${ip}`;
+  } catch {
+    return `ip:${ip}`;
+  }
+}
+
+export async function proxy(req: NextRequest) {
   // Last XFF entry = client IP appended by the trusted edge proxy; earlier
   // entries are client-spoofable (see lib/rate-limit.ts clientIp).
   const fwd = req.headers.get("x-forwarded-for");
@@ -49,7 +95,8 @@ export function proxy(req: NextRequest) {
   // Overridable for load tests / e2e (MIDDLEWARE_AUTH_LIMIT).
   const authLimit = envLimit(process.env.MIDDLEWARE_AUTH_LIMIT, 40);
   const apiLimit = envLimit(process.env.MIDDLEWARE_API_LIMIT, 300);
-  const retry = hit(`ip:${ip}:${isAuth ? "auth" : "api"}`, isAuth ? authLimit : apiLimit, 60_000);
+  const bucket = await bucketFor(req, ip);
+  const retry = hit(`${bucket}:${isAuth ? "auth" : "api"}`, isAuth ? authLimit : apiLimit, 60_000);
   if (retry !== null) {
     return NextResponse.json(
       { ok: false, error: "rate-limited" },

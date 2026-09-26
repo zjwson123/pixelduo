@@ -154,6 +154,13 @@ services:
       target: web
       args:
         NEXTAUTH_URL: ${NEXTAUTH_URL:-}
+        # Build-time only, like NEXTAUTH_URL: instrumentation-client.ts is compiled into
+        # the client bundle, so this had no path into an image at all without a build arg.
+        NEXT_PUBLIC_SENTRY_DSN: ${NEXT_PUBLIC_SENTRY_DSN:-}
+        NEXT_PUBLIC_SENTRY_ENVIRONMENT: ${NEXT_PUBLIC_SENTRY_ENVIRONMENT:-}
+        NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE: ${NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE:-}
+        # Source-map upload during the build (next.config.mjs).
+        SENTRY_AUTH_TOKEN: ${SENTRY_AUTH_TOKEN:-}
     environment: *appenv
     expose: ["3000"]
     healthcheck:
@@ -255,7 +262,7 @@ services:
       PGUSER: pixelduo
       PGPASSWORD: ${POSTGRES_PASSWORD}
       PGDATABASE: pixelduo
-      BACKUP_KEEP: "14"
+      BACKUP_KEEP: ${BACKUP_KEEP:-14}
     volumes: [./backups:/backups]
     depends_on:
       db: { condition: service_healthy }
@@ -275,7 +282,7 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
-      BACKUP_KEEP: "7"
+      BACKUP_KEEP: ${BACKUP_KEEP_OBJECTS:-7}
       BACKUP_TARGET_ENDPOINT: ${BACKUP_TARGET_ENDPOINT:-}
       BACKUP_TARGET_ACCESS_KEY_ID: ${BACKUP_TARGET_ACCESS_KEY_ID:-}
       BACKUP_TARGET_SECRET_ACCESS_KEY: ${BACKUP_TARGET_SECRET_ACCESS_KEY:-}

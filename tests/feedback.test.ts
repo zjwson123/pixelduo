@@ -231,7 +231,20 @@ describe("feedback submission", () => {
       const address = anon("smtp");
       expectAccepted(await submit({ category: "idea", message: "smtp transport path check", email: address }));
 
-      expect(createTransport).toHaveBeenCalledWith("smtp://user:secret@smtp.example.com:587");
+      // The URL travels as a FIELD inside the options object, not as
+      // nodemailer's string overload: the second parameter of that overload is
+      // message defaults, so `createTransport(url, {timeouts})` silently ignored
+      // them and a stalled SMTP provider held request paths for nodemailer's
+      // 10-minute socket default. Asserting the whole object pins both the
+      // credential-bearing URL and the three timeouts that bound it.
+      expect(createTransport).toHaveBeenCalledWith(
+        expect.objectContaining({
+          url: "smtp://user:secret@smtp.example.com:587",
+          connectionTimeout: 10_000,
+          greetingTimeout: 10_000,
+          socketTimeout: 30_000,
+        }),
+      );
       expect(sendMail).toHaveBeenCalledTimes(1);
       const payload = sendMail.mock.calls[0][0];
       // The three fields an operator's mailbox and a reply depend on.

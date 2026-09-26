@@ -82,8 +82,20 @@ export class StripeProvider implements PaymentProvider {
       let orderId: string | undefined = obj?.client_reference_id ?? obj?.metadata?.orderId;
       let type: "paid" | "refunded" | null = null;
       let fullRefund: boolean | undefined;
-      // What was actually collected, for the route's amount check. amount_total
-      // is in the currency's minor unit (cents for USD).
+      // What was actually due, for the route's amount check: the SUBTOTAL, in
+      // the currency's minor unit (cents for USD).
+      //
+      // amount_subtotal is the sum of the line items — the price WE set at
+      // checkout — while amount_total is what the customer paid after
+      // discounts, customer balance and tax. The route refuses a payment below
+      // the order amount, so comparing amount_total made every legitimate
+      // discounted payment a permanent failure: an operator applying a coupon
+      // or credit from the Stripe dashboard (the standard goodwill flow)
+      // produced payment-underpaid → 500 → the event was never persisted, so
+      // every provider retry reproduced it: money taken, credits never granted,
+      // and a failing delivery streak on the one endpoint all payments share.
+      // A discount we authorize is not an underpayment; the subtotal is what
+      // proves the session was built for this order's price.
       let paidAmountUsd: number | undefined;
       let currency: string | undefined;
       // async_payment_succeeded: delayed-notification methods (SEPA, Boleto…)
@@ -93,7 +105,8 @@ export class StripeProvider implements PaymentProvider {
         obj?.payment_status === "paid"
       ) {
         type = "paid";
-        if (typeof obj.amount_total === "number") paidAmountUsd = obj.amount_total / 100;
+        if (typeof obj.amount_subtotal === "number") paidAmountUsd = obj.amount_subtotal / 100;
+        else if (typeof obj.amount_total === "number") paidAmountUsd = obj.amount_total / 100;
         if (typeof obj.currency === "string") currency = obj.currency;
       }
       if (event.type === "charge.refunded") {

@@ -1,6 +1,7 @@
 import { ok, fail, enforceRateLimit, readBodyCapped } from "@/lib/api";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
+import { rateLimit } from "@/lib/rate-limit";
 import { fulfillOrder, revokeOrderCreditsTx, revokePlanEntitlementTx } from "@/lib/ledger";
 import { getPaymentProvider } from "@/lib/payments";
 import { sanitizeWebhookPayload } from "@/lib/payments/sanitize";
@@ -10,6 +11,11 @@ import { NextResponse } from "next/server";
 
 // Provider webhook payloads are small JSON docs — anything bigger is abuse.
 const WEBHOOK_MAX_BYTES = 256 * 1024;
+
+// How many deliveries of one unresolvable refund are retried (500) before the
+// event is acked and reported. Providers back off over days, so this is a
+// generous number of attempts — the point is that the loop ends.
+const MAX_UNRESOLVED_REFUND_RETRIES = 25;
 
 // A valid signature proves the event really came from the provider. It does
 // NOT prove the payment belongs to the order the event names — the provider
@@ -91,8 +97,41 @@ export async function POST(req: Request) {
       // rewritten to the PaymentIntent id) must NOT be acked: persisting the
       // PaymentEvent now would dedupe every retry away and lose the revocation
       // forever. Throw → 500 → the provider retries until the paid event lands.
+      //
+      // Two shapes reach here, though, and only one of them can ever resolve:
+      //   - the event carried OUR orderId and no such row exists. Only an
+      //     erasure does that (checkout creates the order before the provider
+      //     session, so it is there from the start; account deletion cascades
+      //     both the Order and the CreditGrants it funded). Nothing is left to
+      //     revoke, and a 500 is a permanent loop: the row cannot come back and
+      //     the failure streak is what gets the endpoint disabled. Persist and
+      //     ack — the revocation has nothing to act on.
+      //   - the event names a provider payment id no order points at. Usually a
+      //     late paid event, but also an operator refund from the provider
+      //     dashboard against a PaymentIntent we never recorded (a retried
+      //     payment gets a fresh PI and only the latest is written to
+      //     Order.providerOrderId). That one never resolves either, so the
+      //     retries are bounded: past the bound the event is persisted, acked
+      //     and reported, because a permanently failing endpoint stops the paid
+      //     events we do need from arriving at all.
       if (event.type === "refunded" && !order) {
-        throw new Error("refund-webhook-order-unresolved");
+        const reason = event.orderId ? "refund-for-deleted-order" : "refund-webhook-order-unresolved";
+        if (event.orderId) {
+          console.warn(
+            `[webhook] refund for order ${event.orderId} which no longer exists (account erased?) — nothing to revoke, acking`,
+          );
+        } else {
+          const attempts = await rateLimit(
+            `whrefund:${event.eventId}`,
+            MAX_UNRESOLVED_REFUND_RETRIES,
+            7 * 24 * 3600_000,
+          );
+          if (attempts.ok) throw new Error(reason);
+          captureError(new Error(`${reason}-permanent`), {
+            eventId: event.eventId,
+            providerOrderId: event.providerOrderId,
+          });
+        }
       }
       // Two deliveries of the SAME event can be in flight at once: a provider
       // retry that lands while the first is still waiting on a row lock. Both

@@ -26,10 +26,16 @@ const CHUNKS = 50;
 const CHUNK_BYTES = 64 * 1024;
 const source = { pulls: 0 };
 
+const rangeCalls: Array<{ start: number; end: number } | undefined> = [];
+const TOTAL = 50 * 64 * 1024;
+
 vi.mock("@/lib/storage", () => ({
   getStorage: () => ({
-    getStream: async () => ({
-      length: CHUNKS * CHUNK_BYTES,
+    size: async () => TOTAL,
+    getStream: async (_key: string, range?: { start: number; end: number }) => {
+      rangeCalls.push(range);
+      return {
+        length: CHUNKS * CHUNK_BYTES,
       stream: new ReadableStream<Uint8Array>({
         pull(controller) {
           if (source.pulls >= CHUNKS) {
@@ -46,7 +52,8 @@ vi.mock("@/lib/storage", () => ({
           controller.enqueue(chunk);
         },
       }),
-    }),
+      };
+    },
   }),
 }));
 
@@ -97,5 +104,84 @@ describe("/api/files streams with consumer backpressure", () => {
     await reader.cancel();
     // Nothing further is requested once the client goes away.
     expect(source.pulls).toBe(pulledBefore);
+  });
+});
+
+// Range requests (RFC 9110 §14.2). Every `<video>` element sends one, and a 200
+// with no Accept-Ranges is what makes a clip non-seekable — Safari refuses to
+// play such a source at all — and an interrupted download restarts from zero.
+// /api/jobs and /api/gallery hand the workbench /api/files/<key> URLs, so this
+// is the path every generated video travels.
+describe("/api/files honours Range requests", () => {
+  it("answers a byte range with 206, Content-Range and the slice's length", async () => {
+    rangeCalls.length = 0;
+    const [req, ctx] = request("img/clip.mp4");
+    req.headers.set("range", "bytes=100-199");
+    const res = await GET(req, ctx);
+    expect(res.status).toBe(206);
+    expect(res.headers.get("Content-Range")).toBe(`bytes 100-199/${TOTAL}`);
+    expect(res.headers.get("Content-Length")).toBe("100");
+    expect(res.headers.get("Accept-Ranges")).toBe("bytes");
+    // The slice really was requested from the driver, not downloaded whole.
+    expect(rangeCalls[0]).toEqual({ start: 100, end: 199 });
+  });
+
+  it("resolves an open-ended range against the object size", async () => {
+    rangeCalls.length = 0;
+    const [req, ctx] = request("img/clip.mp4");
+    req.headers.set("range", `bytes=${TOTAL - 50}-`);
+    const res = await GET(req, ctx);
+    expect(res.status).toBe(206);
+    expect(res.headers.get("Content-Range")).toBe(`bytes ${TOTAL - 50}-${TOTAL - 1}/${TOTAL}`);
+    expect(res.headers.get("Content-Length")).toBe("50");
+  });
+
+  it("answers a suffix range with the last N bytes", async () => {
+    const [req, ctx] = request("img/clip.mp4");
+    req.headers.set("range", "bytes=-64");
+    const res = await GET(req, ctx);
+    expect(res.status).toBe(206);
+    expect(res.headers.get("Content-Range")).toBe(`bytes ${TOTAL - 64}-${TOTAL - 1}/${TOTAL}`);
+  });
+
+  it("answers a range past the end with 416, not a 200 restart", async () => {
+    // A browser sends this after a stale seek. 200 restarts the download; 404
+    // (which is what a driver error would produce) hides a perfectly good file.
+    const [req, ctx] = request("img/clip.mp4");
+    req.headers.set("range", `bytes=${TOTAL + 10}-`);
+    const res = await GET(req, ctx);
+    expect(res.status).toBe(416);
+    expect(res.headers.get("Content-Range")).toBe(`bytes */${TOTAL}`);
+  });
+
+  it("ignores a range it cannot serve and answers the whole object", async () => {
+    rangeCalls.length = 0;
+    const [req, ctx] = request("img/clip.mp4");
+    req.headers.set("range", "bytes=0-99,200-299"); // multi-range: not supported
+    const res = await GET(req, ctx);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Range")).toBeNull();
+    expect(rangeCalls[0]).toBeUndefined();
+    // Accept-Ranges is still advertised, so the client knows it may ask again.
+    expect(res.headers.get("Accept-Ranges")).toBe("bytes");
+  });
+
+  it("still sniffs the content type from byte 0 when the range starts there", async () => {
+    source.pulls = 0; // the mock's stream restarts only when the source is fresh
+    const [req, ctx] = request("img/abc.png");
+    req.headers.set("range", "bytes=0-1023");
+    const res = await GET(req, ctx);
+    expect(res.status).toBe(206);
+    expect(res.headers.get("Content-Type")).toBe("image/png");
+  });
+
+  it("falls back to the key's extension for a mid-file range", async () => {
+    // Magic bytes only live at the start of the OBJECT, so a mid-file slice has
+    // none to sniff — the old code would have served application/octet-stream.
+    const [req, ctx] = request("img/clip.mp4");
+    req.headers.set("range", "bytes=1024-2047");
+    const res = await GET(req, ctx);
+    expect(res.status).toBe(206);
+    expect(res.headers.get("Content-Type")).toBe("video/mp4");
   });
 });

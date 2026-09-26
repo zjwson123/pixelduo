@@ -210,7 +210,15 @@ export async function claimNextJob(worker: string) {
   const now = new Date();
   const due = { OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }] };
 
-  // 1. Fresh/retried jobs (queued → running, atomic via status CAS).
+  // 1. Fresh/retried jobs (queued → running, atomic via status CAS). The CAS
+  //    carries `due` as well as the status: `failJob` parks a retry back in
+  //    "queued" with nextAttemptAt = now + backoff, so a candidate read that
+  //    lands just before that write would otherwise match on (id, status) a
+  //    moment later and take the job immediately — the exponential backoff
+  //    became advisory, three attempts burned in seconds, and a transient
+  //    provider outage that a spaced retry would have ridden out ended as a
+  //    terminal failure. The polling lane below has always matched nextAttemptAt
+  //    for the same reason; this one only looked at the status.
   for (let attempt = 0; attempt < 5; attempt++) {
     const candidate = await prisma.job.findFirst({
       where: { status: "queued", ...due },
@@ -218,7 +226,7 @@ export async function claimNextJob(worker: string) {
     });
     if (!candidate) break;
     const res = await prisma.job.updateMany({
-      where: { id: candidate.id, status: "queued" },
+      where: { id: candidate.id, status: "queued", ...due },
       data: { status: "running", worker, startedAt: new Date(), heartbeatAt: new Date() },
     });
     if (res.count === 1) return prisma.job.findUnique({ where: { id: candidate.id } });
@@ -570,6 +578,11 @@ export async function setJobPolling(jobId: string, providerTaskId: string): Prom
     data: {
       status: "polling",
       providerTaskId,
+      // The clock the 30-minute cap runs on (scripts/worker.ts). Stamped with
+      // the task, not the job: a job that waited 25 minutes for a worker slot
+      // used to spend that wait out of the polling budget, so the task was
+      // billed at minute 25 and killed at minute 30.
+      taskCreatedAt: new Date(),
       heartbeatAt: new Date(),
       nextAttemptAt: new Date(Date.now() + POLL_INTERVAL_MS),
     },
