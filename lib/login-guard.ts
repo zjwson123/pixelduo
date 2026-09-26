@@ -1,5 +1,5 @@
 import Redis from "ioredis";
-import { getMailer, reserveAuthMailSend } from "./mail";
+import { reserveAuthMailSend, sendSecurityNoticeEmail } from "./mail";
 import { prisma } from "./prisma";
 import { clientIp } from "./rate-limit";
 import { clearTwoFactorFailures } from "./twofa";
@@ -373,7 +373,7 @@ export async function alertLoginAbuse(email: string): Promise<boolean> {
   const failures = await loginFailures(email);
   try {
     const base = process.env.NEXTAUTH_URL ?? "https://pixelduo.ai";
-    await getMailer().send(
+    await sendSecurityNoticeEmail(
       email,
       "Repeated failed sign-in attempts on your PixelDuo account",
       [

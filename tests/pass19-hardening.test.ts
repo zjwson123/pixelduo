@@ -653,3 +653,217 @@ describe("scripts/verify-mail.ts mails the recipient it names", () => {
     }
   });
 });
+
+describe("the refund's expiry decision runs on the database clock", () => {
+  // Spending (spendCreditsTx) and sweeping (lib/expiry.ts) both compare against
+  // Postgres's now(); the refund compared against Date.now() in the app. On one
+  // host those are the same machine and the mismatch is invisible — which is why
+  // it survived eighteen passes. Where they differ (app in a container, Postgres
+  // elsewhere, NTP correcting either), a grant whose deadline falls inside the
+  // skew is live for one side and expired for the other: the refund either
+  // restores credits into a row the sweep then zeroes (refunded AND the balance
+  // still drops) or hands back a grant the spend path refuses.
+  let userId: string;
+
+  beforeAll(async () => {
+    const user = await prisma.user.create({
+      data: { email: `p19-clock-${Date.now()}@test.dev`, passwordHash: "x", name: "P19 Clock" },
+    });
+    userId = user.id;
+  });
+
+  afterAll(async () => {
+    await prisma.user.deleteMany({ where: { email: { startsWith: "p19-clock-" } } });
+    await prisma.$disconnect();
+  });
+
+  it("restores a grant that is live in the database but expired by the app clock", async () => {
+    const { grantCreditsTx, spendCreditsTx, refundCreditsTx, PACK_VALIDITY_MS } = await import("../lib/ledger");
+    // Live for an hour, in the database's timeline and in real time.
+    await prisma.$transaction((tx) =>
+      grantCreditsTx(tx, userId, "PURCHASE", 50, new Date(Date.now() + 3600_000)),
+    );
+    const consumption = await prisma.$transaction((tx) =>
+      spendCreditsTx(tx, userId, 50, "job", "p19-clock-job", "spend before the skew"),
+    );
+    expect(consumption).toHaveLength(1);
+
+    // Only Date is faked: the app now believes it is two hours later, while the
+    // database is untouched (its now() is its own).
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date(Date.now() + 2 * 3600_000));
+      await prisma.$transaction((tx) =>
+        refundCreditsTx(tx, userId, 50, consumption, "job", "p19-clock-job", "refund under skew"),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // Pre-fix the app clock won: the grant looked expired, so the credits went
+    // into a fresh REFUND replacement and the original stayed drained — a grant
+    // the sweep (which sees it live, expiresAt in the future) would never
+    // destroy, i.e. credits with two contradictory deadlines.
+    const replacement = await prisma.creditGrant.count({ where: { userId, source: "REFUND" } });
+    expect(replacement).toBe(0);
+    const spent = await prisma.creditGrant.findUniqueOrThrow({ where: { id: consumption[0].grantId } });
+    expect(spent.remaining).toBe(50);
+    // And the pack's own deadline is untouched: a refund is not a renewal.
+    expect(spent.expiresAt!.getTime()).toBeLessThanOrEqual(Date.now() + 3600_000 + 5_000);
+
+    // The 12-month pack path (PACK_VALIDITY_MS) stays available for reference.
+    expect(PACK_VALIDITY_MS).toBeGreaterThan(0);
+  });
+});
+
+describe("the credit invariant is the database's business now", () => {
+  let userId: string;
+
+  beforeAll(async () => {
+    const user = await prisma.user.create({
+      data: { email: `p19-check-${Date.now()}@test.dev`, passwordHash: "x", name: "P19 Check" },
+    });
+    userId = user.id;
+  });
+
+  afterAll(async () => {
+    await prisma.user.deleteMany({ where: { email: { startsWith: "p19-check-" } } });
+    await prisma.$disconnect();
+  });
+
+  it("refuses a grant that would hold more than it was created with", async () => {
+    // `User.credits == SUM(CreditGrant.remaining)` and `0 <= remaining <= amount`
+    // were application-only rules. Every writer honours them today, but nothing
+    // refused one that did not — and the obvious slip is a consumption refunded
+    // twice, which mints the difference out of nothing and leaves the balance
+    // disagreeing with the rows for ever (runExpiry then throws
+    // insufficient-credits for that account on every sweep). The CHECK added as
+    // NOT VALID enforces it on every future write without scanning a table that
+    // may already contain a violator.
+    const grant = await prisma.creditGrant.create({
+      data: { userId, source: "PURCHASE", amount: 10, remaining: 10 },
+    });
+    await expect(
+      prisma.creditGrant.update({ where: { id: grant.id }, data: { remaining: 11 } }),
+    ).rejects.toThrow(/remaining_range|check constraint/i);
+    await expect(
+      prisma.creditGrant.update({ where: { id: grant.id }, data: { remaining: -1 } }),
+    ).rejects.toThrow(/remaining_range|check constraint/i);
+    // The legitimate moves still work.
+    await prisma.creditGrant.update({ where: { id: grant.id }, data: { remaining: 4 } });
+    await prisma.creditGrant.update({ where: { id: grant.id }, data: { remaining: 10 } });
+  });
+
+  it("repairs a drifted balance and an out-of-range row, then reports nothing left", async () => {
+    // The operator path for the rows that predate the rule (docs/deploy.md):
+    // the migration cannot scan them, so the script has to be able to fix them.
+    // The constraint is dropped for the insert and restored immediately — which
+    // is exactly the state this script exists for.
+    const email = `p19-check-broken-${Date.now()}@test.dev`;
+    const user = await prisma.user.create({
+      data: { email, passwordHash: "x", name: "P19 Broken", credits: 999 },
+    });
+    try {
+      await prisma.$executeRawUnsafe(
+        `ALTER TABLE "CreditGrant" DROP CONSTRAINT "CreditGrant_remaining_range"`,
+      );
+      await prisma.$executeRawUnsafe(
+        `INSERT INTO "CreditGrant" (id, "userId", source, amount, remaining, "createdAt")
+         VALUES ($1, $2, 'PURCHASE', 100, 150, now()),
+                ($3, $2, 'PURCHASE', 50, 20, now())`,
+        `p19-bad-${Date.now()}`,
+        user.id,
+        `p19-good-${Date.now()}`,
+      );
+      await prisma.$executeRawUnsafe(
+        `ALTER TABLE "CreditGrant" ADD CONSTRAINT "CreditGrant_remaining_range"
+         CHECK ("remaining" >= 0 AND "remaining" <= "amount") NOT VALID`,
+      );
+
+      const proc = spawnSync(
+        path.join(process.cwd(), "node_modules", ".bin", "tsx"),
+        [path.join(process.cwd(), "scripts", "repair-credit-invariant.ts"), "--fix"],
+        {
+          encoding: "utf8",
+          timeout: 60_000,
+          env: { ...process.env, DATABASE_URL: process.env.DATABASE_URL ?? "" },
+        },
+      );
+      const out = `${proc.stdout}\n${proc.stderr}`;
+      expect(proc.error).toBeUndefined();
+      expect(out).toMatch(/remaining 150 → 100/);
+      // 100 (clamped) + 20 = 120, so the drifted 999 is reconciled to what the
+      // account actually holds, in its own ledger.
+      expect(out).toMatch(/999 → 120/);
+      const after = await prisma.user.findUniqueOrThrow({ where: { id: user.id }, select: { credits: true } });
+      expect(after.credits).toBe(120);
+      const entry = await prisma.ledgerEntry.findFirstOrThrow({
+        where: { userId: user.id, type: "ADMIN" },
+        orderBy: { createdAt: "desc" },
+      });
+      expect(entry.creditsDelta).toBe(120 - 999);
+      expect(entry.balanceAfter).toBe(120);
+      expect(entry.note ?? "").toMatch(/repair of the credit invariant/);
+
+      // Idempotent: a second run has nothing to do.
+      const second = spawnSync(
+        path.join(process.cwd(), "node_modules", ".bin", "tsx"),
+        [path.join(process.cwd(), "scripts", "repair-credit-invariant.ts")],
+        { encoding: "utf8", timeout: 60_000, env: { ...process.env, DATABASE_URL: process.env.DATABASE_URL ?? "" } },
+      );
+      expect(`${second.stdout}${second.stderr}`).toMatch(/credit invariant OK/);
+    } finally {
+      // The constraint must survive the test however it ended: leaving it
+      // dropped would let the very next bug corrupt the ledger.
+      const present = await prisma.$queryRawUnsafe<Array<{ n: bigint }>>(
+        `SELECT COUNT(*)::bigint AS n FROM pg_constraint WHERE conname = 'CreditGrant_remaining_range'`,
+      );
+      if (Number(present[0]?.n ?? 0) === 0) {
+        await prisma.$executeRawUnsafe(
+          `ALTER TABLE "CreditGrant" ADD CONSTRAINT "CreditGrant_remaining_range"
+           CHECK ("remaining" >= 0 AND "remaining" <= "amount") NOT VALID`,
+        );
+      }
+    }
+  });
+});
+
+describe("stored media says what it is", () => {
+  it("sniffs the type and the extension at store time", async () => {
+    // The put() sites hardcoded image/png and video/mp4 whatever the provider
+    // returned, and that recorded type is what a PRESIGNED url reports (the
+    // public API's image URLs) and what the external moderation detector sees —
+    // so a WebP payload was advertised as PNG to everyone except /api/files,
+    // which sniffs for itself. One helper now decides, and the key's extension
+    // follows it (the extension is also the fallback for a mid-file Range
+    // response, which has no magic bytes to read).
+    const { sniffContentType, extensionForContentType, contentTypeFromKey, storeContentType } =
+      await import("../lib/media-type");
+    const webp = Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(4), Buffer.from("WEBPVP8 ")]);
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0]);
+    const mp4 = Buffer.concat([Buffer.alloc(4), Buffer.from("ftypisom"), Buffer.alloc(8)]);
+
+    expect(sniffContentType(webp)).toBe("image/webp");
+    expect(sniffContentType(png)).toBe("image/png");
+    expect(sniffContentType(jpeg)).toBe("image/jpeg");
+    expect(sniffContentType(mp4)).toBe("video/mp4");
+    expect(sniffContentType(Buffer.from("not an image at all"))).toBeNull();
+
+    expect(extensionForContentType("image/webp")).toBe("webp");
+    expect(extensionForContentType("image/jpeg")).toBe("jpg");
+    expect(contentTypeFromKey("img/abc.webp")).toBe("image/webp");
+    // Unknown bytes keep the caller's declared type rather than being refused:
+    // delivery must not break for a format we merely do not sniff.
+    expect(storeContentType(Buffer.from("???"), "video/mp4")).toBe("video/mp4");
+    expect(storeContentType(webp, "image/png")).toBe("image/webp");
+  });
+
+  it("serves the sniffed type through /api/files for a mid-file range too", async () => {
+    // Covered end-to-end in tests/files-stream.test.ts (Range suite); this pins
+    // the shared helper's contract so the two paths cannot drift apart again.
+    const { contentTypeFromKey } = await import("../lib/media-type");
+    expect(contentTypeFromKey("img/x.mp4")).toBe("video/mp4");
+    expect(contentTypeFromKey("img/x.unknown")).toBeNull();
+  });
+});

@@ -431,6 +431,20 @@ export async function refundCreditsTx(
   // (re-read after the lock) routes that portion into the replacement grant.
   // The ORDER BY matches spendCreditsTx so two spends/refunds over the same
   // rows always take the grant locks in the same sequence.
+  //
+  // Whether a grant is expired is decided by the DATABASE's clock, in this
+  // statement — not by `Date.now()` in the application. Spending
+  // (spendCreditsTx) and sweeping (lib/expiry.ts) both compare against `now()`,
+  // so the app-clock version put one judgement on a different timeline: a grant
+  // whose deadline falls inside the app↔database skew was expired for one side
+  // and live for the other, and the mismatch was invisible because on a single
+  // host the two clocks are the same machine. Where they are not (the app runs
+  // in a container, Postgres on another host, NTP correcting either), the
+  // refund would either restore credits into a grant the sweep then zeroes out
+  // from under it — the user is refunded and the balance still drops — or hand
+  // back a grant the spend path already refuses. `now()` is the transaction
+  // timestamp, i.e. exactly what the sweep compares against.
+  const graceSec = REFUND_REPLACEMENT_GRACE_MS / 1000;
   const rows = await tx.$queryRaw<
     Array<{
       id: string;
@@ -438,9 +452,17 @@ export async function refundCreditsTx(
       refType: string | null;
       refId: string | null;
       source: string;
+      expired: boolean;
+      graceExpired: boolean;
     }>
   >(
-    Prisma.sql`SELECT id, "expiresAt", "refType", "refId", source FROM "CreditGrant"
+    Prisma.sql`SELECT id, "expiresAt", "refType", "refId", source,
+        ("expiresAt" IS NOT NULL AND "expiresAt" <= now()) AS expired,
+        -- A dead grant with no deadline (expiresAt IS NULL) is never past its
+        -- grace: the replacement arithmetic falls back to the current time for
+        -- that case, i.e. now + grace, which is always in the future.
+        ("expiresAt" IS NOT NULL AND "expiresAt" + make_interval(secs => ${graceSec}) <= now()) AS "graceExpired"
+      FROM "CreditGrant"
       WHERE id IN (${Prisma.join(consumption.map((c) => c.grantId))})
       ${GRANT_LOCK_ORDER}
       FOR UPDATE`,
@@ -513,7 +535,8 @@ export async function refundCreditsTx(
       notRestored += c.amount;
       continue;
     }
-    if (!row || (row.expiresAt && row.expiresAt.getTime() <= Date.now())) {
+    // Both conditions come from the statement above (the database's clock).
+    if (!row || row.expired) {
       if (row && row.source === "REFUND") {
         // The grace was already spent on this lineage. Restoring here would
         // hand back credits whose deadline has now passed twice over, and the
@@ -525,7 +548,7 @@ export async function refundCreditsTx(
       const expiresAt = new Date(
         (deadline ?? new Date()).getTime() + REFUND_REPLACEMENT_GRACE_MS,
       );
-      if (expiresAt.getTime() <= Date.now()) {
+      if (row?.graceExpired) {
         // Late beyond the grace: the credits' life ended at their deadline and
         // the sweep would have destroyed them; a refund this late cannot revive
         // them without making the deadline farmable. Worth a line in the log —

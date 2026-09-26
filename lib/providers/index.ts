@@ -7,6 +7,7 @@ import { isProductionRuntime } from "../runtime-env";
 import { saveBase64Image, saveRemoteImage, fetchPublicBuffer, readBodyCapped, outboundTimeoutMs } from "../store";
 import { getStorage } from "../storage";
 import { getModel, type ModelInfo } from "../model-registry";
+import { storeContentType, extensionForContentType } from "../media-type";
 import type { Quality } from "../cost";
 
 export interface ProviderImage {
@@ -691,7 +692,12 @@ export async function saveRemoteVideo(url: string): Promise<string> {
   }
   const buf = await fetchPublicBuffer(url, { timeoutMs: 120_000, maxBytes: 100 * 1024 * 1024 });
   const { getStorage, newStorageKey } = await import("../storage");
-  const key = newStorageKey("mp4");
-  await getStorage().put(key, buf, "video/mp4");
+  // The bytes decide the type and the extension, not the call site: put() used
+  // to hardcode video/mp4, which is what a PRESIGNED url reports to an API
+  // client (and what the external detector sees) — a WebM/MP4 mismatch there is
+  // invisible to /api/files, which sniffs for itself.
+  const type = storeContentType(buf, "video/mp4");
+  const key = newStorageKey(extensionForContentType(type));
+  await getStorage().put(key, buf, type);
   return key;
 }

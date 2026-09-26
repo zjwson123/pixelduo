@@ -527,6 +527,19 @@ export async function sendFeedbackEmailToWithReceipt(
   return deliver(to, msg.subject, msg.text, undefined, msg.replyTo);
 }
 
+/**
+ * A one-off security notice (the login-abuse alert), through deliver().
+ *
+ * deliver() is the single choke point that records lastMailAttempt(), which is
+ * what the admin console's "last outgoing mail" banner reads — and the abuse
+ * alert was the one mail that called getMailer().send() directly, so the
+ * operator's own view of the mail path stayed silent about exactly the message
+ * they most need to confirm was delivered.
+ */
+export async function sendSecurityNoticeEmail(to: string, subject: string, text: string): Promise<void> {
+  await deliver(to, subject, text);
+}
+
 // True when mail is configured at all. Without SMTP_URL the app uses the
 // log-only mailer, so an operator who never configured one would otherwise
 // believe notifications are on their way to the feedback inbox. It says nothing

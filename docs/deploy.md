@@ -50,6 +50,23 @@
 
 `AUTH_MAIL_HOURLY_LIMIT`（默认 `300`/小时，全局）：验证邮件 + 重置密码邮件共用同一个 SMTP 配额，而这两个接口都不需要登录、各自只受"每 IP 5 次 / 15 分钟 + 每账号 5 次 / 15 分钟"约束——N 个来源 IP 就是 N 倍邮件量。超出上限时**跳过发信**，并且**同时跳过令牌轮换**，所以用户邮箱里已经收到的那封链接仍然有效（只是不再生成新的）；跳过会写一行日志。另外重置链接的轮换有了 30 分钟宽限期：在此之内重新申请不会作废用户手上正在点的链接——否则任何知道你邮箱的人每 3 分钟请求一次，就能让"找回密码"对你永久失效。
 
+### 积分不变式与修复脚本
+
+两条规则必须始终成立（`lib/ledger.ts`）：`User.credits == SUM(CreditGrant.remaining)`，以及 `0 <= CreditGrant.remaining <= CreditGrant.amount`。
+
+迁移 `20260926120000_credit_grant_invariant_check` 把它们加成了数据库级 `CHECK`，但用的是 `NOT VALID`：**对之后每一次写入立即生效，但不去扫描历史行**——所以一张已经含坏行的表不会让引入规则的这次迁移失败。历史坏行用脚本处理（幂等，健康的库上什么也不做）：
+
+```bash
+npx tsx scripts/repair-credit-invariant.ts          # 只报告：哪些行越界、哪些账号余额与明细不符
+npx tsx scripts/repair-credit-invariant.ts --fix    # 修复：把越界行夹回 [0, amount]，把余额改成明细之和，并写一条 ADMIN 流水
+```
+
+修复完可以让它变成完整的保证（一遍单表扫描，仍有坏行就会明确报错而不是默默接受）：
+
+```sql
+ALTER TABLE "CreditGrant" VALIDATE CONSTRAINT "CreditGrant_remaining_range";
+```
+
 ### 用户反馈（`/feedback`）
 
 留言会存进 `Feedback` 表（管理台 **feedback** 标签页 = 收件箱），同时把通知邮件发到 `FEEDBACK_TO`。邮件用纯文本，`Reply-To` 是留言者本人，所以在邮箱里直接回复就是回复用户。

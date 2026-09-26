@@ -2,8 +2,18 @@
 # PixelDuo object-storage restore drill.
 #
 # Mirrors a local snapshot (./backups/objects/<stamp>) into a scratch bucket and
-# verifies object count and checksums match the source snapshot. Use a scratch
-# bucket — never restore over the live bucket from a drill.
+# verifies the object COUNT matches the source snapshot. Use a scratch bucket —
+# never restore over the live bucket from a drill.
+#
+# It does NOT compare checksums, and the header used to say it did: `mc find`
+# lists names, so a drill proves the objects were copied under the same keys and
+# nothing about their contents. (On some mc versions it also counts the
+# directory entries, which makes the comparison pass or fail for reasons that
+# have nothing to do with the data — read the two numbers, not just the verdict.)
+# A real content check means `mc cat`/`mc stat` per key or a companion manifest
+# of sizes/hashes written by scripts/backup-objects.sh; until then, treat a PASS
+# as "the snapshot is readable and complete in shape", and restore a few objects
+# by hand when the drill matters.
 #
 # Usage: ./scripts/restore-objects.sh <stamp> <scratch-bucket>
 set -euo pipefail

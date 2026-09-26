@@ -3,14 +3,19 @@ import { lookup as dnsLookup } from "dns/promises";
 import { lookup as dnsLookupCb, type LookupAddress, type LookupOptions } from "dns";
 import { Agent, fetch as pinnedFetch } from "undici";
 import { getStorage, newStorageKey } from "./storage";
+import { storeContentType, extensionForContentType, sniffContentType, type MediaKind } from "./media-type";
 
 export async function saveBase64Image(base64: string, ext = "png"): Promise<string> {
   // Reject before decoding: a hostile provider response must not allocate a
   // decoded buffer before any cap exists. 40 MB of base64 ≈ 30 MB decoded —
   // comfortably above any real image, below memory-exhaustion territory.
   if (base64.length > 40 * 1024 * 1024) throw new Error("image-too-large");
-  const key = newStorageKey(ext);
-  await getStorage().put(key, Buffer.from(base64, "base64"), `image/${ext}`);
+  const buf = Buffer.from(base64, "base64");
+  // Same rule as saveRemoteImage: the bytes decide what this object is, the
+  // caller's expectation is only the fallback for a format we do not sniff.
+  const sniffed = sniffContentType(buf);
+  const key = newStorageKey(sniffed ? extensionForContentType(sniffed) : ext);
+  await getStorage().put(key, buf, sniffed ?? (`image/${ext}` as MediaKind));
   return key;
 }
 
@@ -352,8 +357,14 @@ export async function fetchPublicBuffer(rawUrl: string, opts: FetchPublicOptions
 export async function saveRemoteImage(rawUrl: string): Promise<string> {
   // 25 MB cap so a huge provider response cannot exhaust memory.
   const buf = await fetchPublicBuffer(rawUrl, { timeoutMs: 30_000, maxBytes: 25 * 1024 * 1024 });
-  const key = newStorageKey("png");
-  await getStorage().put(key, buf, "image/png");
+  // Sniffed, not assumed: gpt returns PNG but the same path stores whatever a
+  // gateway hands over, and the content type recorded here is what a PRESIGNED
+  // url reports (the public API's image URLs, the external moderation detector).
+  // A hardcoded image/png meant a WebP payload was advertised as PNG to everyone
+  // except /api/files, which sniffs for itself.
+  const type = storeContentType(buf, "image/png");
+  const key = newStorageKey(extensionForContentType(type));
+  await getStorage().put(key, buf, type);
   return key;
 }
 

@@ -131,7 +131,12 @@ services:
       - "443:443"
       - "443:443/udp"
     environment:
-      CADDY_DOMAIN: ${CADDY_DOMAIN:-localhost}
+      # Required, like every other production variable here. The default was
+      # "localhost", which does not fail closed: an operator who forgot to set
+      # it got a deployment that came up healthy on a self-signed localhost
+      # certificate while serving the real domain over plain HTTP — the exact
+      # silent-wrong-control shape the rest of this file refuses with `:?`.
+      CADDY_DOMAIN: ${CADDY_DOMAIN:?set CADDY_DOMAIN, e.g. pixelduo.ai}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data

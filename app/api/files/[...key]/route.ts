@@ -3,6 +3,7 @@ import { authenticateApiKey } from "@/lib/apikey";
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getStorage } from "@/lib/storage";
+import { sniffContentType, contentTypeFromKey } from "@/lib/media-type";
 
 // Error bodies need the same no-store as the success path, for the reason
 // lib/api.ts centralises it: a 401/403/404 for a URL-addressable resource is
@@ -12,61 +13,6 @@ import { getStorage } from "@/lib/storage";
 // merely checkpointed, so a client following them immediately gets a 404 for a
 // path that starts serving 200 seconds later.
 const NO_STORE = { "Cache-Control": "private, no-store" } as const;
-
-function sniffContentType(buf: Uint8Array): string {
-  // Video: MP4
-  if (
-    buf.length >= 12 &&
-    buf[4] === 0x66 && buf[5] === 0x74 && buf[6] === 0x79 && buf[7] === 0x70 &&
-    buf[8] === 0x69 && buf[9] === 0x73 && buf[10] === 0x6f && buf[11] === 0x6d
-  ) {
-    return "video/mp4";
-  }
-  // Video: WebM
-  if (
-    buf.length >= 4 &&
-    buf[0] === 0x1a && buf[1] === 0x45 && buf[2] === 0xdf && buf[3] === 0xa3
-  ) {
-    return "video/webm";
-  }
-  // Image: JPEG
-  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return "image/jpeg";
-  // Image: PNG
-  if (buf.length >= 4 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return "image/png";
-  // Image: WebP (RIFF....WEBP)
-  if (
-    buf.length >= 12 &&
-    buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&
-    buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50
-  ) {
-    return "image/webp";
-  }
-  return "application/octet-stream";
-}
-
-// Extension fallback for a ranged response that does not start at byte 0: the
-// magic bytes are what sniffContentType() reads, and a mid-file range has none
-// of them (it would be served as application/octet-stream — the exact bug this
-// fallback exists to avoid). Keys are minted by newStorageKey() with these
-// extensions, and /api/files only ever serves objects it stored.
-function contentTypeFromKey(key: string): string | null {
-  const m = /\.([a-z0-9]{2,4})$/i.exec(key);
-  switch ((m?.[1] ?? "").toLowerCase()) {
-    case "mp4":
-      return "video/mp4";
-    case "webm":
-      return "video/webm";
-    case "png":
-      return "image/png";
-    case "jpg":
-    case "jpeg":
-      return "image/jpeg";
-    case "webp":
-      return "image/webp";
-    default:
-      return null;
-  }
-}
 
 /**
  * Parse a single-range `Range: bytes=…` request against a known object size.
