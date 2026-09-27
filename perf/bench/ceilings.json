@@ -1,0 +1,8 @@
+{
+ "landing-dpr1::ready_p75": 1482.5,
+ "landing-dpr1::requests_p75": 31.0,
+ "landing-dpr1::bytes_total_p75": 737626.0,
+ "landing-dpr2::ready_p75": 2610.9,
+ "landing-dpr2::requests_p75": 31.0,
+ "landing-dpr2::bytes_total_p75": 1302006.0
+}

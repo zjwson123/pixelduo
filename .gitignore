@@ -21,3 +21,12 @@ public/generated/
 *.log
 .vscode/
 .idea/
+# Perf sprint (huashu-flash): the reports are deliverables and stay tracked;
+# only the bulk measurement output and screenshots are ignored. ceilings.json is
+# the ratchet itself — it has to be tracked or the limits reset every session.
+# session.json is a live login cookie and must never be committed.
+perf/bench/*.json
+!perf/bench/ceilings.json
+perf/bench/session.json
+perf/shots/
+perf/raw/
