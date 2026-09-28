@@ -7,6 +7,7 @@ import { getStorage, newStorageKey } from "../lib/storage";
 import { concatVideos } from "../lib/video-concat";
 import { initObservability, captureError } from "../lib/observability";
 import { bakeWatermark } from "../lib/watermark";
+import { storeContentType } from "../lib/media-type";
 import { getModel } from "../lib/model-registry";
 import { prisma } from "../lib/prisma";
 import { isPermanentProviderError } from "../lib/worker-errors";
@@ -165,15 +166,39 @@ export async function processImageJob(job: {
     }));
 
     // Free-tier outputs from providers without a built-in mark get our badge
+    let bakedAny = false;
     if (isFree) {
       for (const img of images) {
         if (getModel(img.model)?.builtInWatermark) continue;
+        // Badged by an earlier attempt of this same job: the checkpoint says so.
+        // The bake loop used to run over every image on every attempt, and a
+        // retry after the bake (a storage put failure, a Prisma error inside
+        // completeJob's transaction, the worker killed and recoverStuckJobs
+        // re-queueing it) re-composited the badge onto the badge — measured as
+        // the 0.55-alpha badge going to ~0.80, mean |Δ| 42/255 across the band —
+        // and now also re-encodes an already-lossy JPEG/WebP over the only copy,
+        // because bakeWatermark preserves the container it is handed.
+        if (img.baked) continue;
         const raw = await getStorage().get(img.key);
         if (!raw) throw new Error("watermark: image missing from storage");
         const baked = await bakeWatermark(raw);
-        await getStorage().put(img.key, baked, "image/png");
+        // The bytes decide the recorded type, as everywhere else (lib/media-type).
+        // Hardcoded "image/png" was right while bakeWatermark always emitted PNG;
+        // it now preserves the container it was given, and a stored type that
+        // disagrees with the bytes is what a presigned URL (or the external
+        // moderation detector) reads.
+        await getStorage().put(img.key, baked, storeContentType(baked, "image/png"));
+        img.baked = true;
+        bakedAny = true;
       }
     }
+    // Persist the flags so the next attempt skips what this one badged. The keys
+    // are already in the checkpoint from before the bake (that ordering is what
+    // keeps an abandoned job's objects reclaimable), so a refused write here only
+    // means the job left the queue — completeJob's CAS is what decides delivery,
+    // and re-baking on a later attempt is what this write exists to prevent, not
+    // something it must be allowed to fail the job over.
+    if (bakedAny) await checkpointJobProgress(job.id, images).catch(() => undefined);
 
     // Sequential, not Promise.all: each in-process audit holds the image
     // buffer plus its base64 encoding plus the JSON body at once.

@@ -22,7 +22,9 @@ TARGET_SECRET="${BACKUP_TARGET_SECRET_ACCESS_KEY:-}"
 TARGET_BUCKET="${BACKUP_TARGET_BUCKET:-}"
 KEEP="${BACKUP_KEEP:-7}"
 
-MC_IMAGE="${MC_IMAGE:-minio/mc:latest}"
+# Pinned by digest — the client both DR scripts depend on; see the
+# note in docker-compose.yml. Override MC_IMAGE to bump it deliberately.
+MC_IMAGE="${MC_IMAGE:-minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727}"
 
 docker run --rm \
   --entrypoint /bin/sh \

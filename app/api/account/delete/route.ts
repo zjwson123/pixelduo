@@ -1,7 +1,9 @@
 import { z } from "zod";
+import { Prisma } from "@prisma/client";
 import { zodMessage, requireUserId, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped, ApiError } from "@/lib/api";
-import { prisma } from "@/lib/prisma";
+import { prisma, withDeadlockRetry } from "@/lib/prisma";
 import { passwordReauthRefusal } from "@/lib/auth";
+import { GRANT_LOCK_ORDER } from "@/lib/ledger";
 import { deleteObjectsBounded } from "@/lib/storage";
 import { checkpointKeys } from "@/lib/queue";
 import { ADMIN_GUARD_LOCK, assertAnotherAdminRemains } from "@/lib/admin";
@@ -110,25 +112,52 @@ export async function POST(req: Request) {
     const refKeys = jobs.map((j) => j.refImageKey).filter((k): k is string => Boolean(k));
     const staged = jobs.flatMap((j) => checkpointKeys(j.images));
     await deleteObjectsBounded([...images.map((i) => i.url), ...refKeys, ...staged]);
-    await prisma.$transaction(async (tx) => {
-      // Re-checked under a lock held to commit, in the same transaction as the
-      // delete. The unlocked count above cannot be the invariant: two admins
-      // erasing themselves at the same moment each saw 2 admins and both deletes
-      // landed, leaving an install with no admin and no in-app way to mint one
-      // (both admin routes refuse to target the caller, so recovery needs host
-      // access to scripts/promote-admin.ts).
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${ADMIN_GUARD_LOCK})`;
-      const current = await tx.user.findUnique({ where: { id: userId }, select: { role: true } });
-      if (!current) throw new Error("user-not-found");
-      if (current.role === "admin") await assertAnotherAdminRemains(tx, userId);
-      await tx.backupCode.deleteMany({ where: { userId } });
-      await tx.verificationToken.deleteMany({ where: { userId } });
-      await tx.creditReminder.deleteMany({ where: { userId } });
-      // ApiKey has no FK relation (by design, hash-only table), so it needs an
-      // explicit wipe or key metadata survives the erasure request.
-      await tx.apiKey.deleteMany({ where: { userId } });
-      await tx.user.delete({ where: { id: userId } });
-    });
+    await withDeadlockRetry(() =>
+      prisma.$transaction(async (tx) => {
+        // Re-checked under a lock held to commit, in the same transaction as the
+        // delete. The unlocked count above cannot be the invariant: two admins
+        // erasing themselves at the same moment each saw 2 admins and both deletes
+        // landed, leaving an install with no admin and no in-app way to mint one
+        // (both admin routes refuse to target the caller, so recovery needs host
+        // access to scripts/promote-admin.ts).
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(${ADMIN_GUARD_LOCK})`;
+        const current = await tx.user.findUnique({ where: { id: userId }, select: { role: true } });
+        if (!current) throw new Error("user-not-found");
+        if (current.role === "admin") await assertAnotherAdminRemains(tx, userId);
+        // Lock what the cascade below will reach, in the order every writer that
+        // can meet this transaction takes it: Order → Job → CreditGrant → User.
+        //
+        // The grant lock alone was not enough. This transaction reaches the Job
+        // and Order rows through the cascade, i.e. AFTER the User row, while the
+        // writers that hold those rows take them FIRST: completeJob (Order → Job
+        // → User), failJob (Job → grants → User), the refund webhook (Order →
+        // grants → User), fulfilOrder (Order → User). An erasure overlapping any
+        // of them was therefore still a cycle, and PostgreSQL aborted the erasure
+        // (40P01 on `user.delete`, observed in probes against the real failJob
+        // and against the webhook's statement pair) — a 500 on the one route
+        // whose promise is that the customer can retry. The sweep and the spend
+        // path are the two races the previous version did close, which is why the
+        // order has to come from the writers rather than from the race that
+        // happened to be seen. withDeadlockRetry is the net for the next writer
+        // this list does not know about yet.
+        //
+        // Locking rows the cascade will delete is idempotent, and the cost is
+        // bounded by the account's own row count (a 20k-grant / 2k-job account
+        // measured 26 ms, against the 5 s transaction timeout).
+        await tx.$queryRaw(Prisma.sql`SELECT id FROM "Order" WHERE "userId" = ${userId} ORDER BY id FOR UPDATE`);
+        await tx.$queryRaw(Prisma.sql`SELECT id FROM "Job" WHERE "userId" = ${userId} ORDER BY id FOR UPDATE`);
+        await tx.$queryRaw(
+          Prisma.sql`SELECT id FROM "CreditGrant" WHERE "userId" = ${userId} ${GRANT_LOCK_ORDER} FOR UPDATE`,
+        );
+        await tx.backupCode.deleteMany({ where: { userId } });
+        await tx.verificationToken.deleteMany({ where: { userId } });
+        await tx.creditReminder.deleteMany({ where: { userId } });
+        // ApiKey has no FK relation (by design, hash-only table), so it needs an
+        // explicit wipe or key metadata survives the erasure request.
+        await tx.apiKey.deleteMany({ where: { userId } });
+        await tx.user.delete({ where: { id: userId } });
+      }),
+    );
     return ok({ deleted: true });
   } catch (e) {
     if (e instanceof z.ZodError) return fail(zodMessage(e));

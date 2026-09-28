@@ -7,12 +7,19 @@ import { isProductionRuntime } from "../runtime-env";
 import { saveBase64Image, saveRemoteImage, fetchPublicBuffer, readBodyCapped, outboundTimeoutMs } from "../store";
 import { getStorage } from "../storage";
 import { getModel, type ModelInfo } from "../model-registry";
+import { upstreamFor } from "../model-upstream";
 import { storeContentType, extensionForContentType } from "../media-type";
 import type { Quality } from "../cost";
 
 export interface ProviderImage {
   key: string;
   model: string; // model id from registry
+  // Set by the worker once the free-tier badge has been baked into this object,
+  // and persisted in Job.images. A retry resumes from that checkpoint and skips
+  // what a previous attempt already badged — without it the badge was composited
+  // onto the badge (and, since bakeWatermark preserves the container, re-encoded
+  // a lossy file a second time over the only copy).
+  baked?: boolean;
 }
 
 // Fired after each individual image is safely persisted to storage, so the
@@ -416,15 +423,17 @@ export async function generateImages(input: {
       // Check registry for new models
       const model = getModel(input.model);
       if (!model) throw new Error(`unknown-model:${input.model}`);
+      // Which gateway serves this model is server-only data (lib/model-upstream).
+      const upstream = upstreamFor(input.model);
       if (model.mediaType === "image") {
         // Route by gateway
-        if (model.gateway === "aliyun") {
-          return generateWithWanImage(input.prompt, model.modelId as "wan2.7-image" | "wan2.7-image-pro", input.count, input.imageBase64List, input.watermark, input.onImage);
+        if (upstream?.gateway === "aliyun") {
+          return generateWithWanImage(input.prompt, upstream.modelId as "wan2.7-image" | "wan2.7-image-pro", input.count, input.imageBase64List, input.watermark, input.onImage);
         }
-        if (model.gateway === "modelverse") {
+        if (upstream?.gateway === "modelverse") {
           return generateWithGpt(input.prompt, input.quality, input.count, input.onImage);
         }
-        if (model.gateway === "ark") {
+        if (upstream?.gateway === "ark") {
           return generateWithSeedream(input.prompt, input.count, input.imageBase64, input.watermark ?? true, input.onImage);
         }
       }
@@ -465,7 +474,8 @@ export async function createVideoTask(input: {
 
 async function createSeedanceTask(appModel: string, prompt: string, durationSec: number, imageBase64?: string, extendVideoUrl?: string): Promise<VideoTaskResult> {
   const info = getModel(appModel);
-  if (!info || info.gateway !== "ark") throw new Error(`not-an-ark-video-model:${appModel}`);
+  const upstream = upstreamFor(appModel);
+  if (!info || upstream?.gateway !== "ark") throw new Error(`not-an-ark-video-model:${appModel}`);
   const keys = [getArkKey()].filter((k): k is string => Boolean(k));
   if (!keys.length) throw new Error("ark key missing for video generation");
 
@@ -482,7 +492,7 @@ async function createSeedanceTask(appModel: string, prompt: string, durationSec:
     const data = await callWithKeys(
       "https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks",
       {
-        model: info.modelId,
+        model: upstream.modelId,
         task_type: "extend",
         content,
         ratio: "adaptive",
@@ -505,7 +515,7 @@ async function createSeedanceTask(appModel: string, prompt: string, durationSec:
   const data = await callWithKeys(
     "https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks",
     {
-      model: info.modelId,
+      model: upstream.modelId,
       content,
       resolution: "720p",
       ratio: "16:9",
@@ -578,11 +588,12 @@ export async function pollVideoTask(model: string, taskId: string): Promise<Vide
 
   const modelInfo = getModel(model);
   if (!modelInfo) return { status: "unknown", error: "unknown-model" };
+  const upstream = upstreamFor(model);
 
-  if (modelInfo.gateway === "ark") {
+  if (upstream?.gateway === "ark") {
     return pollSeedanceTask(taskId);
   }
-  if (modelInfo.gateway === "aliyun") {
+  if (upstream?.gateway === "aliyun") {
     return pollWanVideoTask(taskId);
   }
   return { status: "unknown", error: "unsupported-gateway" };

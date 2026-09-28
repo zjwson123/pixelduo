@@ -17,7 +17,7 @@ export default function TermsPage() {
         <p>You must provide accurate registration information. Accounts may not be resold, and you are responsible for all activity under your account.</p>
 
         <h2>3. Credits &amp; subscriptions</h2>
-        <p>Credits and subscriptions are virtual allowances usable only within the platform. Purchased credits are valid for 12 months; unused monthly subscription quota carries over at 30% for the following month only. During the beta, payment flows are simulated and no real charge occurs.</p>
+        <p>Credits and subscriptions are virtual allowances usable only within the platform. Purchased credits are valid for 12 months; unused monthly subscription quota carries over at 30% for the following month only. The service is in beta and features or prices may change. Payments, where enabled, are processed by our payment provider: the amount and currency shown on that provider&apos;s checkout page are the ones that apply, and nothing is charged where a deployment runs without a payment provider configured.</p>
 
         <h2>4. Generated content &amp; IP</h2>
         <p>You keep commercial rights to images generated from your prompts, provided the content is lawful and compliant. You warrant that your inputs do not infringe third-party rights (likeness, trademark, copyright). The platform may remove content that violates these terms or our safety policy.</p>

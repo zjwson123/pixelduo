@@ -15,8 +15,6 @@ export interface ModelInfo {
   id: string; // unique model id, e.g. "gpt", "seedream", "wan-image", "wan-image-pro", "seedance", "wan-t2v", "wan-i2v"
   displayName: string; // shown in UI
   mediaType: MediaType;
-  gateway: Gateway;
-  modelId: string; // actual upstream model id
   defaultQuality: Quality;
   supportsQuality: boolean; // whether the model accepts quality param
   description: string;
@@ -65,8 +63,6 @@ export const MODELS: ModelInfo[] = [
     id: "gpt",
     displayName: "GPT Image 2",
     mediaType: "image",
-    gateway: "modelverse",
-    modelId: "gpt-image-2",
     defaultQuality: "medium",
     supportsQuality: true,
     description: "Best text rendering & fine detail. Slower (30-120s).",
@@ -80,8 +76,6 @@ export const MODELS: ModelInfo[] = [
     id: "seedream",
     displayName: "Seedream 5",
     mediaType: "image",
-    gateway: "ark",
-    modelId: "doubao-seedream-5-0-260128",
     defaultQuality: "standard",
     supportsQuality: false,
     description: "Fast (5-15s). Built-in AI watermark. Best for realistic/portrait.",
@@ -95,11 +89,9 @@ export const MODELS: ModelInfo[] = [
     id: "wan-image",
     displayName: "Wan 2.7",
     mediaType: "image",
-    gateway: "aliyun",
-    modelId: "wan2.7-image",
     defaultQuality: "standard",
     supportsQuality: false,
-    description: "Fastest & cheapest (¥0.24/张). Great for drafts & free tier.",
+    description: "Fastest & cheapest. Great for drafts & free tier.",
     costPerUnit: { credits: 4, usd: 0.04, label: "standard · 2K" },
     async: false,
     supportsImageInput: true, // supports editing via multi-image reference
@@ -110,8 +102,6 @@ export const MODELS: ModelInfo[] = [
     id: "wan-image-pro",
     displayName: "Wan 2.7 Pro",
     mediaType: "image",
-    gateway: "aliyun",
-    modelId: "wan2.7-image-pro",
     defaultQuality: "standard",
     supportsQuality: false,
     description: "4K output, group images, multi-image editing, thinking mode.",
@@ -127,11 +117,9 @@ export const MODELS: ModelInfo[] = [
     id: "seedance",
     displayName: "Seedance 2.0",
     mediaType: "video",
-    gateway: "ark",
-    modelId: "doubao-seedance-2-0-260128",
     defaultQuality: "standard",
     supportsQuality: false,
-    description: "Doubao video gen. Text-to-video, image-to-video. ~¥1/sec.",
+    description: "Doubao video gen. Text-to-video, image-to-video.",
     // 5s @ ~¥1/sec ≈ ¥5 ≈ $0.70 → 70 credits per 5s video
     costPerUnit: { credits: 14, usd: 0.14, label: "per second" },
     async: true,
@@ -144,11 +132,9 @@ export const MODELS: ModelInfo[] = [
     id: "seedance-2.5",
     displayName: "Seedance 2.5",
     mediaType: "video",
-    gateway: "ark",
-    modelId: "doubao-seedance-2-5-260628",
     defaultQuality: "standard",
     supportsQuality: false,
-    description: "Newer Doubao video gen: up to 30s single-clip, audio-video sync, video extend. ~¥1.7/sec.",
+    description: "Newer Doubao video gen: up to 30s single-clip, audio-video sync, video extend.",
     // 720p 刊例 ~¥1.7/sec ≈ $0.24 → calibrate against the first real bill
     costPerUnit: { credits: 24, usd: 0.24, label: "per second" },
     async: true,
@@ -161,11 +147,9 @@ export const MODELS: ModelInfo[] = [
     id: "wan-t2v",
     displayName: "Wan 2.7 T2V",
     mediaType: "video",
-    gateway: "aliyun",
-    modelId: "wan2.7-t2v-2026-06-12",
     defaultQuality: "standard",
     supportsQuality: false,
-    description: "Text-to-video. Multi-shot narrative, audio sync. ¥0.6-1.0/sec.",
+    description: "Text-to-video. Multi-shot narrative, audio sync.",
     // 5s @ 720P ¥0.6/sec ≈ ¥3 ≈ $0.42 → 42 credits per 5s video
     costPerUnit: { credits: 10, usd: 0.10, label: "per second (720P)" },
     async: true,
@@ -177,11 +161,9 @@ export const MODELS: ModelInfo[] = [
     id: "wan-i2v",
     displayName: "Wan 2.7 I2V",
     mediaType: "video",
-    gateway: "aliyun",
-    modelId: "wan2.7-i2v-2026-04-25",
     defaultQuality: "standard",
     supportsQuality: false,
-    description: "Image-to-video. First/last frame, audio lip-sync. ¥0.6-1.0/sec.",
+    description: "Image-to-video. First/last frame, audio lip-sync.",
     costPerUnit: { credits: 10, usd: 0.10, label: "per second (720P)" },
     async: true,
     supportsImageInput: true,

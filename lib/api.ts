@@ -175,6 +175,12 @@ export function fail(error: unknown) {
 }
 
 // Route-level limit keyed by IP + scope. Returns 429 response when exceeded.
+//
+// For routes that have not identified the caller yet (register, the auth-mail
+// pair, health, the payment webhook, the signed-out feedback form). An
+// authenticated route must use enforceUserRateLimit instead: see the note there
+// for why a shared source-address bucket turns one stranger's traffic into
+// everyone else's outage.
 export async function enforceRateLimit(
   req: Request,
   scope: string,
@@ -198,8 +204,24 @@ export async function enforceRateLimit(
   return null;
 }
 
-// Per-account limit complementing the per-IP one: an attacker distributing
-// TOTP guesses across IPs must not dilute the limit for a single account.
+// The budget for an AUTHENTICATED route, keyed on the account — the only leg
+// these routes carry.
+//
+// It is deliberately not paired with the per-IP bucket: everyone behind one
+// egress (an office, a VPN, a carrier NAT) shares that bucket, and it is spent
+// BEFORE any credit is checked, so a single verified account with an empty
+// balance could hold it full with requests answered "insufficient-credits" —
+// refusing generation, checkout and Explore to unrelated neighbours, at no cost
+// to itself. The account is the dimension that can be held responsible for the
+// traffic; a source address shared by strangers cannot. The middleware already
+// took this decision for authenticated traffic (proxy.ts bucketFor). The
+// residual — many accounts flooding from one address — is bounded by
+// registration (mailbox verification + REGISTER_RATE_LIMIT), which is the same
+// residual and the same bound the middleware documents.
+//
+// Still second to `loginFailures`/the 2FA brake where a guess is being counted:
+// those bounds must not be dilutable across IPs, which is why they are keyed
+// this way too.
 export async function enforceUserRateLimit(
   userId: string,
   scope: string,

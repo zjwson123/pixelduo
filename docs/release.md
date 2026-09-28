@@ -46,8 +46,8 @@ Caddy 自动申请 Let's Encrypt 证书（80/443 需公网可达）。
 # 健康：真实响应体只有 ok / service / db / redis / storage / queue.active / time
 # 这几个字段——既没有 rateLimiter，也没有队列深度（worker 心跳）：那是刻意不暴露
 # 的反侦察信息（lib/rate-limit.ts 里 getLimiterName() 没有任何调用方）。
-# 注意 ok:false 时这个路由照旧返回 200（只有探测本身抛异常才 503），
-# 所以 `curl -fsS` 只能证明"服务在响应"，必须看 JSON 内容：
+# 任一依赖不健康时返回 503（容器 healthcheck 的 wget 退出码即 HTTP 状态），
+# 所以 `curl -fsS` 失败就说明有依赖挂了；JSON 才说明是哪一个：
 curl -sS https://pixelduo.ai/api/health \
   | jq -e '.service == "pixelduo" and .ok and .db == "up" and .redis == "up" and .storage == "up"'
 # 没装 jq 就退化成 grep '"ok":true'（同样是粗判）；redis 字段在未配置 REDIS_URL

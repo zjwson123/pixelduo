@@ -227,7 +227,15 @@ services:
     restart: unless-stopped
 
   storage:
-    image: minio/minio:latest
+    # Pinned by digest on purpose. MinIO is the object store holding every
+    # generated image and `mc` is the client both DR scripts depend on; MinIO
+    # ships breaking changes inside a release line, and these two were the only
+    # images in the stack not pinned to a major (postgres:16-alpine,
+    # redis:7-alpine, caddy:2-alpine, node:24-alpine). The digest below is the
+    # one verified on 2026-09-28 — minio RELEASE.2025-09-07T16-13-09Z — so a
+    # `docker compose pull` cannot move the store (or `mc mirror` semantics)
+    # under a running deployment without a deliberate edit here.
+    image: minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER}
@@ -241,7 +249,7 @@ services:
     restart: unless-stopped
 
   init-storage:
-    image: minio/mc:latest
+    image: minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
     entrypoint: ["/bin/sh", "-c"]
     depends_on:
       storage: { condition: service_healthy }
@@ -277,7 +285,7 @@ services:
     restart: unless-stopped
 
   backup-objects:
-    image: minio/mc:latest
+    image: minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
     entrypoint: ["/bin/sh", "-c"]
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}

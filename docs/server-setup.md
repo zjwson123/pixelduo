@@ -52,9 +52,9 @@ docker compose -f docker-compose.single.yml up -d --build --scale worker=3
 
 ```bash
 # 健康：真实响应体只有 ok / service / db / redis / storage / queue.active / time。
-# ok:false 时它也返回 200（只有探测本身抛异常才 503），所以 `curl -fsS` 只能证明
-# "服务在响应"——redis 挂了它会照旧退出 0，而 lib/rate-limit.ts 会静默退化成
-# 进程内限流（每个 worker 各限一份），这正是冒烟必须看 JSON 的原因：
+# 任一依赖不健康时返回 503（容器 healthcheck 的 wget 退出码即 HTTP 状态），
+# 所以 redis 挂了 `curl -fsS` 会失败；但 JSON 才说明是哪一个依赖，也才看得出
+# lib/rate-limit.ts 是否已静默退化成进程内限流（每个 worker 各限一份）：
 curl -sS https://pixelduo.ai/api/health \
   | jq -e '.service == "pixelduo" and .ok and .db == "up" and .redis == "up" and .storage == "up"'
 # 没装 jq 就退化成 grep '"ok":true'（同样是粗判）；redis 字段在未配置 REDIS_URL

@@ -15,6 +15,7 @@ import fsp from "fs/promises";
 import path from "path";
 import { PrismaClient } from "@prisma/client";
 import { getStorage, newStorageKey } from "../lib/storage";
+import { storeContentType, extensionForContentType } from "../lib/media-type";
 import { readBodyCapped } from "../lib/store";
 
 // Largest case image worth storing; also the streaming read cap below.
@@ -140,8 +141,14 @@ async function downloadImage(caseId: number, srcPath: string): Promise<string | 
     }
   }
   if (!buf || buf.length > MAX_CASE_BYTES) return null;
-  const key = newStorageKey("jpg");
-  await getStorage().put(key, buf, "image/jpeg");
+  // Key extension AND recorded type follow the bytes, not the assumption that
+  // GitHub serves JPEG. This hardcoded `newStorageKey("jpg")` + "image/jpeg" for
+  // whatever arrived, which is one of the ways an object ends up whose
+  // extension, stored type and magic bytes disagree — the state /api/files' mid-
+  // file Range path answers from the extension.
+  const contentType = storeContentType(buf, "image/jpeg");
+  const key = newStorageKey(extensionForContentType(contentType));
+  await getStorage().put(key, buf, contentType);
   return key;
 }
 

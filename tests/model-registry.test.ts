@@ -10,6 +10,7 @@ import {
   enabledImageModelIds,
   enabledVideoModelIds,
 } from "../lib/model-registry";
+import { UPSTREAM, upstreamFor } from "../lib/model-upstream";
 import { estimateModelCost, modelCost, videoCost, gptCost, seedreamCost } from "../lib/cost";
 
 describe("model-registry", () => {
@@ -72,7 +73,9 @@ describe("model-registry", () => {
   it("getModel returns model by id", () => {
     const gpt = getModel("gpt");
     expect(gpt).toBeDefined();
-    expect(gpt?.gateway).toBe("modelverse");
+    // The upstream gateway moved to lib/model-upstream (server-only), so the
+    // registry no longer carries it — see the test below for that mapping.
+    expect(upstreamFor("gpt")?.gateway).toBe("modelverse");
     expect(gpt?.supportsImageInput).toBe(true);
   });
 

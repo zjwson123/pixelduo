@@ -183,7 +183,9 @@ docker compose -f docker-compose.prod.yml up -d
 # 4. 验证
 # 真实响应体只有 ok / service / db / redis / storage / queue.active / time：
 # {"ok":true,"service":"pixelduo","db":"up","redis":"up","storage":"up","queue":{"active":false},"time":"..."}
-# ok:false 时它仍然返回 200，`curl -f` 不会失败，所以要看 JSON 内容：
+# ok:true 时返回 200，任一依赖不健康时返回 503（容器 healthcheck 的 wget 退出码
+# 就是 HTTP 状态，所以 `curl -f` 失败即代表有依赖挂了）；仍然建议看 JSON，
+# 它才说明是哪一个：
 curl -sS https://pixelduo.ai/api/health \
   | jq -e '.service == "pixelduo" and .ok and .db == "up" and .redis == "up" and .storage == "up"'
 ```

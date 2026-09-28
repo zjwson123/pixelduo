@@ -4,6 +4,7 @@ import { checkPrompt } from "@/lib/safety";
 import { createMediaJob, deliveredVideoSeconds } from "@/lib/queue";
 import { getStorage, newStorageKey } from "@/lib/storage";
 import { enabledVideoModelIds, getModel, getVideoModels, modelEnum } from "@/lib/model-registry";
+import { upstreamFor } from "@/lib/model-upstream";
 import { randomUUID } from "crypto";
 import { prisma } from "@/lib/prisma";
 
@@ -43,12 +44,11 @@ const VIDEO_MAX_BYTES = 4 * 1024 * 1024;
 export async function POST(req: Request) {
   try {
     const userId = await requireVerifiedUser();
-    // Rate limit before parsing the body: req.json() buffers the whole
-    // request, so an unthrottled parse is a memory-exhaustion vector.
-    const limited = await enforceRateLimit(req, "video", 10, 60_000);
-    if (limited) return limited;
-    const userLimited = await enforceUserRateLimit(userId, "video", 10, 60_000);
-    if (userLimited) return fail(userLimited);
+    // Account-keyed, before the body is parsed (req.json() buffers the whole
+    // request, so an unthrottled parse is a memory-exhaustion vector); the
+    // IP-keyed leg it was paired with is gone — see enforceUserRateLimit.
+    const limited = await enforceUserRateLimit(userId, "video", 10, 60_000);
+    if (limited) return fail(limited);
     const bodyRaw = await readBodyCapped(req, VIDEO_MAX_BYTES);
     if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
     const body = schema.parse(JSON.parse(bodyRaw.raw));
@@ -67,7 +67,7 @@ export async function POST(req: Request) {
       });
       if (!src) return fail(new Error("invalid-input: extendOf must be one of your finished video jobs"));
       const srcInfo = getModel(src.model);
-      if (!srcInfo || srcInfo.gateway !== "ark") {
+      if (!srcInfo || upstreamFor(src.model)?.gateway !== "ark") {
         return fail(new Error("invalid-input: only Ark video models can be extended"));
       }
       const srcDur = await deliveredVideoSeconds(src.id);

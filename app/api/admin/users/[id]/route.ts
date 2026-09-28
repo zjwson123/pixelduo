@@ -1,6 +1,8 @@
+import { Prisma } from "@prisma/client";
 import { ADMIN_GUARD_LOCK, assertAnotherAdminRemains, requireAdmin } from "@/lib/admin";
 import { ok, fail } from "@/lib/api";
-import { prisma } from "@/lib/prisma";
+import { prisma, withDeadlockRetry } from "@/lib/prisma";
+import { GRANT_LOCK_ORDER } from "@/lib/ledger";
 import { deleteObjectsBounded } from "@/lib/storage";
 import { checkpointKeys } from "@/lib/queue";
 
@@ -35,18 +37,29 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
     const refKeys = jobs.map((j) => j.refImageKey).filter((k): k is string => Boolean(k));
     const staged = jobs.flatMap((j) => checkpointKeys(j.images));
     await deleteObjectsBounded([...images.map((i) => i.url), ...refKeys, ...staged]);
-    await prisma.$transaction(async (tx) => {
-      // Held to commit, so the count and the row deletes are one atomic step.
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${ADMIN_GUARD_LOCK})`;
-      const current = await tx.user.findUnique({ where: { id }, select: { role: true } });
-      if (!current) throw new Error("user-not-found");
-      if (current.role === "admin") await assertAnotherAdminRemains(tx, id);
-      await tx.backupCode.deleteMany({ where: { userId: id } });
-      await tx.verificationToken.deleteMany({ where: { userId: id } });
-      await tx.creditReminder.deleteMany({ where: { userId: id } });
-      await tx.apiKey.deleteMany({ where: { userId: id } });
-      await tx.user.delete({ where: { id: id } });
-    });
+    await withDeadlockRetry(() =>
+      prisma.$transaction(async (tx) => {
+        // Held to commit, so the count and the row deletes are one atomic step.
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(${ADMIN_GUARD_LOCK})`;
+        const current = await tx.user.findUnique({ where: { id }, select: { role: true } });
+        if (!current) throw new Error("user-not-found");
+        if (current.role === "admin") await assertAnotherAdminRemains(tx, id);
+        // Everything the cascade will reach, in the order the writers that take
+        // those rows use: Order → Job → CreditGrant → User — see the long note in
+        // app/api/account/delete for the cycles this closes (and for why the
+        // retry wrapper is the net under the next writer).
+        await tx.$queryRaw(Prisma.sql`SELECT id FROM "Order" WHERE "userId" = ${id} ORDER BY id FOR UPDATE`);
+        await tx.$queryRaw(Prisma.sql`SELECT id FROM "Job" WHERE "userId" = ${id} ORDER BY id FOR UPDATE`);
+        await tx.$queryRaw(
+          Prisma.sql`SELECT id FROM "CreditGrant" WHERE "userId" = ${id} ${GRANT_LOCK_ORDER} FOR UPDATE`,
+        );
+        await tx.backupCode.deleteMany({ where: { userId: id } });
+        await tx.verificationToken.deleteMany({ where: { userId: id } });
+        await tx.creditReminder.deleteMany({ where: { userId: id } });
+        await tx.apiKey.deleteMany({ where: { userId: id } });
+        await tx.user.delete({ where: { id: id } });
+      }),
+    );
     return ok({ deleted: true });
   } catch (e) {
     return fail(e);

@@ -65,8 +65,22 @@ export async function bakeWatermark(buf: Buffer): Promise<Buffer> {
   // return added between the two re-opens a ~1GB decode of a few hundred KB of
   // deflate. The ceiling belongs on every sharp() call that touches provider
   // bytes (lib/safety.ts does the same).
-  return sharp(buf, { limitInputPixels: MAX_INPUT_PIXELS })
-    .composite([{ input: Buffer.from(svg), gravity: "southeast" }])
-    .png()
-    .toBuffer();
+  const marked = sharp(buf, { limitInputPixels: MAX_INPUT_PIXELS }).composite([
+    { input: Buffer.from(svg), gravity: "southeast" },
+  ]);
+  // Encoded back into the container it arrived in. The object's key was minted
+  // from the sniffed format (lib/store.ts → extensionForContentType), and a
+  // Range that does not start at byte 0 has no magic bytes to sniff, so
+  // /api/files answers with `contentTypeFromKey` — a PNG body under a `.webp`
+  // key therefore served the wrong Content-Type on exactly that path. It is also
+  // the difference between a 200KB WebP and a ~1.5MB lossless PNG for every
+  // free-tier output, and this runs on every one of them.
+  switch (meta.format) {
+    case "jpeg":
+      return marked.jpeg().toBuffer();
+    case "webp":
+      return marked.webp().toBuffer();
+    default:
+      return marked.png().toBuffer();
+  }
 }

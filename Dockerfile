@@ -62,9 +62,12 @@ COPY --from=builder --chown=node:node /app/prisma ./prisma
 # made, so the image does not depend on that one file staying correct. Only
 # things the running server never reads are pruned — public/templates,
 # public/showcase, prisma/, server.js, node_modules and .next all stay.
+# perf/ is in both lists because the sprint tooling left a LIVE session cookie
+# in perf/bench/session.json (the bench's Playwright storage state) next to raw
+# measurements; it is dev tooling, not runtime input.
 RUN rm -rf \
-      .env .env.production .env.local \
-      docs tests e2e designs data backups public/generated \
+      .env .env.* \
+      docs tests e2e designs data backups public/generated perf \
       ./*.md docker-compose*.yml Caddyfile Dockerfile \
       ./*.tsbuildinfo
 # Never run as root: a compromise (sharp/libvips, a dependency) must not get
@@ -96,10 +99,11 @@ RUN npx prisma generate
 # is: they describe the deployment. `.env*` in this list is what protects the
 # build host — a compose file that survived into the image is also where a live
 # S3 key pasted into an override would be readable by anyone who can `docker
-# save` it.
+# save` it. perf/ carries the sprint's bench scripts and reports, and
+# perf/bench/session.json is a live session cookie — see the web stage's note.
 RUN rm -rf \
-      .env .env.production .env.local \
-      docs tests e2e designs data backups public/generated public/showcase \
+      .env .env.* \
+      docs tests e2e designs data backups public/generated public/showcase perf \
       ./*.md docker-compose*.yml Caddyfile Dockerfile \
       ./*.tsbuildinfo
 USER node

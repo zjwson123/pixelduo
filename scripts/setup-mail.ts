@@ -83,7 +83,7 @@ if (fs.existsSync("/.dockerenv")) {
       "written to the image's ephemeral layer and never reach the running services.",
       "",
       "Set these on the HOST instead (e.g. in the .env that docker compose reads):",
-      `  SMTP_URL="${smtpUrl}"`,
+      `  SMTP_URL="${maskSecretUrl(smtpUrl)}"`,
       `  EMAIL_FROM="${emailFrom}"`,
       "",
       "Then recreate the containers: docker compose up -d --force-recreate web worker",

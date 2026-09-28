@@ -5,6 +5,20 @@ const nextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
   output: "standalone",
+  // Keep the working tree's non-runtime material out of .next/standalone.
+  //
+  // `next build` copies part of the tree into the standalone output, and on this
+  // host that included perf/bench/session.json — a LIVE next-auth session cookie,
+  // the perf bench's Playwright storage state, byte-identical to the file on
+  // disk — next to raw measurements, docs/, tests/ and backups/. The Dockerfile
+  // prunes all of it from the image and .dockerignore keeps it out of the build
+  // context, but a host that ships .next/standalone itself (rsync or tar of the
+  // standalone output, the usual non-Docker path) carried the cookie along.
+  // `.env*` cannot be excluded this way: Next copies environment files into
+  // standalone unconditionally, which is why the Dockerfile prunes those too.
+  outputFileTracingExcludes: {
+    "*": ["perf/**", "docs/**", "tests/**", "e2e/**", "backups/**", "data/**", "public/generated/**"],
+  },
   async headers() {
     return [
       {

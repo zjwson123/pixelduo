@@ -452,11 +452,13 @@ export async function refundCreditsTx(
       refType: string | null;
       refId: string | null;
       source: string;
+      amount: number;
+      remaining: number;
       expired: boolean;
       graceExpired: boolean;
     }>
   >(
-    Prisma.sql`SELECT id, "expiresAt", "refType", "refId", source,
+    Prisma.sql`SELECT id, "expiresAt", "refType", "refId", source, amount, remaining,
         ("expiresAt" IS NOT NULL AND "expiresAt" <= now()) AS expired,
         -- A dead grant with no deadline (expiresAt IS NULL) is never past its
         -- grace: the replacement arithmetic falls back to the current time for
@@ -524,6 +526,10 @@ export async function refundCreditsTx(
   // lapsed past their grace. Both are deducted from the REFUND ledger entry,
   // because the balance must not move for credits the user does not receive.
   let notRestored = 0;
+  // What this call has already given back, per grant. Two consumption rows can
+  // name the same grant, and a stale read of `remaining` would let the second
+  // increment cross `amount` even though the first one was checked.
+  const restoredPerGrant = new Map<string, number>();
   for (const c of consumption) {
     const row = rows.find((r) => r.id === c.grantId);
     // A vanished grant has no provenance left to inherit — fall back to the
@@ -571,6 +577,28 @@ export async function refundCreditsTx(
       expiredByRef.set(key, bucket);
       continue;
     }
+    // A grant that cannot hold the increment must not be written anyway: the
+    // CHECK from migration 20260926120000_credit_grant_invariant_check enforces
+    // `0 <= remaining <= amount` on every write, so crossing `amount` aborts the
+    // caller's WHOLE transaction. For a terminal job failure that transaction is
+    // the job's CAS to `failed` plus this refund — the rollback left the job
+    // `running` with a stale heartbeat, recoverStuckJobs reaped it every ~36s and
+    // failed it identically for ever, and the pre-auth was never given back.
+    // Only a row that already violates the invariant can reach this (the CHECK
+    // is NOT VALID, so rows predating it are still in production — that is what
+    // scripts/repair-credit-invariant.ts fixes), or a consumption refunded twice.
+    // Same answer as the past-grace branch either way: do not restore a portion
+    // the row cannot hold, report it, and let the caller finish.
+    const cap = row ? row.amount : null;
+    const held = row ? row.remaining : null;
+    if (cap !== null && held !== null && held + (restoredPerGrant.get(c.grantId) ?? 0) + c.amount > cap) {
+      console.warn(
+        `[ledger] refund of ${c.amount} credit(s) refused by grant ${c.grantId}: it holds ${held}/${cap} and the invariant forbids remaining > amount — not restored (user ${userId}); run scripts/repair-credit-invariant.ts --fix`,
+      );
+      notRestored += c.amount;
+      continue;
+    }
+    restoredPerGrant.set(c.grantId, (restoredPerGrant.get(c.grantId) ?? 0) + c.amount);
     await tx.creditGrant.update({
       where: { id: c.grantId },
       data: { remaining: { increment: c.amount } },

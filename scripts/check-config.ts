@@ -145,10 +145,25 @@ function codeReadNames(): Map<string, string[]> {
   for (const f of files) {
     if (f.endsWith("scripts/check-config.ts")) continue; // its own doc comment
     const src = fs.readFileSync(f, "utf8");
-    for (const m of src.matchAll(/process\.env\.([A-Z][A-Z0-9_]*)/g)) {
-      const list = out.get(m[1]) ?? [];
-      if (!list.includes(f)) list.push(f);
-      out.set(m[1], list);
+    // Two idioms read the environment here. The second is the DI-friendly form
+    // — `fn(env: NodeJS.ProcessEnv = process.env)` — and it was invisible to
+    // this gate: IMAGE_MODERATION, MAIL_DEV_MODE and MOCK_IMAGE_PROVIDER are
+    // read that way, so losing an anchor line for any of them stayed green.
+    // IMAGE_MODERATION defaults to OFF (lib/safety.ts), which makes that one the
+    // difference between "images are reviewed" and "nothing is".
+    // Only files that declare the parameter are scanned for the property form,
+    // so an unrelated `x.env.FOO` elsewhere cannot be mistaken for a variable
+    // this gate must demand of the containers.
+    const patterns = [/\bprocess\.env\.([A-Z][A-Z0-9_]*)/g];
+    if (/\benv\s*:\s*NodeJS\.ProcessEnv\b/.test(src)) {
+      patterns.push(/\benv\.([A-Z][A-Z0-9_]*)/g);
+    }
+    for (const re of patterns) {
+      for (const m of src.matchAll(re)) {
+        const list = out.get(m[1]) ?? [];
+        if (!list.includes(f)) list.push(f);
+        out.set(m[1], list);
+      }
     }
   }
   return out;

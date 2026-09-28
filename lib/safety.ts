@@ -2,6 +2,7 @@ import sharp from "sharp";
 import { getStorage } from "./storage";
 import { getVisionConfig } from "./keys";
 import { MAX_INPUT_PIXELS, isRasterImage } from "./watermark";
+import { sniffContentType } from "./media-type";
 import { hostIsPublic, isPublicPort, readJsonCapped, ssrfPinnedAgent, outboundTimeoutMs } from "./store";
 import { fetch as pinnedFetch } from "undici";
 
@@ -284,7 +285,16 @@ export async function analyzeImage(url: string): Promise<ImageAudit> {
       const buf = await getStorage().get(url);
       if (!buf) return { checked: false, unavailable: true };
       let payload = buf;
-      let ext = url.endsWith(".jpg") || url.endsWith(".jpeg") ? "jpeg" : "png";
+      // The declared MIME has to describe the bytes actually sent. It used to be
+      // derived from the KEY's extension (`...png` unless it ends in .jpg), which
+      // was right while every baked output was a PNG; bakeWatermark now preserves
+      // the source container, so a WebP object would be announced as `image/png`
+      // to a detector that may decode by the declared type — which fails closed
+      // (the job is refused and refunded) but makes every such generation
+      // undeliverable for no reason. Sniff instead: the bytes are already here,
+      // and lib/media-type.ts is the module that owns this question.
+      const sniffed = sniffContentType(payload);
+      let ext = sniffed === "image/jpeg" ? "jpeg" : sniffed === "image/webp" ? "webp" : "png";
       if (buf.length > MODERATION_DOWNSCALE_ABOVE_BYTES) {
         // Downscale rather than skip — see shrinkForAudit. If even that fails
         // (corrupt or unsupported object) we have nothing auditable, and an

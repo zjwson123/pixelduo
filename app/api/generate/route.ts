@@ -19,15 +19,12 @@ const GENERATE_MAX_BYTES = 64 * 1024;
 export async function POST(req: Request) {
   try {
     const userId = await requireVerifiedUser();
-    // Rate limit before parsing the body: req.json() buffers the whole
-    // request, so an unthrottled parse is a memory-exhaustion vector.
-    const limited = await enforceRateLimit(req, "generate", 20, 60_000);
-    if (limited) return limited;
-    // Per-account limit matching edit/video/assistant/route. The per-IP bucket
-    // is keyed on the last XFF entry, so a caller with several source IPs has
-    // no account-level ceiling here otherwise.
-    const userLimited = await enforceUserRateLimit(userId, "generate", 20, 60_000);
-    if (userLimited) return fail(userLimited);
+    // One budget, keyed on the account, before the body is parsed (req.json()
+    // buffers the whole request, so an unthrottled parse is a memory-exhaustion
+    // vector). This used to be an IP-keyed leg at the same 20/min, charged
+    // first — see enforceUserRateLimit in lib/api.ts for why that leg is gone.
+    const limited = await enforceUserRateLimit(userId, "generate", 20, 60_000);
+    if (limited) return fail(limited);
     const bodyRaw = await readBodyCapped(req, GENERATE_MAX_BYTES);
     if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
     const body = schema.parse(JSON.parse(bodyRaw.raw));

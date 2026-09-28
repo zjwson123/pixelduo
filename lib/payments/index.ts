@@ -37,6 +37,26 @@ function resolvePaymentProviderName(): string {
   return name;
 }
 
+// "mock" | "live" — for copy that must not promise something the server will
+// not honour.
+//
+// components/workbench.tsx told every buyer "Beta shell · no real charge" in the
+// checkout modal and on the pricing tab, unconditionally, while a production
+// deployment cannot even boot with the mock provider (assertProductionConfig →
+// resolvePaymentProviderName throws, and docker-compose.prod.yml makes a real
+// provider mandatory). So the one string that describes whether money moves was
+// a constant, and on a real deployment it was a lie told at the point of
+// payment. Derived here instead, and fail-closed: anything that is not
+// provably mock reads as live, because "no real charge" is a promise and only
+// the mock provider can keep it.
+export function paymentMode(): "mock" | "live" {
+  try {
+    return resolvePaymentProviderName() === "mock" ? "mock" : "live";
+  } catch {
+    return "live";
+  }
+}
+
 export function getPaymentProvider(): PaymentProvider {
   if (cached) return cached;
   const name = resolvePaymentProviderName();

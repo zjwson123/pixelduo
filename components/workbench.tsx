@@ -214,7 +214,7 @@ const LOCALE_STRINGS: Record<Locale, {
     signup: "Signup bonus", checkin: "Daily check-in", dailyCheckin: "daily check-in +2",
     topupPacks: "Top-up packs", validMonths: "valid 12 months", currentPlan: "Current plan", choose: "Choose", free: "Free",
     checkoutTitle: "Checkout · 结账壳子", item: "Item", creditsLabel: "Credits", totalLabel: "Total", paymentMethod: "Payment method",
-    betaNote: "Beta 壳子：当前为免费邀请制内测，不产生真实扣款。",
+    betaNote: "Beta 测试模式：本次部署未接入真实支付服务，不会产生扣款。",
     verifyBanner: "⚠️ Verify your email to unlock generation and your 30 free credits.", resend: "Resend email",
     expiryBanner: "⏳ credits expire in", expiryDay: "day", expiryDays: "days",
     ledgerTable: { time: "Time", type: "Type", note: "Note", delta: "Δ", balanceCol: "Balance" },
@@ -259,7 +259,7 @@ const LOCALE_STRINGS: Record<Locale, {
     signup: "注册奖励", checkin: "每日签到", dailyCheckin: "每日签到 +2",
     topupPacks: "积分包", validMonths: "12 个月有效", currentPlan: "当前套餐", choose: "选择", free: "免费",
     checkoutTitle: "结账 · 结账壳子", item: "商品", creditsLabel: "积分", totalLabel: "合计", paymentMethod: "支付方式",
-    betaNote: "Beta 壳子：当前为免费邀请制内测，不产生真实扣款。",
+    betaNote: "Beta 测试模式：本次部署未接入真实支付服务，不会产生扣款。",
     verifyBanner: "⚠️ 验证邮箱后即可生成图片并获得 30 积分。", resend: "重发邮件",
     expiryBanner: "⏳ 积分将在", expiryDay: "天后过期", expiryDays: "天后过期",
     ledgerTable: { time: "时间", type: "类型", note: "备注", delta: "变动", balanceCol: "余额" },
@@ -358,6 +358,11 @@ export function Workbench() {
     if (TABS.some((t) => t.id === hash)) setTabState(hash as Tab);
   }, []);
   const [me, setMe] = useState<Me | null>(null);
+  // Whether checkout really charges, from the server (GET /api/me). Defaults to
+  // "live", i.e. the "no real charge" note is hidden until the server says the
+  // provider is the mock one: that note is a promise about money, and the
+  // production gate refuses to boot with the mock provider at all.
+  const [paymentMode, setPaymentMode] = useState<"mock" | "live">("live");
   const [unhandledFeedback, setUnhandledFeedback] = useState(0);
   const [prompt, setPrompt] = useState("a minimalist ceramic coffee mug on a warm beige background");
   const [model, setModel] = useState<string>("gpt");
@@ -422,8 +427,9 @@ export function Workbench() {
 
   const refreshMe = useCallback(async () => {
     try {
-      const data = await api<{ user: Me }>("/api/me");
+      const data = await api<{ user: Me; paymentMode?: "mock" | "live" }>("/api/me");
       setMe(data.user);
+      setPaymentMode(data.paymentMode === "mock" ? "mock" : "live");
     } catch {}
   }, []);
 
@@ -1701,7 +1707,9 @@ export function Workbench() {
                 <div style={{ fontWeight: 800, fontSize: 18 }}>{me?.credits ?? 0} {t.credits}</div>
                 <div style={{ fontSize: 12.5, color: "var(--ink-2)" }}>{me?.plan ?? "free"} {locale === "zh" ? "套餐 · " : "plan · "}{t.dailyCheckin}</div>
               </div>
-              <span style={{ marginLeft: "auto", fontSize: 12.5, color: "var(--ink-3)" }}>{locale === "zh" ? "Beta 壳子 · 不产生真实扣款" : "Beta shell · no real charge"}</span>
+              {paymentMode === "mock" && (
+                <span style={{ marginLeft: "auto", fontSize: 12.5, color: "var(--ink-3)" }}>{locale === "zh" ? "Beta 测试模式 · 未接入真实支付" : "Beta test mode · no payment provider"}</span>
+              )}
             </div>
             <div className="pricing-grid">
               {PLANS.map((p) => (
@@ -1749,9 +1757,11 @@ export function Workbench() {
                   ))}
                 </div>
               </div>
-              <div className="beta-note">
-                <b>{t.betaNote}</b>
-              </div>
+              {paymentMode === "mock" && (
+                <div className="beta-note">
+                  <b>{t.betaNote}</b>
+                </div>
+              )}
               <button className="btn btn-dark" style={{ width: "100%" }} onClick={confirmCheckout} disabled={checkoutBusy}>
                 ✓ {checkoutBusy ? "…" : `${t.confirm} ${method}`} · ${checkout.price.toFixed(2)}
               </button>

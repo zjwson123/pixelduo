@@ -37,12 +37,11 @@ const DATA_URL_RE = /^data:image\/[\w.+-]+;base64,(.+)$/i;
 export async function POST(req: Request) {
   try {
     const userId = await requireVerifiedUser();
-    // Rate limit before parsing the body: req.json() buffers the whole
-    // request (base64 images make edit bodies the largest surface).
-    const limited = await enforceRateLimit(req, "edit", 15, 60_000);
-    if (limited) return limited;
-    const userLimited = await enforceUserRateLimit(userId, "edit", 15, 60_000);
-    if (userLimited) return fail(userLimited);
+    // Account-keyed, before the body is parsed (base64 images make edit bodies
+    // the largest surface); the IP-keyed leg it was paired with is gone — see
+    // enforceUserRateLimit in lib/api.ts.
+    const limited = await enforceUserRateLimit(userId, "edit", 15, 60_000);
+    if (limited) return fail(limited);
     const bodyRaw = await readBodyCapped(req, EDIT_MAX_BYTES);
     if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
     const body = schema.parse(JSON.parse(bodyRaw.raw));

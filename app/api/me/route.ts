@@ -1,5 +1,6 @@
 import { requireUserId, ok, fail, enforceUserRateLimit } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
+import { paymentMode } from "@/lib/payments";
 
 export async function GET() {
   try {
@@ -47,6 +48,9 @@ export async function GET() {
         // that quietly drops at the next sweep.
         expiredCredits: Number(held?.expired ?? 0),
       },
+      // Whether checkout actually charges. The client's "no real charge" note is
+      // a promise, so the server is the one that decides whether it is true.
+      paymentMode: paymentMode(),
     });
   } catch (e) {
     return fail(e);

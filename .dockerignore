@@ -34,3 +34,14 @@ public/generated
 *.tsbuildinfo
 out
 dist
+# Measurement tooling from the performance sprint: bench scripts, raw
+# measurements and reports. Nothing at runtime reads any of it, and it is not
+# inert — perf/bench/session.json is the bench's Playwright storage state, i.e. a
+# LIVE `next-auth.session-token` cookie for whatever host mksession.py was
+# pointed at (it takes a --base URL, and the committed default is the local dev
+# server). `.gitignore` keeps that file out of git for exactly this reason; the
+# build context is the other way an image carries a file off the host, and
+# `COPY . .` (worker) plus the standalone trace (web) both reach it. The
+# Dockerfile prunes perf/ as well — this file stops it entering the context at
+# all.
+perf

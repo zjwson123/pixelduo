@@ -212,6 +212,47 @@ describe("plan entitlement expires where the watermark is decided", () => {
     expect(clean!.equals(providerPng)).toBe(true);
   });
 
+  it("does not badge an image a previous attempt already badged", async () => {
+    // The bake loop ran over every image of the job on every attempt, and a retry
+    // resumes from the checkpoint written BEFORE the bake — so a failure after
+    // the bake (a storage put, a Prisma error inside completeJob's transaction,
+    // the worker killed and recoverStuckJobs requeueing it) composited the badge
+    // onto the badge. Measured before the fix: the 0.55-alpha badge reached ~0.80
+    // and the band's mean |Δ| was 42/255; and because bakeWatermark now preserves
+    // the container it was handed, the second pass also re-encoded an
+    // already-lossy file over its only copy.
+    const user = await makeUser("wm-rebake", 200); // free tier: the badge applies
+    const { job } = await createMediaJob({
+      userId: user.id,
+      model: "gpt",
+      mediaType: "image",
+      quality: "medium",
+      count: 1,
+      prompt: "a cat on a windowsill",
+    });
+    await processImageJob(await claimed(job.id), "p15-test-worker");
+    const row = await prisma.image.findFirstOrThrow({ where: { jobId: job.id } });
+    const baked = await getStorage().get(row.url);
+    expect(baked).not.toBeNull();
+
+    // The state a retry finds: the job is back in flight with the checkpoint it
+    // left behind, and that checkpoint says this key is already badged — which is
+    // exactly what the worker now writes after baking.
+    await prisma.job.update({
+      where: { id: job.id },
+      data: {
+        status: "running",
+        attempts: 1,
+        images: JSON.stringify([{ key: row.url, model: "gpt", baked: true }]),
+      },
+    });
+    await processImageJob(await claimed(job.id), "p15-test-worker");
+
+    const again = await getStorage().get(row.url);
+    expect(again).not.toBeNull();
+    expect(again!.equals(baked!)).toBe(true);
+  });
+
   it("flips the provider-side mark for the same two tiers (Ark watermark param)", async () => {
     // Provider-side marks (Seedream's baked-in "AI生成") are the other half of
     // the same decision, so the lapsed plan must not keep that either.

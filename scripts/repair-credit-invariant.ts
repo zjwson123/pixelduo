@@ -28,6 +28,7 @@
 // It is idempotent and reports nothing to do on a healthy database. Run it
 // before VALIDATE CONSTRAINT (docs/deploy.md).
 import { PrismaClient, Prisma } from "@prisma/client";
+import { GRANT_LOCK_ORDER } from "../lib/ledger";
 
 const prisma = new PrismaClient();
 const fix = process.argv.includes("--fix");
@@ -81,15 +82,43 @@ async function main() {
   const userIds = [...new Set([...bad.map((b) => b.userId), ...drifted.map((d) => d.userId)])];
   for (const userId of userIds) {
     await prisma.$transaction(async (tx) => {
-      // Lock this account's grants in the canonical order so a concurrent
-      // spend/refund/expiry serializes with the repair instead of being
-      // overwritten by it.
+      // Lock this account's grants in the CANONICAL order — the same
+      // GRANT_LOCK_ORDER every money path uses (spendCreditsTx,
+      // refundCreditsTx, revokeOrderCreditsTx, adminClawbackTx, the expiry
+      // sweep). This said "the canonical order" while sorting by `id`, which is
+      // not it: a repair running while a spend or a refund held the same rows in
+      // the real order could take them in the opposite sequence and deadlock, so
+      // the operator's repair would abort with a 40P01 instead of fixing
+      // anything.
       const rows = await tx.$queryRaw<Array<{ id: string; amount: number; remaining: number }>>(
         Prisma.sql`SELECT id, amount, remaining FROM "CreditGrant"
           WHERE "userId" = ${userId}
-          ORDER BY id
+          ${GRANT_LOCK_ORDER}
           FOR UPDATE`,
       );
+      // Then the balance row, also locked, BEFORE the sum is measured. The
+      // absolute write below (`credits: sum`) is only safe against a concurrent
+      // grant if it cannot interleave: grantCreditsTx creates a grant and
+      // increments credits as one transaction, and an insert is not blocked by
+      // the grant locks taken above, so without this lock a check-in landing
+      // between the SUM and the write had its credits overwritten — the repair
+      // would have written a balance computed from the rows it could see and
+      // left the account drifted again, which is the state it exists to leave
+      // behind. Holding the User row makes that transaction wait at its own
+      // `UPDATE User`, i.e. after its grant row is inserted (and therefore
+      // counted by a later statement's fresh snapshot) or not at all.
+      // A row vanished between the drift report and here: an erasure (or the
+      // admin delete) committed in that window. Nothing left to repair, and it
+      // must not abort the run — `findUniqueOrThrow` made it `process.exit(1)`,
+      // so one account disappearing left every account after it unrepaired and
+      // the operator re-running the report from the start.
+      const [locked] = await tx.$queryRaw<Array<{ id: string }>>(
+        Prisma.sql`SELECT id FROM "User" WHERE id = ${userId} FOR UPDATE`,
+      );
+      if (!locked) {
+        console.log(`  skipped ${userId}: the account was deleted while the repair ran`);
+        return;
+      }
       let clamped = 0;
       for (const r of rows) {
         const next = Math.max(0, Math.min(r.remaining, r.amount));
@@ -100,7 +129,11 @@ async function main() {
       }
       const after = await tx.creditGrant.aggregate({ where: { userId }, _sum: { remaining: true } });
       const sum = after._sum.remaining ?? 0;
-      const user = await tx.user.findUniqueOrThrow({ where: { id: userId }, select: { credits: true, email: true } });
+      const user = await tx.user.findUnique({ where: { id: userId }, select: { credits: true, email: true } });
+      if (!user) {
+        console.log(`  skipped ${userId}: the account was deleted while the repair ran`);
+        return;
+      }
       const delta = sum - user.credits;
       if (delta === 0) return;
       // Through the ledger, not a bare column write: the delta and its reason

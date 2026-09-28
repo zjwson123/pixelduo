@@ -32,11 +32,33 @@ function looksLikeIsoBmffMedia(buf: Buffer): boolean {
 
 export { looksLikeIsoBmffMedia };
 
+// Ceiling on what one concat may hand back, and the reason it exists: both
+// INPUTS are capped (100 MB each in lib/store's fetchPublicBuffer) and the output
+// was not — no `-fs`, no stat, and the whole file read into one Buffer in the
+// worker process that serves every other job. A provider (or a hostile segment)
+// returning 15 s of cheap high-frequency noise expands several-fold under the
+// `-crf 20` re-encode, and the only thing bounding it was the 180 s ffmpeg
+// timeout — which bounds time, not bytes. 512 MB container, one job OOMs the
+// worker, every other in-flight job retries and re-bills.
+export const CONCAT_MAX_OUTPUT_BYTES = 256 * 1024 * 1024;
+
+// Generous by design — the number that matters is that there IS one. 4x the
+// inputs covers the noise case (where a cheap low-bitrate source legitimately
+// grows), the 64 MB floor keeps short clips comfortable, and the absolute cap
+// keeps the worker's heap bounded whatever the inputs claim.
+export function concatOutputLimit(inputBytes: number): number {
+  return Math.min(CONCAT_MAX_OUTPUT_BYTES, Math.max(64 * 1024 * 1024, inputBytes * 4));
+}
+
 // The argv, exported so a test can assert the whitelist is present: the flag
 // guards a demuxer path (hls/dash segment fetching) that ffmpeg only takes for
 // payloads this module refuses before spawning it, so its effect cannot be
 // observed end to end — but it must not be dropped in a refactor either.
-export function concatFfmpegArgs(listPath: string, outPath: string): string[] {
+export function concatFfmpegArgs(
+  listPath: string,
+  outPath: string,
+  maxBytes: number = CONCAT_MAX_OUTPUT_BYTES,
+): string[] {
   return [
     "-y",
     // Inherited by every demuxer the entries above open (that is how ffmpeg
@@ -47,6 +69,8 @@ export function concatFfmpegArgs(listPath: string, outPath: string): string[] {
     "-f", "concat", "-safe", "0", "-i", listPath,
     "-c:v", "libx264", "-preset", "fast", "-crf", "20",
     "-c:a", "aac", "-movflags", "+faststart",
+    // Stop writing at the cap instead of filling the disk (and the heap) first.
+    "-fs", String(maxBytes),
     outPath,
   ];
 }
@@ -71,14 +95,20 @@ export async function concatVideos(a: Buffer, b: Buffer): Promise<Buffer | null>
     // Re-encode rather than -c copy: both clips come from the same model, but
     // encoder parameters can differ between generations and a copy-concat of
     // mismatched streams produces a file that some players refuse to play.
+    const limit = concatOutputLimit(a.length + b.length);
     await new Promise<void>((resolve, reject) => {
       execFile(
         "ffmpeg",
-        concatFfmpegArgs(listPath, outPath),
+        concatFfmpegArgs(listPath, outPath, limit),
         { timeout: 180_000, maxBuffer: 16 * 1024 * 1024 },
         (err) => (err ? reject(err) : resolve()),
       );
     });
+    // `-fs` stops ffmpeg mid-file, so an output at (or past) the cap is a
+    // truncated clip, not a deliverable one: refuse it and let the caller ship
+    // the segment it was billed for.
+    const { size } = await fsp.stat(outPath);
+    if (size >= limit) return null;
     return await fsp.readFile(outPath);
   } catch {
     return null;

@@ -23,8 +23,22 @@
 // start of the string (Sentry's `request.query_string` is a bare `a=1&b=2` with
 // no leading delimiter). A path segment that merely contains a keyword is not
 // touched.
+// The list has to cover the shapes THIS codebase treats as credentials, not just
+// the two it was written for: `access_token=` is DingTalk's group-bot credential
+// (lib/notify.ts posts to it, and maskSecretUrl in lib/mail-check.ts already
+// refuses to print it), and a presigned S3/R2 URL carries its capability in
+// `X-Amz-Signature` / `X-Amz-Credential` / `X-Amz-Security-Token`. All of those
+// used to pass through untouched — `token` never matched `access_token`, because
+// the character before it is `_` and not `?`/`&`. A group-bot token in a Sentry
+// project is the ability to post arbitrary messages as the bot.
 const SENSITIVE_QUERY_PARAM =
-  /(^|[?&])((?:token|code|ticket|jti|secret|password|passwd|api_?key|access_?key|key|signature|sig|session|state)=)[^&#\s"'<>]*/gi;
+  /(^|[?&])((?:token|code|ticket|jti|secret|password|passwd|api_?key|access_?key|access_?token|key|signature|sig|session|state|x-amz-signature|x-amz-credential|x-amz-security-token)=)[^&#\s"'<>]*/gi;
+
+// Path-shaped credentials, which no query-parameter rule can see: Feishu's
+// webhook token is the last path segment (`/open-apis/bot/v2/hook/<uuid>`).
+// 20 characters is the floor — nothing shorter is a credential on any endpoint
+// this app supports, and the same shape is what maskSecretUrl masks.
+const SENSITIVE_PATH_TOKEN = /(\/hook\/)[A-Za-z0-9_-]{20,}/gi;
 
 // Depth/size bounds: an event is small, but this runs on every event and must
 // never be the reason a report is lost or a process is slowed.
@@ -32,7 +46,7 @@ const MAX_DEPTH = 8;
 const MAX_NODES = 5000;
 
 function scrubString(value: string): string {
-  return value.replace(SENSITIVE_QUERY_PARAM, "$1$2[Filtered]");
+  return value.replace(SENSITIVE_QUERY_PARAM, "$1$2[Filtered]").replace(SENSITIVE_PATH_TOKEN, "$1[Filtered]");
 }
 
 function scrubValue(value: unknown, depth: number, budget: { nodes: number }): unknown {

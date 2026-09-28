@@ -184,6 +184,59 @@ describe("credit grants & expiry", () => {
   });
 });
 
+describe("the sweep drains more than its first page", () => {
+  it("sweeps the accounts that sit beyond the first page instead of stopping at it", async () => {
+    // The page boundary used to be Prisma's `cursor`, which the engine resolves in
+    // memory: the query goes out without LIMIT/OFFSET and the rows are sliced from
+    // the cursor row's position, so a cursor row that no longer matches the WHERE
+    // clause ends the walk. The drain zeroes the rows of the page it was handed —
+    // the cursor included — so the second page was always empty and the run ended
+    // after 200 rows while reporting success. 150 grants each, oldest account
+    // first: the first page holds the first two accounts only, and the third
+    // account (1,500 credits, no EXPIRE ledger row) is what the regression cost.
+    const accounts: Array<{ id: string }> = [];
+    for (const [i, tag] of ["page-a", "page-b", "page-c"].entries()) {
+      accounts.push(
+        await prisma.user.create({
+          data: { email: `expiry-${tag}-${Date.now()}@test.dev`, passwordHash: "x", credits: 1500 },
+        }),
+      );
+      await prisma.creditGrant.createMany({
+        data: Array.from({ length: 150 }, (_, n) => ({
+          userId: accounts[i].id,
+          source: "PURCHASE",
+          amount: 10,
+          remaining: 10,
+          expiresAt: new Date(Date.now() - (40 - i * 10) * 3600_000 - n * 1000),
+        })),
+      });
+    }
+    try {
+      const swept = await runExpiry();
+      expect(swept).toBeGreaterThanOrEqual(4500);
+      for (const account of accounts) {
+        const user = await prisma.user.findUniqueOrThrow({
+          where: { id: account.id },
+          select: { credits: true },
+        });
+        const grants = await prisma.creditGrant.aggregate({
+          where: { userId: account.id },
+          _sum: { remaining: true },
+        });
+        expect(user.credits).toBe(0);
+        expect(grants._sum.remaining).toBe(0);
+      }
+      // ...and the last account's expiry is in the ledger, not just in the column.
+      const entry = await prisma.ledgerEntry.findFirst({
+        where: { userId: accounts[2].id, type: "EXPIRE" },
+      });
+      expect(entry?.creditsDelta).toBe(-1500);
+    } finally {
+      await prisma.user.deleteMany({ where: { id: { in: accounts.map((a) => a.id) } } });
+    }
+  });
+});
+
 describe("one unsweepable account cannot hold the sweep hostage", () => {
   it("walks past an account whose credits are already broken and still sweeps the rest", async () => {
     // The invariant-violating account: expired grants still holding credits

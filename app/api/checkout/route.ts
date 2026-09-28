@@ -20,13 +20,12 @@ export async function POST(req: Request) {
     // other route with a resource cost — generate, edit, video, assistant,
     // checkin, keys — has been on requireVerifiedUser since the anti-abuse pass.
     const userId = await requireVerifiedUser();
-    const limited = await enforceRateLimit(req, "checkout", 10, 60_000);
-    if (limited) return limited;
-    // Every call mints a new pending order row AND a provider-side checkout
-    // session, so IP rotation must not be able to drive it in a loop (rows are
-    // never expired or deduped, and the provider sees the traffic as ours).
-    const userLimited = await enforceUserRateLimit(userId, "checkout", 10, 60_000);
-    if (userLimited) return fail(userLimited);
+    // Account-keyed: every call mints a new pending order row AND a provider-side
+    // checkout session, so the budget must follow the account (IP rotation must
+    // not lift it) — and, just as importantly, one account must not be able to
+    // spend a bucket shared with its neighbours. See enforceUserRateLimit.
+    const limited = await enforceUserRateLimit(userId, "checkout", 10, 60_000);
+    if (limited) return fail(limited);
     const bodyRaw = await readBodyCapped(req, 16 * 1024);
     if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
     const body = schema.parse(JSON.parse(bodyRaw.raw));
