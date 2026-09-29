@@ -3,6 +3,15 @@
 # Usage: ./scripts/backup.sh [container] [database]
 set -euo pipefail
 
+# The dump is a complete copy of the database — every email, bcrypt hash, order,
+# ledger row and payment payload — and it was written 0644 into a 0755 directory
+# (measured on this host: -rw-r--r-- backups/*.dump.gz, drwxr-xr-x backups/),
+# i.e. readable by every other account and every other process on the machine.
+# Nothing in the backup path had ever pinned a mode, while setup-mail.ts already
+# writes its .env 0600 — this is the same rule applied to the bigger secret. The
+# compose backup loops pin the container side the same way.
+umask 077
+
 CONTAINER="${1:-pixelduo-db}"
 DB="${2:-pixelduo}"
 STAMP="$(date +%Y%m%d-%H%M%S)"

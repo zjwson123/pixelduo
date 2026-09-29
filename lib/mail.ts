@@ -3,7 +3,7 @@ import fs from "fs";
 import path from "path";
 import { captureError } from "./observability";
 import { isProductionRuntime, usableUrl } from "./runtime-env";
-import { rateLimit, envLimit } from "./rate-limit";
+import { rateLimit, peekRateLimit, envLimit } from "./rate-limit";
 import {
   verificationHtml,
   resetHtml,
@@ -222,6 +222,21 @@ export type AuthMailKind = "verify" | "reset";
 function authMailBudget(kind: AuthMailKind, total: number): number {
   const reset = Math.max(1, Math.floor(total * RESET_MAIL_SHARE));
   return kind === "reset" ? reset : Math.max(1, total - reset);
+}
+
+// Whether a stream's hourly budget still has room, read WITHOUT spending it.
+//
+// `hit` (reserveAuthMailSend) is what makes a bucket attacker-spendable, so an
+// answer derived from `hit` is only safe where the subject is already known to
+// be real — otherwise the refusal itself discloses existence. This reads the
+// counter instead: the answer depends only on the global budget, so it is
+// identical for a real and an invented address, and it can be reported to the
+// caller honestly instead of being hidden behind a uniform "sent".
+export async function authMailBudgetAvailable(kind: AuthMailKind): Promise<boolean> {
+  const total = envLimit(process.env.AUTH_MAIL_HOURLY_LIMIT, DEFAULT_AUTH_MAIL_LIMIT);
+  const limit = authMailBudget(kind, total);
+  const r = await peekRateLimit(`authmail:${kind}`, limit, AUTH_MAIL_WINDOW_MS);
+  return r.ok;
 }
 
 // Reserve one slot in a stream's hourly budget. False means "do not send":

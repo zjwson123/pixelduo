@@ -1,4 +1,4 @@
-import { requireUserId, ApiError, enforceRateLimit } from "@/lib/api";
+import { requireUserId, ApiError, enforceRateLimit, enforceUserRateLimit, fail } from "@/lib/api";
 import { authenticateApiKey } from "@/lib/apikey";
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
@@ -56,12 +56,6 @@ function parseRange(
 // any logged-in user can fetch them by key, but the key must exist in the
 // Template table so arbitrary file enumeration is impossible.
 export async function GET(req: Request, { params }: { params: Promise<{ key: string[] }> }) {
-  // Objects are the largest payloads in the system (videos up to 100 MB);
-  // without a per-IP cap a single user concurrent-fetching their own videos
-  // in a loop is a self-service heap/bandwidth pump. 600/min keeps gallery
-  // browsing (dozens of images per page) far below the ceiling.
-  const limited = await enforceRateLimit(req, "files", 600, 60_000);
-  if (limited) return limited;
   const { key: keyParts } = await params;
   const key = keyParts.join("/");
   // requireUserId (not raw getServerSession) so a partial 2FA session or a
@@ -69,13 +63,45 @@ export async function GET(req: Request, { params }: { params: Promise<{ key: str
   // authenticate too — v1 API responses under the local storage driver hand
   // out /api/files URLs, which machine clients (no cookies) otherwise can't
   // fetch; ownership scoping below applies identically to either credential.
-  let uid: string;
+  //
+  // Resolved BEFORE the charge, and the charge lands on the dimension that can
+  // be held responsible — the same rule /api/feedback and every other
+  // authenticated route already follows. This route kept a single bucket keyed
+  // on the source address, and it is the route every image and video in the UI
+  // flows through: a gallery or Explore page is dozens of requests, so two
+  // accounts behind one egress (an office, a VPN, a carrier NAT) spent one
+  // 600/min budget between them and the images simply stopped loading for both
+  // — with no account, no cookie and no knowledge of the victims required,
+  // since the bucket was charged before any credential was looked at. That is
+  // the shape passes 18/20/21 removed from the other authenticated routes; this
+  // one was left behind.
+  let uid: string | null = null;
+  let sessionError: ApiError | null = null;
   try {
     uid = await requireUserId();
   } catch (e) {
     if (!(e instanceof ApiError)) throw e;
+    sessionError = e;
+  }
+
+  if (uid) {
+    // Objects are the largest payloads in the system (videos up to 100 MB);
+    // without a per-account cap a single user concurrent-fetching their own
+    // videos in a loop is a self-service heap/bandwidth pump. 600/min keeps
+    // gallery browsing (dozens of images per page) far below the ceiling.
+    const limited = await enforceUserRateLimit(uid, "files", 600, 60_000);
+    if (limited) return fail(limited);
+  } else {
+    // No session: an anonymous caller has no credential to key on and must
+    // still be bounded before the API-key lookup and the image/template
+    // queries below, so the source address is the only dimension there is.
+    const limited = await enforceRateLimit(req, "files", 600, 60_000);
+    if (limited) return limited;
     const apiKey = await authenticateApiKey(req);
-    if (!apiKey) return new NextResponse(e.message, { status: e.status, headers: NO_STORE });
+    if (!apiKey) {
+      const status = sessionError?.status ?? 401;
+      return new NextResponse(sessionError?.message ?? "unauthorized", { status, headers: NO_STORE });
+    }
     if (!apiKey.emailVerified) {
       return new NextResponse("email not verified", { status: 403, headers: NO_STORE });
     }

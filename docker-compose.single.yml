@@ -276,6 +276,8 @@ services:
       db: { condition: service_healthy }
     command: >
       sh -c 'while true; do
+        umask 077;
+        chmod 700 /backups 2>/dev/null || true;
         STAMP=$$(date +%Y%m%d-%H%M%S);
         TMP=/backups/.pixelduo-$${STAMP}.partial;
         if pg_dump -Fc -f $$TMP; then
@@ -304,17 +306,31 @@ services:
     volumes: [./backups:/backups]
     depends_on:
       storage: { condition: service_healthy }
+    # Same `.partial` + rename + success-gated rotation as the full compose
+    # file: this loop discarded every `mc` status, printed "mirrored"
+    # unconditionally and rotated anyway, so a failed mirror still counted as
+    # the newest snapshot and the rotation deleted the oldest complete one.
     command: >
       'while true; do
-        mc alias set src http://storage:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD} >/dev/null;
+        umask 077;
+        mkdir -p /backups/objects;
+        chmod 700 /backups/objects 2>/dev/null || true;
         STAMP=$$(date +%Y%m%d-%H%M%S);
-        mc mirror --overwrite --remove src/pixelduo /backups/objects/$${STAMP};
-        ls -1t /backups/objects/ | tail -n +$$((BACKUP_KEEP + 1)) | while read -r f; do rm -rf /backups/objects/$$f; done;
-        if [ -n "$${BACKUP_TARGET_ENDPOINT}" ]; then
-          mc alias set tgt $${BACKUP_TARGET_ENDPOINT} $${BACKUP_TARGET_ACCESS_KEY_ID} $${BACKUP_TARGET_SECRET_ACCESS_KEY} >/dev/null;
-          mc mirror --overwrite --remove src/pixelduo tgt/$${BACKUP_TARGET_BUCKET};
+        if mc alias set src http://storage:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD} >/dev/null 2>&1 && mc mirror --overwrite --remove src/pixelduo /backups/objects/.$${STAMP}.partial; then
+          mv /backups/objects/.$${STAMP}.partial /backups/objects/$${STAMP};
+          ls -1t /backups/objects/ | tail -n +$$((BACKUP_KEEP + 1)) | while read -r f; do rm -rf /backups/objects/$$f; done;
+          echo "[backup-objects] $${STAMP} mirrored (keep $${BACKUP_KEEP})";
+        else
+          rm -rf /backups/objects/.$${STAMP}.partial;
+          echo "[backup-objects] FAILED at $${STAMP} — no snapshot written, rotation skipped (the previous snapshots are untouched)" >&2;
         fi;
-        echo "[backup-objects] $${STAMP} mirrored";
+        if [ -n "$${BACKUP_TARGET_ENDPOINT}" ]; then
+          if mc alias set tgt $${BACKUP_TARGET_ENDPOINT} $${BACKUP_TARGET_ACCESS_KEY_ID} $${BACKUP_TARGET_SECRET_ACCESS_KEY} >/dev/null 2>&1 && mc mirror --overwrite --remove src/pixelduo tgt/$${BACKUP_TARGET_BUCKET}; then
+            echo "[backup-objects] off-site mirror done";
+          else
+            echo "[backup-objects] off-site mirror FAILED at $${STAMP} (the local snapshot is complete)" >&2;
+          fi;
+        fi;
         sleep 86400;
       done'
     restart: unless-stopped

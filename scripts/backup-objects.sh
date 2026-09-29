@@ -12,6 +12,12 @@
 # Usage: ./scripts/backup-objects.sh
 set -euo pipefail
 
+# Every user image and video, unencrypted, lands under ./backups/objects — and
+# the tree was 0755 with 0644 files (measured), readable by any other account or
+# process on the host. Pin the mode here exactly as backup.sh does for the
+# database dump; the compose loops pin the container side too.
+umask 077
+
 SRC_ENDPOINT="${BACKUP_S3_ENDPOINT:?set BACKUP_S3_ENDPOINT (source)}"
 SRC_ACCESS="${BACKUP_S3_ACCESS_KEY_ID:?set BACKUP_S3_ACCESS_KEY_ID}"
 SRC_SECRET="${BACKUP_S3_SECRET_ACCESS_KEY:?set BACKUP_S3_SECRET_ACCESS_KEY}"

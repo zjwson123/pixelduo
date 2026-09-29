@@ -167,9 +167,20 @@ function codeReadNames(): Map<string, string[]> {
  * Names a container really receives, per compose file, straight from
  * `docker compose config`. Required (`:?`) variables are filled in by feeding
  * compose back the names its own error messages demand.
+ *
+ * `unrendered` collects the files that could NOT be rendered for a reason other
+ * than a missing required variable (which the fixture loop exists to satisfy).
+ * A file that fails to render used to be reported on stderr and dropped from
+ * `out`, which meant checks 1 and 2b silently did not apply to it — a broken
+ * anchor, a tab or a `depends_on` naming an undefined service in
+ * docker-compose.single.yml exited 0 with "2 compose file(s) rendered", and the
+ * production single-VPS stack then failed on the operator's host instead of in
+ * CI. The `.env.example` half of this script still cannot see such a file, so
+ * the only honest answer is to fail.
  */
-function composeForwarded(): Map<string, Set<string>> {
+function composeForwarded(): { forwarded: Map<string, Set<string>>; unrendered: string[] } {
   const out = new Map<string, Set<string>>();
+  const unrendered: string[] = [];
   const fixture = new Map<string, string>([
     // Values only need to be non-empty; nothing here is dialled.
     ["NEXTAUTH_SECRET", "0".repeat(48)],
@@ -177,6 +188,7 @@ function composeForwarded(): Map<string, Set<string>> {
   ]);
   for (const file of COMPOSE_FILES) {
     let json: string | null = null;
+    let lastError = "";
     for (let attempt = 0; attempt < 40; attempt++) {
       const envFile = path.join(
         fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "pd-config-")),
@@ -192,16 +204,23 @@ function composeForwarded(): Map<string, Set<string>> {
         break;
       } catch (e) {
         const stderr = String((e as { stderr?: Buffer }).stderr ?? "");
+        lastError = stderr.trim();
         const missing = [...stderr.matchAll(/required variable ([A-Z][A-Z0-9_]*) is missing/g)];
         if (!missing.length) {
-          console.error(`  [skip] ${file}: docker compose config failed:\n${stderr.trim()}`);
+          console.error(`  [skip] ${file}: docker compose config failed:\n${lastError}`);
           break;
         }
         for (const m of missing) if (!fixture.has(m[1])) fixture.set(m[1], "config-check");
         fixture.set("POSTGRES_PASSWORD", "config-check");
       }
     }
-    if (!json) continue;
+    if (!json) {
+      // Either the render failed for a reason the fixture cannot fix, or 40
+      // rounds of required-variable discovery were not enough. Both mean the
+      // compose checks below never saw this file.
+      unrendered.push(`${file}${lastError ? `: ${lastError.split("\n")[0]}` : " (fixture loop exhausted)"}`);
+      continue;
+    }
     const cfg = JSON.parse(json) as {
       services?: Record<string, { environment?: Record<string, unknown>; build?: { args?: unknown } }>;
     };
@@ -219,7 +238,7 @@ function composeForwarded(): Map<string, Set<string>> {
     }
     out.set(file, names);
   }
-  return out;
+  return { forwarded: out, unrendered };
 }
 
 function main() {
@@ -228,13 +247,21 @@ function main() {
   const { keys: documented, duplicates } = readEnvExample();
   if (duplicates.length) problems.push(`${ENV_EXAMPLE} declares ${duplicates.join(", ")} twice`);
   const read = codeReadNames();
-  const forwarded = composeForwarded();
+  const { forwarded, unrendered } = composeForwarded();
   if (forwarded.size === 0) {
     // Skipping is a convenience for a machine with no docker daemon, but in CI
     // it would be a green job that verified nothing — and the compose half is
     // the half that catches the real bugs. There, no docker means failure.
     if (process.env.CI) problems.push("docker is unavailable, so no compose file could be rendered");
     else warnings.push("docker unavailable — compose assertions skipped (.env.example half only)");
+  } else {
+    // Docker was available and these files still did not render: they are broken
+    // (or the fixture could not satisfy them), and every compose check below is
+    // silently inapplicable to them. Never a warning — a file the gate cannot
+    // read is exactly what the gate exists to refuse.
+    for (const file of unrendered) {
+      problems.push(`could not render ${file} — the compose invariants below do not apply to it`);
+    }
   }
   const short = (f: string) => f.replace("docker-compose", "dc").replace(".yml", "");
 

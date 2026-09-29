@@ -10,7 +10,7 @@ import {
 import { rateLimit } from "@/lib/rate-limit";
 import { prisma } from "@/lib/prisma";
 import { createToken } from "@/lib/tokens";
-import { sendResetPasswordEmail, reserveAuthMailSend } from "@/lib/mail";
+import { sendResetPasswordEmail, reserveAuthMailSend, authMailBudgetAvailable } from "@/lib/mail";
 
 const schema = z.object({ email: z.string().email().max(120) });
 
@@ -46,6 +46,27 @@ export async function POST(req: Request) {
       );
     }
     const user = await prisma.user.findUnique({ where: { email } });
+    // The global hourly ceiling (lib/mail.ts) before the rotation it would
+    // otherwise perform: when the budget is spent the mail is skipped AND no
+    // token is created, so a link already in the user's inbox keeps working
+    // instead of being invalidated by a mail that never leaves.
+    //
+    // Read BEFORE the lookup and without spending anything, because this branch
+    // is the one place the refusal can be honest: the ceiling is global, so the
+    // answer is identical for a real and an invented address and discloses
+    // nothing. Deciding it inside `if (user)` — as this did — made a real
+    // address answer 400 while an invented one answered 200, i.e. an existence
+    // oracle, which is what forced the previous version to hide it behind a
+    // uniform `ok({sent:true})` and leave the caller waiting for a mail that was
+    // never sent. The per-address branch above cannot be reported per-caller for
+    // the same reason; that is why it is charged on the submitted address only.
+    const budgetAvailable = await authMailBudgetAvailable("reset");
+    if (!budgetAvailable) {
+      return errorResponse(
+        { ok: false, error: "cannot-send-mail: the reset-mail budget for this hour is used up — try again shortly" },
+        { status: 400 },
+      );
+    }
     if (user) {
       // The global hourly ceiling (lib/mail.ts) before the rotation it would
       // otherwise perform: when the budget is spent the mail is skipped AND no

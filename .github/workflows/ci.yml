@@ -83,19 +83,34 @@ jobs:
       - run: npm ci
       - run: npx prisma generate
       - run: npx tsc --noEmit
-      - run: npm run build
-      # The standalone artifact is what gets deployed (the web image ships it, and
-      # a host deploy ships it verbatim). `next build` copies the build host's
-      # .env — NEXTAUTH_SECRET, DATABASE_URL, the S3 keys — into it
-      # unconditionally, so the postbuild prune (scripts/prune-standalone.mjs)
-      # has to run and has to work. The failure mode is silent and the artifact
-      # leaves the machine, so assert it here.
-      - name: Assert the standalone artifact carries no dotenv files
+      # Plant a .env and a local SQLite database BEFORE the build, so the
+      # assertion below can actually fail. The standalone artifact is what gets
+      # deployed (the web image ships it, and a host deploy ships it verbatim),
+      # and `next build` copies the build host's .env — NEXTAUTH_SECRET,
+      # DATABASE_URL, the S3 keys — into it unconditionally, while the tracing
+      # step copies the whole prisma/ directory including prisma/dev.db. The
+      # postbuild prune (scripts/prune-standalone.mjs) is what removes both.
+      #
+      # Without planting, a checkout has no .env at all (only .env.example is
+      # tracked) and no dev.db, so `find` could not match anything however
+      # broken the prune became: the step proved nothing in precisely the
+      # pipeline it exists to guard. The planted values are dummies and are
+      # never real secrets.
+      - name: Build (with plantable leaks in the tree)
         run: |
-          found=$(find .next/standalone -maxdepth 2 -name '.env*' -not -path '*/node_modules/*')
+          printf 'NEXTAUTH_SECRET=ci-planted-not-a-real-secret\nDATABASE_URL=postgresql://planted:planted@127.0.0.1:5432/planted\n' > .env
+          mkdir -p prisma
+          printf 'SQLite format 3\000ci-planted' > prisma/dev.db
+          npm run build
+      - name: Assert the standalone artifact carries no dotenv files or local databases
+        run: |
+          found=$(find .next/standalone -maxdepth 3 \( -name '.env*' -o -name '*.db' -o -name '*.db-journal' \) -not -path '*/node_modules/*')
           if [ -n "$found" ]; then
-            echo "standalone artifact carries dotenv files:"; echo "$found"; exit 1
+            echo "standalone artifact carries build-host-only files:"; echo "$found"; exit 1
           fi
+          # The plant must have reached the tree in the first place, or this step
+          # is the vacuous version of itself again.
+          grep -q ci-planted-not-a-real-secret .env
 
   # Every image build of this repository was broken for three weeks — npm ci
   # cannot install this lockfile without .npmrc, and no Dockerfile stage copied

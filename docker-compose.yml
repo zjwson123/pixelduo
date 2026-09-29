@@ -349,6 +349,8 @@ services:
       - ./backups:/backups
     command: >
       sh -c 'while true; do
+        umask 077;
+        chmod 700 /backups 2>/dev/null || true;
         STAMP=$$(date +%Y%m%d-%H%M%S);
         TMP=/backups/.pixelduo-$${STAMP}.partial;
         if pg_dump -Fc -f $$TMP; then
@@ -382,18 +384,38 @@ services:
       BACKUP_TARGET_BUCKET: ${BACKUP_TARGET_BUCKET:-}
     volumes:
       - ./backups:/backups
+    # `.partial` + rename, and the rotation runs ONLY on success — the same shape
+    # the pg_dump loop above uses, and for the same reason.
+    #
+    # This loop used to run `mc alias set …; mc mirror …;` with no test of either
+    # status, print "$${STAMP} mirrored" unconditionally, and rotate
+    # regardless. Rotated credentials, an unreachable endpoint or a bucket
+    # recreated empty therefore produced an empty/partial stamp directory that
+    # counted as the newest snapshot — so that night's rotation deleted the
+    # oldest COMPLETE snapshot, and the only signal was a success line. The
+    # restore path in docs/deploy.md would have found nothing but the empty
+    # ones. Both `mc` legs are gated now, including the off-site mirror.
     command: >
       'while true; do
-        mc alias set src $${BACKUP_S3_ENDPOINT} $${BACKUP_S3_ACCESS_KEY_ID} $${BACKUP_S3_SECRET_ACCESS_KEY} >/dev/null;
+        umask 077;
+        mkdir -p /backups/objects;
+        chmod 700 /backups/objects 2>/dev/null || true;
         STAMP=$$(date +%Y%m%d-%H%M%S);
-        mc mirror --overwrite --remove src/$${BACKUP_S3_BUCKET} /backups/objects/$${STAMP};
-        ls -1t /backups/objects/ | tail -n +$$((BACKUP_KEEP + 1)) | while read -r f; do rm -rf /backups/objects/$$f; done;
-        if [ -n "$${BACKUP_TARGET_ENDPOINT}" ]; then
-          mc alias set tgt $${BACKUP_TARGET_ENDPOINT} $${BACKUP_TARGET_ACCESS_KEY_ID} $${BACKUP_TARGET_SECRET_ACCESS_KEY} >/dev/null;
-          mc mirror --overwrite --remove src/$${BACKUP_S3_BUCKET} tgt/$${BACKUP_TARGET_BUCKET};
-          echo "[backup-objects] off-site mirror done";
+        if mc alias set src $${BACKUP_S3_ENDPOINT} $${BACKUP_S3_ACCESS_KEY_ID} $${BACKUP_S3_SECRET_ACCESS_KEY} >/dev/null 2>&1 && mc mirror --overwrite --remove src/$${BACKUP_S3_BUCKET} /backups/objects/.$${STAMP}.partial; then
+          mv /backups/objects/.$${STAMP}.partial /backups/objects/$${STAMP};
+          ls -1t /backups/objects/ | tail -n +$$((BACKUP_KEEP + 1)) | while read -r f; do rm -rf /backups/objects/$$f; done;
+          echo "[backup-objects] $${STAMP} mirrored (keep $${BACKUP_KEEP})";
+        else
+          rm -rf /backups/objects/.$${STAMP}.partial;
+          echo "[backup-objects] FAILED at $${STAMP} — no snapshot written, rotation skipped (the previous snapshots are untouched)" >&2;
         fi;
-        echo "[backup-objects] $${STAMP} mirrored (keep $${BACKUP_KEEP})";
+        if [ -n "$${BACKUP_TARGET_ENDPOINT}" ]; then
+          if mc alias set tgt $${BACKUP_TARGET_ENDPOINT} $${BACKUP_TARGET_ACCESS_KEY_ID} $${BACKUP_TARGET_SECRET_ACCESS_KEY} >/dev/null 2>&1 && mc mirror --overwrite --remove src/$${BACKUP_S3_BUCKET} tgt/$${BACKUP_TARGET_BUCKET}; then
+            echo "[backup-objects] off-site mirror done";
+          else
+            echo "[backup-objects] off-site mirror FAILED at $${STAMP} (the local snapshot is complete)" >&2;
+          fi;
+        fi;
         sleep 86400;
       done'
 

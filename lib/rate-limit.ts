@@ -8,6 +8,16 @@ export interface RateLimitResult {
 
 export interface RateLimiter {
   hit(key: string, limit: number, windowMs: number): Promise<RateLimitResult>;
+  /**
+   * Read the bucket WITHOUT spending it.
+   *
+   * Needed where a refusal has to be reported honestly for a request whose
+   * subject may not exist: `hit` is what makes a bucket attacker-spendable, so
+   * answering "the budget is gone" from `hit` means the answer itself depends on
+   * whether the subject was real (see /api/auth/forgot-password). `ok:false`
+   * means the NEXT hit would be refused.
+   */
+  peek(key: string, limit: number, windowMs: number): Promise<RateLimitResult>;
 }
 
 // In-memory sliding-window limiter (single-process fallback).
@@ -60,6 +70,16 @@ export class MemoryRateLimiter implements RateLimiter {
     hits.push(now);
     this.buckets.set(key, { hits, windowMs });
     this.sweep(now);
+    return { ok: true, remaining: Math.max(0, limit - hits.length) };
+  }
+
+  async peek(key: string, limit: number, windowMs: number): Promise<RateLimitResult> {
+    const now = Date.now();
+    const bucket = this.buckets.get(key);
+    const hits = bucket && bucket.windowMs === windowMs ? bucket.hits.filter((t) => now - t < windowMs) : [];
+    if (hits.length >= limit) {
+      return { ok: false, retryAfterSec: Math.max(1, Math.ceil((hits[0] + windowMs - now) / 1000)), remaining: 0 };
+    }
     return { ok: true, remaining: Math.max(0, limit - hits.length) };
   }
 }
@@ -120,6 +140,29 @@ export class RedisRateLimiter implements RateLimiter {
       return this.fallback.hit(key, limit, windowMs);
     }
   }
+
+  async peek(key: string, limit: number, windowMs: number): Promise<RateLimitResult> {
+    try {
+      await this.ready;
+      const rkey = `rl:${key}`;
+      const raw = await this.client.get(rkey);
+      const count = raw ? Number(raw) || 0 : 0;
+      // `hit` INCRs first and refuses at count > limit, so at count == limit the
+      // next send is the one that would be refused.
+      if (count >= limit) {
+        const ttl = await this.client.ttl(rkey);
+        return { ok: false, retryAfterSec: Math.max(1, ttl), remaining: 0 };
+      }
+      return { ok: true, remaining: Math.max(0, limit - count) };
+    } catch (e) {
+      const now = Date.now();
+      if (now - this.lastFallbackLog > 60_000) {
+        this.lastFallbackLog = now;
+        console.error("[rate-limit] Redis unavailable, falling back to in-memory:", e);
+      }
+      return this.fallback.peek(key, limit, windowMs);
+    }
+  }
 }
 
 let limiter: RateLimiter | null = null;
@@ -150,6 +193,11 @@ export function _resetLimiterForTests() {
 
 export async function rateLimit(key: string, limit: number, windowMs: number): Promise<RateLimitResult> {
   return getLimiter().hit(key, limit, windowMs);
+}
+
+/** Read a bucket without spending it — see RateLimiter.peek. */
+export async function peekRateLimit(key: string, limit: number, windowMs: number): Promise<RateLimitResult> {
+  return getLimiter().peek(key, limit, windowMs);
 }
 
 // Behind the trusted reverse proxy (Caddy appends the real client IP), the
