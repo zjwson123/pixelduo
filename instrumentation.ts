@@ -1,4 +1,5 @@
-import { isProductionRuntime } from "./lib/runtime-env";
+import { isProductionRuntime, usableUrl } from "./lib/runtime-env";
+import { mailDeliverable } from "./lib/mail";
 
 // Boot-time configuration assertions. These run once per process, before the
 // app serves traffic, so a dangerous misconfiguration is a startup failure
@@ -76,9 +77,16 @@ export function assertProductionConfig(env: NodeJS.ProcessEnv = process.env): vo
     // sent, but the session cookie goes out without Secure — readable on any
     // plaintext request to the domain — and every verification/reset email
     // links to the wrong host.
-    if (!(env.NEXTAUTH_URL ?? "").startsWith("https://")) {
+    //
+    // usableUrl rather than a prefix test, because "https://" (no host) and
+    // "https://pixelduo.ai " both start with the right eight characters: the
+    // first sends every generated link to nowhere and the second to a host that
+    // does not exist. A URL this process cannot parse and address is not a
+    // usable origin, and refusing to boot is the only signal that reaches the
+    // operator before a user does.
+    if (!usableUrl(env.NEXTAUTH_URL, ["https:"])) {
       throw new Error(
-        "NEXTAUTH_URL must be an https:// URL in production — next-auth issues a non-Secure session cookie (and mails http:// links) when it is not",
+        "NEXTAUTH_URL must be a usable https:// URL (scheme + host) in production — next-auth issues a non-Secure session cookie (and mails http:// links) when it is not, and links built from a hostless value point nowhere",
       );
     }
 
@@ -86,9 +94,15 @@ export function assertProductionConfig(env: NodeJS.ProcessEnv = process.env): vo
     // reset and email verification links — live account-takeover credentials —
     // are written to the container log while all auth mail for real users is
     // silently dropped. MAIL_DEV_MODE=1 is the explicit opt-in for that.
-    if (!env.SMTP_URL && env.MAIL_DEV_MODE !== "1") {
+    //
+    // "Set but unusable" is refused identically, through the SAME predicate the
+    // mailer reports with (lib/mail.ts's mailDeliverable): SMTP_URL=" " made
+    // nodemailer dial localhost:587 and SMTP_URL="smtps://" (no host) threw at
+    // the first send, while both the boot check and the admin console's
+    // "configured" banner called mail healthy.
+    if (env.MAIL_DEV_MODE !== "1" && !mailDeliverable(env)) {
       throw new Error(
-        "SMTP_URL is required in production — without it verification/reset links are written to the container log and auth mail is dropped (set MAIL_DEV_MODE=1 to accept that)",
+        "SMTP_URL is required in production, and must be a usable smtp:// or smtps:// URL with a host — without it verification/reset links are written to the container log and auth mail is dropped (set MAIL_DEV_MODE=1 to accept that)",
       );
     }
   }

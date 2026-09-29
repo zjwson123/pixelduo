@@ -2,7 +2,7 @@ import nodemailer, { type Transporter } from "nodemailer";
 import fs from "fs";
 import path from "path";
 import { captureError } from "./observability";
-import { isProductionRuntime } from "./runtime-env";
+import { isProductionRuntime, usableUrl } from "./runtime-env";
 import { rateLimit, envLimit } from "./rate-limit";
 import {
   verificationHtml,
@@ -92,9 +92,14 @@ let cached: Mailer | null = null;
 
 export function getMailer(): Mailer {
   if (cached) return cached;
-  const url = process.env.SMTP_URL;
   const from = process.env.EMAIL_FROM || "PixelDuo <no-reply@pixelduo.ai>";
-  cached = url ? new SmtpMailer(url, from) : new DevMailer();
+  // mailDeliverable(), not `Boolean(process.env.SMTP_URL)`: a value that is set
+  // but unusable (" ", an http:// paste, a hostless smtps://) selected the SMTP
+  // transport and then failed EVERY send with a transport error, while the
+  // log-only mailer at least delivers to the operator's log with a clear
+  // "(dev mailer)" marker. Production refuses to boot on either, see
+  // instrumentation.ts.
+  cached = mailDeliverable() ? new SmtpMailer(process.env.SMTP_URL!.trim(), from) : new DevMailer();
   return cached;
 }
 
@@ -544,6 +549,12 @@ export async function sendSecurityNoticeEmail(to: string, subject: string, text:
 // log-only mailer, so an operator who never configured one would otherwise
 // believe notifications are on their way to the feedback inbox. It says nothing
 // about whether sending WORKS — that is what lastMailAttempt() answers.
-export function mailDeliverable(): boolean {
-  return Boolean(process.env.SMTP_URL);
+//
+// "Configured" means the value can actually be used (usableUrl): a whitespace
+// value or a hostless smtps:// is not a transport, and reporting it as one while
+// every send fails is the failure this predicate exists to prevent. The boot
+// assertion in production asks this same question, so the two can never
+// disagree about whether mail is configured.
+export function mailDeliverable(env: NodeJS.ProcessEnv = process.env): boolean {
+  return Boolean(usableUrl(env.SMTP_URL, ["smtp:", "smtps:"]));
 }

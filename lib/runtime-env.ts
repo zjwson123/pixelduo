@@ -18,3 +18,37 @@
 export function isProductionRuntime(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.NODE_ENV !== "development" && env.NODE_ENV !== "test";
 }
+
+// A number read from the environment, where an EMPTY value means "not set".
+//
+// `Number(value ?? fallback)` looks equivalent and is not: `Number("")` is 0,
+// and a compose file that declares a variable it does not set renders it as an
+// empty string, so every container deployment ran SENTRY_TRACES_SAMPLE_RATE as
+// 0 while the code default (and .env.example) said 0.1 — tracing off, silently,
+// in exactly the environment that needs it. Empty and unparsable both fall back.
+export function numberFromEnv(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+// A URL that is present, parseable, uses one of the expected schemes, and has a
+// hostname. A bare truthiness test and a prefix test both accept values that
+// cannot work: a single space makes nodemailer's transport dial localhost,
+// "https://" (no host) makes every generated link point nowhere, and in both
+// cases the boot/health signals report the feature as configured while every
+// message is dropped. Returns null when the value is unusable, so a caller can
+// treat "set but broken" exactly like "not set" instead of finding out one
+// failed send at a time.
+export function usableUrl(raw: string | undefined, protocols: string[]): URL | null {
+  if (!raw || raw.trim() === "") return null;
+  let url: URL;
+  try {
+    url = new URL(raw.trim());
+  } catch {
+    return null;
+  }
+  if (!protocols.includes(url.protocol)) return null;
+  if (!url.hostname) return null;
+  return url;
+}

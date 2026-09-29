@@ -74,19 +74,29 @@ if (port !== 465 && smtpUrl.startsWith("smtps://")) {
 // writable layer, the running web/worker keep their original environment, and
 // the script exits 0 printing "wrote /app/.env" and a delivery-verified result.
 // Nothing reaches the deployment, and the ephemeral file disappears with the
-// next `up --build`. Better to fail loudly and name the two variables to set on
-// the host.
+// next `up --build`. Fail loudly instead.
+//
+// It used to print the two variables to copy, with SMTP_URL masked (pass 20) —
+// and a masked URL is WORSE than no URL: `new URL()` parses
+// `smtps://…(32 chars)@smtp.qq.com:465` happily (username = "%E2%80%A6(32%20chars)",
+// password empty), so an operator who pastes the line the message told them to
+// set gets a syntactically valid transport that dials the right host and fails
+// auth on every send. The command to re-run on the host replaces it.
 if (fs.existsSync("/.dockerenv")) {
   console.error(
     [
       "refusing to write .env: this is running INSIDE a container, where the file would be",
       "written to the image's ephemeral layer and never reach the running services.",
       "",
-      "Set these on the HOST instead (e.g. in the .env that docker compose reads):",
-      `  SMTP_URL="${maskSecretUrl(smtpUrl)}"`,
-      `  EMAIL_FROM="${emailFrom}"`,
+      "Re-run the SAME command on the HOST, from the repository checkout: that is where it",
+      "writes .env (SMTP_URL + EMAIL_FROM) and verifies delivery end to end.",
+      "  npx tsx scripts/setup-mail.ts <provider> <credential|port> [from-address]",
       "",
-      "Then recreate the containers: docker compose up -d --force-recreate web worker",
+      "Then recreate the containers so they read the new values:",
+      "  docker compose up -d --force-recreate web worker",
+      "",
+      "(The URL is not echoed here on purpose: it carries the SMTP password, and the masked",
+      "form this message would have to print is not a value anyone can set.)",
     ].join("\n"),
   );
   process.exit(1);

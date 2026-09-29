@@ -2,7 +2,8 @@ import { z } from "zod";
 import { zodMessage, requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
 import { checkPrompt } from "@/lib/safety";
 import { createMediaJob } from "@/lib/queue";
-import { getStorage, newStorageKey } from "@/lib/storage";
+import { getStorage } from "@/lib/storage";
+import { saveBase64Image } from "@/lib/store";
 import { getImageModels, modelEnum } from "@/lib/model-registry";
 import { randomUUID } from "crypto";
 
@@ -55,11 +56,18 @@ export async function POST(req: Request) {
     // (the job row must not reference a file that may not exist yet), so any
     // path that doesn't hand the key to a job must delete it — otherwise a
     // zero-credit account fills storage at the route rate limit for free.
-    const refKey = newStorageKey("png");
+    //
+    // The stored type comes from the BYTES, not from the data URL's declared
+    // media type (or its absence). `newStorageKey("png")` + "image/png" labelled
+    // every reference frame a PNG whatever it was: that label is what a presigned
+    // URL reports to the provider (which can reject a paid edit call over it) and
+    // what /api/files answers for a mid-file Range. Same rule as lib/store.ts's
+    // saveRemoteImage/saveBase64Image.
     const storage = getStorage();
+    let refKey = "";
     let result: Awaited<ReturnType<typeof createMediaJob>>;
     try {
-      await storage.put(refKey, Buffer.from(cleaned, "base64"), "image/png");
+      refKey = await saveBase64Image(cleaned);
       const key = body.idempotencyKey || `${userId}:edit:${randomUUID()}`;
       result = await createMediaJob({
         userId,
@@ -72,7 +80,7 @@ export async function POST(req: Request) {
         refImageKey: refKey,
       });
     } catch (e) {
-      await storage.delete(refKey).catch(() => undefined);
+      if (refKey) await storage.delete(refKey).catch(() => undefined);
       throw e;
     }
     if (!result.created) {

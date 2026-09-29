@@ -1,7 +1,15 @@
 # ---------- deps ----------
 FROM node:24-alpine AS deps
 WORKDIR /app
-COPY package.json package-lock.json ./
+# .npmrc MUST be copied with the manifests: it is what makes this lockfile
+# installable (legacy-peer-deps=true — see the file for the next-auth/nodemailer
+# peer mismatch it resolves), and the lockfile was generated WITH it, so npm ci
+# without it re-derives the tree, finds webpack's subtree missing from the lock
+# and refuses to install. Omitting this line broke EVERY image build of this
+# repository for three weeks — nothing caught it because no CI job builds the
+# image and host-side `npm ci` always has .npmrc sitting next to it. `ci.yml`'s
+# docker job builds the deps stage now, so the next omission fails in CI.
+COPY package.json package-lock.json .npmrc ./
 RUN npm ci
 
 # ---------- builder ----------

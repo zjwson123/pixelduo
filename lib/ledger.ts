@@ -348,6 +348,57 @@ export async function cycleUsage(userId: string, cycleAnchor: Date): Promise<Cyc
   return cycleUsageTx(prisma, userId, cycleAnchor);
 }
 
+// A grant that predates the invariant CHECK (migration
+// 20260926120000_credit_grant_invariant_check) may still hold more than it
+// granted — `remaining > amount`. The CHECK is NOT VALID, so the existing rows
+// were not scanned when it was added, but it IS enforced on every write from
+// then on: the next UPDATE of such a row aborts whatever transaction touched it
+// (23514). That turns a legacy bookkeeping state into an account that cannot
+// spend at all — spendCreditsTx aborts the whole job-creation transaction, so
+// every generation 500s while /api/me keeps advertising the balance, and
+// adminClawbackTx fails identically, so the operator's natural remedy fails
+// too. refundCreditsTx used to drop the refund on the floor for the same reason.
+//
+// The excess was never backed by a GRANT ledger row (see
+// scripts/repair-credit-invariant.ts), so the faithful repair is to write it off
+// — the same correction the operator script performs, applied on touch so the
+// account keeps working without waiting for an operator. Callers must already
+// hold this row's FOR UPDATE lock (taken in GRANT_LOCK_ORDER, which is what
+// makes the balance write below safe next to a concurrent grant).
+async function writeOffExcessTx(
+  tx: Prisma.TransactionClient,
+  userId: string,
+  grantId: string,
+  held: number,
+  cap: number,
+  target: number,
+  reason: string,
+): Promise<void> {
+  if (target >= held) return;
+  // The balance comes down by exactly as much as the row does, or
+  // credits == SUM(remaining) breaks in the other direction. Reading the column
+  // (instead of assuming it equals the rows' sum) keeps the ledger arithmetic
+  // exact even for an account whose balance had ALREADY drifted below its rows:
+  // the write-off is capped at what the column holds and the rest of the drift
+  // is left for scripts/repair-credit-invariant.ts, which is what reports on it.
+  const user = await tx.user.findUnique({ where: { id: userId }, select: { credits: true } });
+  if (!user) throw new Error("user-not-found");
+  await tx.creditGrant.update({ where: { id: grantId }, data: { remaining: target } });
+  const delta = Math.max(target - held, -user.credits);
+  await addCreditsTx(
+    tx,
+    userId,
+    "ADMIN",
+    delta,
+    "grant",
+    grantId,
+    `credit invariant repair on touch: grant ${grantId} held ${held} credits for a grant of ${cap}, and a row above its own amount cannot be written any more (CHECK) — the unbacked excess was written off (${reason})`,
+  );
+  console.warn(
+    `[ledger] wrote off ${held - target} unbacked credit(s) from grant ${grantId} (held ${held} of ${cap}) for user ${userId} — ${reason}`,
+  );
+}
+
 // Spend credits FIFO: free sources first, then earliest expiry (null last).
 // Rows are locked FOR UPDATE so concurrent spends cannot overspend. Expired
 // grants are excluded here too — the daily sweep is the bookkeeping pass, but
@@ -361,8 +412,8 @@ export async function spendCreditsTx(
   note?: string | null,
 ): Promise<SpendConsumption[]> {
   if (amount <= 0) return [];
-  const rows = await tx.$queryRaw<Array<{ id: string; remaining: number }>>(
-    Prisma.sql`SELECT id, remaining FROM "CreditGrant"
+  const rows = await tx.$queryRaw<Array<{ id: string; remaining: number; amount: number }>>(
+    Prisma.sql`SELECT id, remaining, amount FROM "CreditGrant"
       WHERE "userId" = ${userId} AND remaining > 0
         AND ("expiresAt" IS NULL OR "expiresAt" > now())
       ${GRANT_LOCK_ORDER}
@@ -372,6 +423,21 @@ export async function spendCreditsTx(
   const consumption: SpendConsumption[] = [];
   for (const r of rows) {
     if (needed <= 0) break;
+    // A row from before the CHECK cannot be decremented below its excess, so
+    // repair it first: without this the decrement aborts this whole transaction
+    // and the account can never generate again.
+    if (r.remaining > r.amount) {
+      await writeOffExcessTx(
+        tx,
+        userId,
+        r.id,
+        r.remaining,
+        r.amount,
+        r.amount,
+        "repaired while spending from it",
+      );
+      r.remaining = r.amount;
+    }
     const take = Math.min(r.remaining, needed);
     await tx.creditGrant.update({
       where: { id: r.id },
@@ -584,19 +650,61 @@ export async function refundCreditsTx(
     // the job's CAS to `failed` plus this refund — the rollback left the job
     // `running` with a stale heartbeat, recoverStuckJobs reaped it every ~36s and
     // failed it identically for ever, and the pre-auth was never given back.
-    // Only a row that already violates the invariant can reach this (the CHECK
-    // is NOT VALID, so rows predating it are still in production — that is what
-    // scripts/repair-credit-invariant.ts fixes), or a consumption refunded twice.
-    // Same answer as the past-grace branch either way: do not restore a portion
-    // the row cannot hold, report it, and let the caller finish.
+    // Two different states reach here, and they are not the same money:
+    //
+    //  - The row ALREADY holds more than its amount (a legacy row from before
+    //    the CHECK). Its excess was never granted, so writing that excess off
+    //    frees exactly the room this refund needs without minting anything: the
+    //    row ends at `amount` and the customer gets their credits back. Refusing
+    //    instead — which is what this branch did — destroyed credits a failing
+    //    job owed the customer, for ever, with only a log line.
+    //  - The row is legitimately at its cap, which means this consumption was
+    //    already refunded (or predates grant tracking). No excess exists to
+    //    write off, and minting here would be free credits: keep refusing.
     const cap = row ? row.amount : null;
     const held = row ? row.remaining : null;
-    if (cap !== null && held !== null && held + (restoredPerGrant.get(c.grantId) ?? 0) + c.amount > cap) {
-      console.warn(
-        `[ledger] refund of ${c.amount} credit(s) refused by grant ${c.grantId}: it holds ${held}/${cap} and the invariant forbids remaining > amount — not restored (user ${userId}); run scripts/repair-credit-invariant.ts --fix`,
-      );
-      notRestored += c.amount;
-      continue;
+    const restoring = restoredPerGrant.get(c.grantId) ?? 0;
+    if (cap !== null && held !== null && held + restoring + c.amount > cap) {
+      if (held > cap && cap >= restoring + c.amount) {
+        // Clamp to (cap - what this call still has to restore - this portion),
+        // so the increment below lands at cap - restoring and no state in
+        // between crosses the CHECK. The clamp also writes the balance down by
+        // the same amount (see writeOffExcessTx), so credits == SUM(remaining)
+        // holds throughout.
+        const target = cap - restoring - c.amount;
+        await writeOffExcessTx(
+          tx,
+          userId,
+          c.grantId,
+          held,
+          cap,
+          target,
+          "refund of a failing job needed the room",
+        );
+      } else {
+        // Either the row is legitimately at its cap — this consumption was
+        // already refunded, and minting here would be free credits — or it is a
+        // degenerate legacy row whose `amount` is smaller than the portion being
+        // restored, where nothing can make the increment fit. A degenerate row is
+        // still made writable (the excess is written off, or the next statement
+        // to touch it aborts) but the portion is reported rather than restored.
+        if (held > cap) {
+          await writeOffExcessTx(
+            tx,
+            userId,
+            c.grantId,
+            held,
+            cap,
+            0,
+            `row smaller than the refund (amount ${cap}, restoring ${c.amount})`,
+          );
+        }
+        console.warn(
+          `[ledger] refund of ${c.amount} credit(s) refused by grant ${c.grantId}: it holds ${held}/${cap} and the invariant forbids remaining > amount — not restored (user ${userId}); run scripts/repair-credit-invariant.ts --fix`,
+        );
+        notRestored += c.amount;
+        continue;
+      }
     }
     restoredPerGrant.set(c.grantId, (restoredPerGrant.get(c.grantId) ?? 0) + c.amount);
     await tx.creditGrant.update({
@@ -951,9 +1059,9 @@ export async function adminClawbackTx(
   // nothing; the test moves into the loop, where it only decides whether there
   // is anything to take.
   const rows = await tx.$queryRaw<
-    Array<{ id: string; remaining: number; source: string; expiresAt: Date | null; createdAt: Date }>
+    Array<{ id: string; remaining: number; amount: number; source: string; expiresAt: Date | null; createdAt: Date }>
   >(
-    Prisma.sql`SELECT id, remaining, source, "expiresAt", "createdAt" FROM "CreditGrant"
+    Prisma.sql`SELECT id, remaining, amount, source, "expiresAt", "createdAt" FROM "CreditGrant"
       WHERE "userId" = ${userId}
       ${GRANT_LOCK_ORDER}
       FOR UPDATE`,
@@ -970,6 +1078,21 @@ export async function adminClawbackTx(
   let needed = amount;
   for (const r of takeOrder) {
     if (needed <= 0) break;
+    // Same legacy-row repair as spendCreditsTx: a row above its own amount
+    // cannot be decremented, and the operator's compensation path is the last
+    // one that should 500 on a bookkeeping state.
+    if (r.remaining > r.amount) {
+      await writeOffExcessTx(
+        tx,
+        userId,
+        r.id,
+        r.remaining,
+        r.amount,
+        r.amount,
+        "repaired while clawing back from it",
+      );
+      r.remaining = r.amount;
+    }
     const take = Math.min(r.remaining, needed);
     await tx.creditGrant.update({
       where: { id: r.id },

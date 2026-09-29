@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { Prisma } from "@prisma/client";
-import { zodMessage, requireUserId, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped, ApiError } from "@/lib/api";
+import { zodMessage, requireUserId, ok, fail, enforceUserRateLimit, readBodyCapped, ApiError } from "@/lib/api";
 import { prisma, withDeadlockRetry } from "@/lib/prisma";
 import { passwordReauthRefusal } from "@/lib/auth";
 import { GRANT_LOCK_ORDER } from "@/lib/ledger";
@@ -37,11 +37,11 @@ export async function POST(req: Request) {
   try {
     const userId = await requireUserId();
     // Re-auth brute force (password + TOTP/backup-code guesses) gets the same
-    // per-IP + per-account limits as the dedicated 2FA endpoints.
-    const limited = await enforceRateLimit(req, "account-delete", 5, 60_000);
-    if (limited) return limited;
-    const userLimited = await enforceUserRateLimit(userId, "account-delete", 5, 60_000);
-    if (userLimited) return fail(userLimited);
+    // ACCOUNT-keyed limit as the dedicated 2FA endpoints. The per-IP leg this
+    // used to charge first was pure collateral: five wrong-password bodies from
+    // any one account refused the erasure of every co-tenant on that egress.
+    const limited = await enforceUserRateLimit(userId, "account-delete", 5, 60_000);
+    if (limited) return fail(limited);
     // Cumulative brake (lib/twofa.ts), consulted before the password and the
     // second factor are compared: erasure is the one irreversible second-factor
     // check, and the account is refused entirely while a grind is in progress.

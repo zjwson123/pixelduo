@@ -33,7 +33,12 @@ const T = {
     heroA: "一个提示词，", heroB: "两种回答", heroC: "。",
     heroSub: "PixelDuo 让 GPT Image 与 Seedream 同题竞技：拖动分割线逐像素对比，生成前看清每一分的去向，作品归属完全属于你。",
     cta1: "免费开始创作", cta2: "了解工作方式",
-    m1: "双引擎", m1s: "旗舰模型", m2: "$0.04", m2s: "最低单张", m3: "100% 你", m3s: "作品归属",
+    // $0.02 is gpt-image-2 at `low` (2 credits, lib/cost.ts) — the cheapest
+    // option the UI actually offers. The $0.04 this advertised belongs to
+    // wan-image, which is `enabled: false` (DashScope key restrictions) and
+    // therefore absent from getImageModels(): a price on a page that no
+    // selectable model can be bought at.
+    m1: "双引擎", m1s: "旗舰模型", m2: "$0.02", m2s: "最低单张", m3: "100% 你", m3s: "作品归属",
     compareHint: "拖动分割线对比两个引擎的输出",
     tagL: "GPT Image 2", tagR: "Seedream 5",
     strip: "由 PixelDuo 出品的一小部分",
@@ -61,7 +66,7 @@ const T = {
     heroA: "One prompt,", heroB: "two answers", heroC: ".",
     heroSub: "PixelDuo puts GPT Image and Seedream head to head: drag the divider to compare pixel by pixel, see exact cost before you generate, and keep full ownership of every image.",
     cta1: "Start creating free", cta2: "See how it works",
-    m1: "Dual", m1s: "Flagship engines", m2: "$0.04", m2s: "From per image", m3: "100% yours", m3s: "Ownership",
+    m1: "Dual", m1s: "Flagship engines", m2: "$0.02", m2s: "From per image", m3: "100% yours", m3s: "Ownership",
     compareHint: "Drag the divider to compare both engines",
     tagL: "GPT Image 2", tagR: "Seedream 5",
     strip: "A small sample, made on PixelDuo",

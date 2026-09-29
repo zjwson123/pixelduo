@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { zodMessage, requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
+import { zodMessage, requireVerifiedUser, ok, fail, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
 import { routePrompt } from "@/lib/router";
 
 const schema = z.object({
@@ -11,9 +11,7 @@ export async function POST(req: Request) {
     // /api/assistant (the sibling LLM endpoint) requires a verified account —
     // so must this one, or throwaway unverified accounts burn LLM spend.
     const userId = await requireVerifiedUser();
-    const limited = await enforceRateLimit(req, "route", 30, 60_000);
-    if (limited) return limited;
-    // IP rotation must not lift the cap on uncharged LLM spend.
+    // Account-keyed, and the only leg: see enforceUserRateLimit.
     const userLimited = await enforceUserRateLimit(userId, "route", 30, 60_000);
     if (userLimited) return fail(userLimited);
     const bodyRaw = await readBodyCapped(req, 64 * 1024);

@@ -15,12 +15,24 @@ const nextConfig = {
   // context, but a host that ships .next/standalone itself (rsync or tar of the
   // standalone output, the usual non-Docker path) carried the cookie along.
   // `.env*` cannot be excluded this way: Next copies environment files into
-  // standalone unconditionally, which is why the Dockerfile prunes those too.
+  // standalone unconditionally, which is why the Dockerfile prunes those too and
+  // why scripts/prune-standalone.mjs runs after every build.
   outputFileTracingExcludes: {
     "*": ["perf/**", "docs/**", "tests/**", "e2e/**", "backups/**", "data/**", "public/generated/**"],
   },
   async headers() {
     return [
+      {
+        // The two pages whose query string IS an account-recovery credential.
+        // /reset-password?token=… and /verify-email?token=… are client components
+        // reading location.search, and both were prerendered like any other page:
+        // `Cache-Control: s-maxage=31536000`, i.e. a live single-use token written
+        // into the cache key, the CDN's URI log and every proxy in between, for a
+        // year. The body is identical for every token, so nothing about the
+        // response needs caching in the first place.
+        source: "/:page(reset-password|verify-email)",
+        headers: [{ key: "Cache-Control", value: "private, no-store, max-age=0, must-revalidate" }],
+      },
       {
         source: "/(.*)",
         headers: [

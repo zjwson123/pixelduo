@@ -2,7 +2,8 @@ import { z } from "zod";
 import { zodMessage, requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
 import { checkPrompt } from "@/lib/safety";
 import { createMediaJob, deliveredVideoSeconds } from "@/lib/queue";
-import { getStorage, newStorageKey } from "@/lib/storage";
+import { getStorage } from "@/lib/storage";
+import { saveBase64Image } from "@/lib/store";
 import { enabledVideoModelIds, getModel, getVideoModels, modelEnum } from "@/lib/model-registry";
 import { upstreamFor } from "@/lib/model-upstream";
 import { randomUUID } from "crypto";
@@ -123,11 +124,16 @@ export async function POST(req: Request) {
       const cleaned = body.image.match(/^data:image\/[\w.+-]+;base64,(.+)$/i)?.[1] ?? body.image;
       // Same orphan-guard as /api/edit: the upload precedes job creation, so
       // every path that doesn't attach the key to a job must delete it.
+      //
+      // And the same rule about the type: it comes from the BYTES, not from the
+      // data URL's declared media type. `newStorageKey("png")` + "image/png"
+      // labelled a JPEG/WebP first frame a PNG — and Ark FETCHES this object from
+      // a presigned URL whose Content-Type is exactly that label, so a mismatch
+      // is a rejected (and billed) video task.
       const storage = getStorage();
-      refImageKey = newStorageKey("png");
       let result: Awaited<ReturnType<typeof createMediaJob>>;
       try {
-        await storage.put(refImageKey, Buffer.from(cleaned, "base64"), "image/png");
+        refImageKey = await saveBase64Image(cleaned);
         const key = body.idempotencyKey || `${userId}:video:${randomUUID()}`;
         result = await createMediaJob({
           userId,
@@ -141,7 +147,7 @@ export async function POST(req: Request) {
           refImageKey,
         });
       } catch (e) {
-        await storage.delete(refImageKey).catch(() => undefined);
+        if (refImageKey) await storage.delete(refImageKey).catch(() => undefined);
         throw e;
       }
       if (!result.created) {

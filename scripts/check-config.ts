@@ -79,26 +79,20 @@ const NOT_FORWARDED: Record<string, { files: string[]; reason: string }> = {
     reason:
       "writes each dev mail to a file for e2e specs; the container stacks forward MAIL_DEV_MODE instead",
   },
-  EMAIL_VERIFY_AUTO: {
-    files: ["docker-compose.prod.yml", "docker-compose.single.yml"],
-    reason: "a test-only switch: production must never auto-verify (a boot assertion refuses it)",
-  },
-  TRUST_X_REAL_IP: {
-    files: ["docker-compose.prod.yml", "docker-compose.single.yml"],
-    reason: "only meaningful behind a proxy that sets it instead of X-Forwarded-For",
-  },
+  // PAYMENT_ALLOW_MOCK is the one escape hatch that really is local-only: the
+  // default compose sets it to 1 for the mock flow, and neither prod file
+  // forwards it at all (a deployment that sets it in its own .env is opt-ing in
+  // through compose interpolation, not through an anchor line here). The other
+  // three — EMAIL_VERIFY_AUTO, TRUST_X_REAL_IP, MAIL_DEV_MODE — DO carry anchors
+  // in both prod files, so an exemption for them would only un-protect those
+  // anchors; check 2b fails on exactly that.
   PAYMENT_ALLOW_MOCK: {
     files: ["docker-compose.prod.yml", "docker-compose.single.yml"],
     reason: "a boot-assertion escape hatch for the local/test stack only",
   },
-  MAIL_DEV_MODE: {
-    files: ["docker-compose.prod.yml", "docker-compose.single.yml"],
-    reason: "log-only mailer escape hatch for the local/test stack only",
-  },
-  NEXTAUTH_URL: {
-    files: [],
-    reason: "forwarded by all three (as an env var and as a build arg)",
-  },
+  // NEXTAUTH_URL deliberately has no entry: all three files forward it (as an
+  // env var and as a build arg), so any exemption here would be dead weight that
+  // silences the one check that matters most on this variable.
 };
 
 function readEnvExample(): { keys: Set<string>; duplicates: string[] } {
@@ -265,6 +259,21 @@ function main() {
       if (documented.has(name) || name.startsWith("NEXT_PUBLIC_")) continue;
       if (INTERNAL_FORWARDED[name]) continue;
       problems.push(`${short(file)} forwards ${name}, which ${ENV_EXAMPLE} does not document`);
+    }
+  }
+
+  // 2b. An exemption for a variable the file DOES forward is not an exemption,
+  //     it is a hole: it silently un-protects that anchor, so the day someone
+  //     deletes the line the gate stays green. Four of these had accumulated
+  //     (the prod/single escape hatches all carry their anchors). Fail instead —
+  //     the fix is one deleted entry, and the reason string belongs to the case
+  //     where the name really is missing.
+  for (const [name, exempt] of Object.entries(NOT_FORWARDED)) {
+    const redundant = exempt.files.filter((f) => forwarded.get(f)?.has(name));
+    if (redundant.length) {
+      problems.push(
+        `stale exemption: ${name} is already forwarded by ${redundant.map(short).join(", ")} — delete its NOT_FORWARDED entry so the anchor is protected`,
+      );
     }
   }
 

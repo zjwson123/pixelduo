@@ -350,9 +350,15 @@ services:
     command: >
       sh -c 'while true; do
         STAMP=$$(date +%Y%m%d-%H%M%S);
-        pg_dump -Fc -f /backups/pixelduo-$${STAMP}.dump.gz;
-        ls -1t /backups/pixelduo-*.dump.gz | tail -n +$$((BACKUP_KEEP + 1)) | xargs -r rm -f;
-        echo "[backup] $$STAMP written, keeping $${BACKUP_KEEP}";
+        TMP=/backups/.pixelduo-$${STAMP}.partial;
+        if pg_dump -Fc -f $$TMP; then
+          mv $$TMP /backups/pixelduo-$${STAMP}.dump.gz;
+          ls -1t /backups/pixelduo-*.dump.gz | tail -n +$$((BACKUP_KEEP + 1)) | xargs -r rm -f;
+          echo "[backup] $$STAMP written, keeping $${BACKUP_KEEP}";
+        else
+          rm -f $$TMP;
+          echo "[backup] FAILED at $$STAMP — no dump written, rotation skipped (the previous dumps are untouched)" >&2;
+        fi;
         sleep 86400;
       done'
 

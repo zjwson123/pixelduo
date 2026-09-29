@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { requireUserId, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped, zodMessage } from "@/lib/api";
+import { requireUserId, ok, fail, enforceUserRateLimit, readBodyCapped, zodMessage } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { serveUserUrl } from "@/lib/store";
 import { getStorage } from "@/lib/storage";
@@ -53,10 +53,10 @@ const deleteSchema = z.object({
 export async function DELETE(req: Request) {
   try {
     const userId = await requireUserId();
-    const limited = await enforceRateLimit(req, "gallery-delete", 10, 60_000);
-    if (limited) return limited;
-    const userLimited = await enforceUserRateLimit(userId, "gallery-delete", 10, 60_000);
-    if (userLimited) return fail(userLimited);
+    // Account-keyed, and the only leg (see enforceUserRateLimit): the per-IP leg
+    // it used to charge first let one account refuse deletions to its neighbours.
+    const limited = await enforceUserRateLimit(userId, "gallery-delete", 10, 60_000);
+    if (limited) return fail(limited);
     const bodyRaw = await readBodyCapped(req, 16 * 1024);
     if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
     const { ids } = deleteSchema.parse(JSON.parse(bodyRaw.raw));

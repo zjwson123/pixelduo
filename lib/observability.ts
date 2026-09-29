@@ -1,5 +1,6 @@
 import * as Sentry from "@sentry/node";
 import { scrubSentryEvent } from "./sentry-scrub";
+import { numberFromEnv } from "./runtime-env";
 
 // Mask common secret patterns before secrets ever reach logs/Sentry.
 const SECRET_PATTERNS: Array<RegExp> = [
@@ -53,7 +54,7 @@ export function initObservability(service: string): boolean {
   Sentry.init({
     dsn: process.env.SENTRY_DSN,
     environment: process.env.SENTRY_ENVIRONMENT ?? process.env.NODE_ENV ?? "development",
-    tracesSampleRate: Number(process.env.SENTRY_TRACES_SAMPLE_RATE ?? 0.1),
+    tracesSampleRate: numberFromEnv(process.env.SENTRY_TRACES_SAMPLE_RATE, 0.1),
     release: process.env.SENTRY_RELEASE,
     // The worker/rollover process is the one holding provider and moderator
     // credentials, and it does not go through the web process's configs: without

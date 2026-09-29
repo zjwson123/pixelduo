@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { zodMessage, requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped, ApiError } from "@/lib/api";
+import { zodMessage, requireVerifiedUser, ok, fail, enforceUserRateLimit, readBodyCapped, ApiError } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { passwordReauthRefusal } from "@/lib/auth";
 import {
@@ -31,10 +31,10 @@ const schema = z.object({ token: z.string().min(6).max(20), password: z.string()
 export async function POST(req: Request) {
   try {
     const userId = await requireVerifiedUser();
-    const limited = await enforceRateLimit(req, "2fa-confirm", 5, 60_000);
-    if (limited) return limited;
-    const userLimited = await enforceUserRateLimit(userId, "2fa-confirm", 5, 60_000);
-    if (userLimited) return fail(userLimited);
+    // Account-keyed only: see the note on enforceUserRateLimit. The per-IP leg
+    // let one account refuse 2FA enrolment to a whole shared egress.
+    const limited = await enforceUserRateLimit(userId, "2fa-confirm", 5, 60_000);
+    if (limited) return fail(limited);
     // Cumulative brake (lib/twofa.ts): enrollment verifies a code against the
     // pending secret, so it is a second-factor check like any other.
     if (await isTwoFactorLocked(userId)) return fail(new ApiError(429, TWOFA_LOCKED_ERROR));

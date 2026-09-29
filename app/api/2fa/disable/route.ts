@@ -1,6 +1,6 @@
 import bcrypt from "bcryptjs";
 import { z } from "zod";
-import { zodMessage, requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped, ApiError } from "@/lib/api";
+import { zodMessage, requireVerifiedUser, ok, fail, enforceUserRateLimit, readBodyCapped, ApiError } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { passwordReauthRefusal } from "@/lib/auth";
 import {
@@ -25,14 +25,14 @@ const schema = z.object({
 
 // Disabling requires the account password + a live TOTP code (backup codes
 // intentionally not accepted so a stolen code can't disable 2FA).
-// Rate-limited per IP and per account: 6-digit TOTP has only ~1M combinations.
+// Rate-limited per ACCOUNT: 6-digit TOTP has only ~1M combinations, and the
+// per-IP leg this used to add first only let a neighbour's traffic refuse the
+// downgrade to its co-tenants (and vice versa).
 export async function POST(req: Request) {
   try {
     const userId = await requireVerifiedUser();
-    const limited = await enforceRateLimit(req, "2fa-disable", 5, 60_000);
-    if (limited) return limited;
-    const userLimited = await enforceUserRateLimit(userId, "2fa-disable", 5, 60_000);
-    if (userLimited) return fail(userLimited);
+    const limited = await enforceUserRateLimit(userId, "2fa-disable", 5, 60_000);
+    if (limited) return fail(limited);
     // Cumulative brake (lib/twofa.ts) before any comparison: turning the second
     // factor off is the downgrade an attacker who knows the password wants, so
     // it is bound by the same counter as the login step.

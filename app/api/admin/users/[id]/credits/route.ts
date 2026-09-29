@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { requireAdmin } from "@/lib/admin";
-import { zodMessage, ok, fail, readBodyCapped, enforceRateLimit, enforceUserRateLimit } from "@/lib/api";
+import { zodMessage, ok, fail, readBodyCapped, enforceUserRateLimit } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { adminGrantTx, adminClawbackTx } from "@/lib/ledger";
 
@@ -21,8 +21,9 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const { id } = await params;
   try {
     const adminId = await requireAdmin();
-    const limited = await enforceRateLimit(req, "admin-credits", 30, 60_000);
-    if (limited) return limited;
+    // ACCOUNT-keyed (the acting admin), and the only leg: the per-IP one it
+    // carried alongside refused admin work to every operator behind a shared
+    // egress, which on a one-operator install is the same person.
     const adminLimited = await enforceUserRateLimit(adminId, "admin-credits", 30, 60_000);
     if (adminLimited) return fail(adminLimited);
     const bodyRaw = await readBodyCapped(req, 8 * 1024);

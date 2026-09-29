@@ -70,7 +70,7 @@ curl -sI https://pixelduo.ai/ | grep -iE "content-security-policy|strict-transpo
 ## 4. 监控与告警
 
 - [ ] Sentry 收到第一条测试错误（人工触发一次 500）
-- [ ] 备份恢复演练在生产复跑（DB dump 恢复 + `scripts/restore-objects.sh`）
+- [ ] 备份恢复演练在生产复跑（DB dump 恢复 + `RESTORE_DRILL_CONFIRM=1 scripts/restore-objects.sh`，脚本默认 dry run）
 - [ ] 告警渠道确认（Sentry alert 绑邮箱/IM）
 
 ## 5. 回滚

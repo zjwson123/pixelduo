@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { ADMIN_GUARD_LOCK, assertAnotherAdminRemains, requireAdmin } from "@/lib/admin";
-import { zodMessage, ok, fail, readBodyCapped, enforceRateLimit, enforceUserRateLimit } from "@/lib/api";
+import { zodMessage, ok, fail, readBodyCapped, enforceUserRateLimit } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 
 const schema = z.object({ role: z.enum(["user", "admin"]) });
@@ -9,10 +9,9 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const { id } = await params;
   try {
     const adminId = await requireAdmin();
-    // Privilege changes carry their own per-IP + per-admin ceiling; this was
-    // the second of the only two body-reading routes with no limit at all.
-    const limited = await enforceRateLimit(req, "admin-role", 30, 60_000);
-    if (limited) return limited;
+    // Privilege changes carry their own ACCOUNT-keyed ceiling (the acting
+    // admin); the per-IP leg it also carried let one operator's traffic refuse
+    // role changes to their neighbours.
     const adminLimited = await enforceUserRateLimit(adminId, "admin-role", 30, 60_000);
     if (adminLimited) return fail(adminLimited);
     const bodyRaw = await readBodyCapped(req, 8 * 1024);

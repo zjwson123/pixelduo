@@ -130,16 +130,17 @@ BACKUP_S3_ACCESS_KEY_ID=pixelduo BACKUP_S3_SECRET_ACCESS_KEY=pixelduo-secret \
 BACKUP_S3_BUCKET=pixelduo ./scripts/backup-objects.sh
 
 # 恢复演练：把某个快照恢复到 scratch 桶并校验对象数（演练后删除 scratch 桶）
+# RESTORE_DRILL_CONFIRM=1 是必须的：脚本默认 dry run（打印将要写入的内容后以 1 退出）
 BACKUP_S3_ENDPOINT=http://host.docker.internal:9000 \
 BACKUP_S3_ACCESS_KEY_ID=pixelduo BACKUP_S3_SECRET_ACCESS_KEY=pixelduo-secret \
-./scripts/restore-objects.sh <stamp> pixelduo-restore-test
+RESTORE_DRILL_CONFIRM=1 ./scripts/restore-objects.sh <stamp> pixelduo-restore-test
 ```
 
 compose 全栈默认带 `backup-objects` 服务（每日镜像 + 保留 7 份；配 `BACKUP_TARGET_*` 可同步到第二桶异地）。
 
 ### 健康检查
 
-`GET /api/health` 返回 `ok` / `service` / `db` / `redis` / `storage` / `queue.active`（仅"有没有在跑的任务"；队列深度与 worker 心跳属侦察信息，已刻意不暴露）/ `time`，任一关键依赖异常时 `ok:false`。**注意：`ok:false` 时该路由仍返回 200**，`curl -f` 判不出失败，探活要读 JSON（可复制的冒烟命令见 [docs/release.md](docs/release.md)）。
+`GET /api/health` 返回 `ok` / `service` / `db` / `redis` / `storage` / `queue.active`（仅"有没有在跑的任务"；队列深度与 worker 心跳属侦察信息，已刻意不暴露）/ `time`，任一关键依赖异常时 `ok:false` **且 HTTP 状态码为 503**（关键依赖全绿才是 200），所以 `curl -f` 判得出来，探活也可以直接读 JSON（可复制的冒烟命令见 [docs/release.md](docs/release.md)）。
 
 ### 本地全栈（Docker Compose）
 

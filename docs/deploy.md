@@ -67,6 +67,18 @@ npx tsx scripts/repair-credit-invariant.ts --fix    # 修复：把越界行夹�
 ALTER TABLE "CreditGrant" VALIDATE CONSTRAINT "CreditGrant_remaining_range";
 ```
 
+**部署顺序**：这条迁移对历史行是 `NOT VALID`，但**对之后每一次写入立即生效**——包括对历史坏行的 `UPDATE`。所以一个余额里带着越界行的账号，其每次消费都会撞 23514 并让整个事务回滚（生成接口 500，而 `/api/me` 照旧显示余额），`adminClawbackTx` 也会以同样方式失败。现在应用侧会在**碰到该行时自动修复**（`lib/ledger.ts` 的 `writeOffExcessTx`：写掉多出来的部分、同步扣减余额、写一条 ADMIN 流水并打日志），所以不需要人工介入；但升级时**先跑一次修复脚本**可以避免上线瞬间出现这些 500 与 Sentry 噪声：
+
+```bash
+npx tsx scripts/repair-credit-invariant.ts          # 先报告（只读，可在迁移前跑）
+npx tsx scripts/repair-credit-invariant.ts --fix    # 有坏行就修
+docker compose -f docker-compose.prod.yml run --rm migrate
+```
+
+### 部署产物里没有 `.env`
+
+`.next/standalone`（web 镜像的内容，也是非 Docker 部署直接搬运的那棵树）**不含任何 dotenv 文件**：Next 构建时会把构建机的 `.env` 复制进去，而那份文件里是 `NEXTAUTH_SECRET`、`DATABASE_URL` 和 S3 凭据。`npm run build` 之后的 `postbuild`（`scripts/prune-standalone.mjs`）会删掉它们，Dockerfile 阶段也各删一次，CI 与 `scripts/ci-local.sh` 都会断言这件事。因此运行环境变量必须显式提供（compose 的 `environment:`，或主机进程自己的环境）——把 `.env` 放在产物旁边不再是配置方式。
+
 ### 用户反馈（`/feedback`）
 
 留言会存进 `Feedback` 表（管理台 **feedback** 标签页 = 收件箱），同时把通知邮件发到 `FEEDBACK_TO`。邮件用纯文本，`Reply-To` 是留言者本人，所以在邮箱里直接回复就是回复用户。
@@ -213,7 +225,8 @@ docker compose -f docker-compose.prod.yml up -d
 - 托管 Postgres：开启自动备份 + PITR，按需 `pg_restore`（恢复演练已通过，见 `progress.md`）
 - 自托管 Postgres：`docker compose up -d backup` 每日 dump 到 `./backups/`；手动 `./scripts/backup.sh`
 - 恢复：`pg_restore -d $DATABASE_URL backups/pixelduo-<stamp>.dump.gz`
-- **对象存储（用户图片）**：托管 R2/S3 开启**版本控制 + 跨区域复制**（DR 首选）；自托管 MinIO 用 `backup-objects` 服务每日镜像到 `./backups/objects/`（保留 7 份，`BACKUP_TARGET_*` 可同步第二桶异地）；恢复演练 `./scripts/restore-objects.sh <stamp> <scratch-bucket>`
+- **对象存储（用户图片）**：托管 R2/S3 开启**版本控制 + 跨区域复制**（DR 首选）；自托管 MinIO 用 `backup-objects` 服务每日镜像到 `./backups/objects/`（保留 7 份，`BACKUP_TARGET_*` 可同步第二桶异地）；恢复演练 `RESTORE_DRILL_CONFIRM=1 ./scripts/restore-objects.sh <stamp> <scratch-bucket>`（脚本默认 dry run：只打印将写入的对象并以 1 退出，必须显式确认；目标桶名等于正式桶会被拒绝）
+- **备份文件只在成功时出现**：`backup` 服务先写隐藏的 `.partial` 再改名，失败则删掉临时文件并打印 `FAILED`，**不轮转**（此前 `;` 串联的循环在 `pg_dump` 失败时仍会删掉一份好备份并打印 "written"，`docker compose ps` 照样显示 `Up`）。`scripts/backup.sh` 同理（写 `.partial` 再 `mv`），避免半截文件顶替正式名字被恢复回去
 
 ### 限流与审核
 

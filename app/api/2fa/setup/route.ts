@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { zodMessage, requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped, ApiError } from "@/lib/api";
+import { zodMessage, requireVerifiedUser, ok, fail, enforceUserRateLimit, readBodyCapped, ApiError } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { passwordReauthRefusal } from "@/lib/auth";
 import { generateTwoFactorSetup } from "@/lib/twofa";
@@ -18,12 +18,11 @@ const schema = z.object({ password: z.string().min(1).max(100) });
 export async function POST(req: Request) {
   try {
     const userId = await requireVerifiedUser();
-    // Each call overwrites totpPendingSecret — same per-IP + per-account
-    // limits as the other 2FA steps.
-    const limited = await enforceRateLimit(req, "2fa-setup", 5, 60_000);
-    if (limited) return limited;
-    const userLimited = await enforceUserRateLimit(userId, "2fa-setup", 5, 60_000);
-    if (userLimited) return fail(userLimited);
+    // Each call overwrites totpPendingSecret. Account-keyed only — the per-IP
+    // leg it used to carry first let any one account hold the bucket full and
+    // refuse 2FA ENROLMENT to every neighbour behind the same egress.
+    const limited = await enforceUserRateLimit(userId, "2fa-setup", 5, 60_000);
+    if (limited) return fail(limited);
     const bodyRaw = await readBodyCapped(req, 8 * 1024);
     if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
     const body = schema.parse(JSON.parse(bodyRaw.raw));

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { zodMessage, requirePartialSession, ApiError, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
+import { zodMessage, requirePartialSession, ApiError, ok, fail, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import {
   verifyTotp,
@@ -28,21 +28,24 @@ export async function POST(req: Request) {
     if (!su.totpPending) return fail(new ApiError(403, "2fa-required"));
     const userLimited = await enforceUserRateLimit(su.id, "2fa-verify", 5, 60_000);
     if (userLimited) return fail(userLimited);
-    // Both buckets sit AFTER the session check, and the order is the point: the
-    // per-IP one used to run first, before any credential was examined, so five
-    // anonymous junk bodies ({"token":"123456"}) emptied it and every legitimate
-    // user behind that IP got `429 rate-limited` with no code ever compared —
-    // a second-factor lockout anyone could trigger and sustain, per IP, from
-    // anywhere. Keying it on the account instead is what actually protects
-    // against a stolen partial session (an attacker with the password must
-    // still grind the code); the work a credential-less caller can do here is
-    // bounded one layer up, by proxy.ts's 40/min per-IP auth bucket — the same
-    // arrangement every other route relies on, since `requireVerifiedUser` also
-    // runs before any route-level limiter.
-    const limited = await enforceRateLimit(req, "2fa", 5, 60_000);
-    if (limited) return limited;
+    // The bucket sits AFTER the session check, and that order is the point: the
+    // per-IP leg that used to run first let five anonymous junk bodies
+    // ({"token":"123456"}) empty it and hand every legitimate user behind that
+    // address `429 rate-limited` with no code ever compared — a second-factor
+    // lockout anyone could trigger, per IP, from anywhere. What remains is
+    // account-keyed only: an attacker holding a stolen partial session must
+    // still grind the code against a 5/min cap, and the work a credential-less
+    // caller can do is bounded one layer up by proxy.ts's per-IP auth bucket —
+    // the same arrangement every other route relies on, since
+    // `requireVerifiedUser` also runs before any route-level limiter.
+    //
+    // The per-IP leg is gone rather than merely reordered because a partial
+    // session is a credential: one attacker's own 2FA-enabled account could
+    // still hold `2fa:<egress>` full at 5/min and refuse the second-factor step
+    // — i.e. LOGIN — to every co-tenants, indefinitely. A shared source address
+    // cannot be held responsible for traffic; the account can.
     // Cumulative brake, consulted before anything is compared: the per-minute
-    // limits above bound a burst, this bounds the campaign (see lib/twofa.ts).
+    // limit above bounds a burst, this bounds the campaign (see lib/twofa.ts).
     // It applies to backup codes too — the account is under second-factor
     // attack, so every path that accepts one is closed until it clears.
     if (await isTwoFactorLocked(su.id)) return fail(new ApiError(429, TWOFA_LOCKED_ERROR));

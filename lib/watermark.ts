@@ -27,24 +27,48 @@ export function isRasterImage(buf: Buffer): boolean {
 // allocation at ~80MB. lib/safety.ts shares this ceiling for the same reason.
 export const MAX_INPUT_PIXELS = 20_000_000;
 
+// Smallest badge worth compositing. Below this the canvas cannot carry a
+// readable mark and the bytes are returned untouched (with `baked: false`).
+const MIN_FONT_PX = 8;
+const MIN_PAD_PX = 2;
+
+export interface WatermarkResult {
+  buf: Buffer;
+  // False means the badge could NOT be composited and `buf` is the input
+  // unchanged. Callers must record this rather than assuming the file is marked
+  // (see scripts/worker.ts): a checkpoint that claims `baked` for an unbadged
+  // image never looks again.
+  baked: boolean;
+}
+
 // Bake a visible "AI 生成" badge into an image (bottom-right).
 // Watermark is a plan perk: free plans get marked outputs, paid plans get
 // clean files. gpt-image-2 has no built-in AI marker (unlike Seedream's
 // provider-side "AI生成" mark, toggled via the API watermark param), so for
 // free-tier gpt/wan images we bake our own badge here.
-export async function bakeWatermark(buf: Buffer): Promise<Buffer> {
+export async function bakeWatermark(buf: Buffer): Promise<WatermarkResult> {
   if (!isRasterImage(buf)) throw new Error("unsupported-image-format");
   const meta = await sharp(buf, { limitInputPixels: MAX_INPUT_PIXELS }).metadata();
   // Provider-controlled dimensions flow into the badge SVG's raster size —
   // clamp so a lying header can't request a multi-GB librsvg allocation.
   const width = Math.min(meta.width ?? 1024, 8192);
   const height = Math.min(meta.height ?? width, 8192);
-  const fontSize = Math.max(24, Math.round(width / 32));
-  const pad = Math.max(12, Math.round(width / 60));
-  // Images too small to carry a readable badge (e.g. the 1×1 mock
-  // placeholders in tests) pass through untouched — sharp cannot composite
-  // a badge larger than the canvas anyway.
-  if (height < fontSize + pad * 2) return buf;
+  let fontSize = Math.max(24, Math.round(width / 32));
+  let pad = Math.max(12, Math.round(width / 60));
+  // The band is SCALED DOWN to the canvas instead of being skipped. Skipping
+  // meant a wide, short image passed through unbadged while the worker recorded
+  // `baked: true`, i.e. a free-tier output shipped clean and no later attempt
+  // would ever look again. What still cannot be marked is a canvas too small for
+  // even a minimal badge — the 1×1 mock placeholders in tests, where sharp also
+  // refuses to composite an overlay larger than its base — and that case reports
+  // itself through `baked: false`.
+  const nominal = fontSize + pad * 2;
+  if (height < nominal) {
+    const scale = height / nominal;
+    fontSize = Math.max(MIN_FONT_PX, Math.floor(fontSize * scale));
+    pad = Math.max(MIN_PAD_PX, Math.floor(pad * scale));
+  }
+  if (height < fontSize + pad * 2) return { buf, baked: false };
   const label = process.env.WATERMARK_TEXT || "PixelDuo · AI 生成";
   // Escape XML special characters to prevent SVG injection from env var.
   const safeLabel = label
@@ -77,10 +101,10 @@ export async function bakeWatermark(buf: Buffer): Promise<Buffer> {
   // free-tier output, and this runs on every one of them.
   switch (meta.format) {
     case "jpeg":
-      return marked.jpeg().toBuffer();
+      return { buf: await marked.jpeg().toBuffer(), baked: true };
     case "webp":
-      return marked.webp().toBuffer();
+      return { buf: await marked.webp().toBuffer(), baked: true };
     default:
-      return marked.png().toBuffer();
+      return { buf: await marked.png().toBuffer(), baked: true };
   }
 }

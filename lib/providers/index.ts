@@ -203,7 +203,13 @@ export async function editWithGpt(
     fd.append("size", "1024x1024");
     fd.append("quality", quality);
     fd.append("n", "1");
-    fd.append("image", new Blob([Buffer.from(imageBase64, "base64")], { type: "image/png" }), "input.png");
+    // The part's media type is the bytes', not a hardcoded PNG: the reference
+    // frame is stored under a sniffed key (lib/store.ts) and this is the same
+    // buffer, so a JPEG upload announced as image/png is a label the gateway can
+    // act on — after the call has been billed.
+    const refBytes = Buffer.from(imageBase64, "base64");
+    const refType = storeContentType(refBytes, "image/png");
+    fd.append("image", new Blob([refBytes], { type: refType }), `input.${extensionForContentType(refType)}`);
     const res = await fetch("https://api.modelverse.cn/v1/images/edits", {
       method: "POST",
       headers: { Authorization: `Bearer ${key}` },

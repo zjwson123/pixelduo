@@ -1,20 +1,18 @@
-import { requireUserId, ok, fail, enforceRateLimit, enforceUserRateLimit } from "@/lib/api";
+import { requireUserId, ok, fail, enforceUserRateLimit } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { createToken } from "@/lib/tokens";
 import { sendVerificationEmail, reserveAuthMailSend } from "@/lib/mail";
 
 // Resend the verification email for the current (unverified) user.
-export async function POST(req: Request) {
+export async function POST() {
   try {
     const userId = await requireUserId();
-    const limited = await enforceRateLimit(req, "verify-resend", 5, 15 * 60_000);
-    if (limited) return limited;
-    // Per-account cap on top of the per-IP one, for the same reason
-    // forgot-password has one: an attacker rotating source addresses must not
-    // be able to mail-bomb a single address without limit. This route needs
-    // only a live session (no password, no second factor), and the account for
-    // an address anyone can create without proving ownership, so the per-IP
-    // brake alone is bypassable.
+    // Per-ACCOUNT cap, and the only leg. The per-IP one it used to carry first
+    // refused the whole verify→activate funnel to every neighbour of whoever
+    // spent it — and the address being mailed is the caller's OWN (the row is
+    // read from the session below), so there is no third party for an IP bucket
+    // to protect: the per-account cap is the limit that matters, plus the
+    // global hourly ceiling in lib/mail.ts.
     const userLimited = await enforceUserRateLimit(userId, "verify-resend-account", 5, 15 * 60_000);
     if (userLimited) return fail(userLimited);
     const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });

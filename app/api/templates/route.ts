@@ -1,4 +1,4 @@
-import { requireUserId, ok, fail, enforceRateLimit, clampPage } from "@/lib/api";
+import { requireUserId, ok, fail, enforceUserRateLimit, clampPage } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@prisma/client";
 import { serveUserUrl } from "@/lib/store";
@@ -11,12 +11,21 @@ export const dynamic = "force-dynamic";
 // that are a product asset, not public data.
 export async function GET(req: Request) {
   try {
-    await requireUserId();
-    const limited = await enforceRateLimit(req, "templates", 60, 60_000);
-    if (limited) return limited;
+    const userId = await requireUserId();
+    // Account-keyed, like every sibling read (gallery 120/min, jobs 600/min).
+    // It was the last authenticated read keyed ONLY on the source address, which
+    // made Explore the cheapest way to deny a co-tenant: 60 requests/min from
+    // one account emptied `templates:<egress>` and every neighbour behind the
+    // same NAT got 429 on the gallery, while the caller's own budget was lifted
+    // by rotating IPs. See enforceUserRateLimit.
+    const limited = await enforceUserRateLimit(userId, "templates", 60, 60_000);
+    if (limited) return fail(limited);
     const url = new URL(req.url);
-  const cat = url.searchParams.get("cat"); // category label (Chinese short)
-  const q = url.searchParams.get("q"); // free-text search on title + prompt
+  // Both are free-text inputs feeding an unindexed `contains` scan, so they are
+  // bounded before they reach the query (there is no injection risk — the scan
+  // is the cost).
+  const cat = url.searchParams.get("cat")?.slice(0, 40); // category label (Chinese short)
+  const q = url.searchParams.get("q")?.slice(0, 100); // free-text search on title + prompt
   const featured = url.searchParams.get("featured") === "1";
   // NaN-guard: garbage ?page= must fall back to 1, not skip: NaN. clampPage
   // also bounds the top end, where a huge finite value produced a skip the

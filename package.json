@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "postbuild": "node scripts/prune-standalone.mjs",
     "start": "next start",
     "db:migrate": "RUST_LOG=debug npx prisma migrate deploy",
     "db:push": "prisma db push",

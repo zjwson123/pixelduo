@@ -181,13 +181,23 @@ export async function processImageJob(job: {
         if (img.baked) continue;
         const raw = await getStorage().get(img.key);
         if (!raw) throw new Error("watermark: image missing from storage");
-        const baked = await bakeWatermark(raw);
+        const marked = await bakeWatermark(raw);
+        // Too small for even a scaled-down badge (the 1×1 mock placeholders).
+        // The image is delivered unbadged — nothing can be composited — but the
+        // checkpoint must NOT claim `baked`, or no later attempt would ever look
+        // again, and the operator gets a line rather than a silent policy break.
+        if (!marked.baked) {
+          console.warn(
+            `[worker ${workerId}] job ${job.id}: ${img.key} is too small to carry the watermark badge — delivered unbadged`,
+          );
+          continue;
+        }
         // The bytes decide the recorded type, as everywhere else (lib/media-type).
         // Hardcoded "image/png" was right while bakeWatermark always emitted PNG;
         // it now preserves the container it was given, and a stored type that
         // disagrees with the bytes is what a presigned URL (or the external
         // moderation detector) reads.
-        await getStorage().put(img.key, baked, storeContentType(baked, "image/png"));
+        await getStorage().put(img.key, marked.buf, storeContentType(marked.buf, "image/png"));
         img.baked = true;
         bakedAny = true;
       }

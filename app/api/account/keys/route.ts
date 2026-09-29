@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { zodMessage, requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped, ApiError } from "@/lib/api";
+import { zodMessage, requireVerifiedUser, ok, fail, enforceUserRateLimit, readBodyCapped, ApiError } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { passwordReauthRefusal } from "@/lib/auth";
 import { createApiKey } from "@/lib/apikey";
@@ -56,11 +56,12 @@ const MAX_ACTIVE_KEYS = 10;
 export async function POST(req: Request) {
   try {
     const userId = await requireVerifiedUser();
-    const limited = await enforceRateLimit(req, "apikey-create", 5, 60_000);
-    if (limited) return limited;
-    // Per-account cap alongside the per-IP one: this endpoint is a password +
-    // TOTP re-auth gate, so guesses spread across rotating IPs must not
-    // dilute the limit (same treatment as 2fa/disable and account/delete).
+    // Per-account cap, and the only leg: this endpoint is a password + TOTP
+    // re-auth gate, so what must not be diluted is the budget for guessing on
+    // THIS account — which is what the account key does. The per-IP leg it also
+    // carried was spent before any credential was examined, so a neighbour's
+    // traffic (or one account grinding its own password) refused key minting to
+    // everyone else behind the same egress.
     const userLimited = await enforceUserRateLimit(userId, "apikey-create", 5, 60_000);
     if (userLimited) return fail(userLimited);
     // Cumulative brake (lib/twofa.ts) before the password and the second factor

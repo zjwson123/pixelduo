@@ -105,20 +105,27 @@ async function notificationSuppressed(email: string, category: string, message: 
 
 export async function POST(req: Request) {
   try {
-    const limited = await enforceRateLimit(req, "feedback", 5, 10 * 60_000);
-    if (limited) return limited;
+    // The budget is charged on the dimension that can be held responsible, and
+    // resolved BEFORE the charge: a signed-in reporter is bounded per ACCOUNT
+    // (their own submissions cannot spend a bucket their neighbours need), while
+    // an anonymous one — the form's whole point — is still bounded per IP, which
+    // is all there is to key on without a credential. Charging the IP bucket
+    // first for everyone, as this did, meant one account's posts refused the
+    // form to every co-tenant on that egress.
+    //
+    // The limit still precedes the body read (pass 7): nothing buffers until the
+    // caller has budget left.
+    const user = await optionalUser();
+    if (user) {
+      const userLimited = await enforceUserRateLimit(user.id, "feedback", 5, 10 * 60_000);
+      if (userLimited) return fail(userLimited);
+    } else {
+      const limited = await enforceRateLimit(req, "feedback", 5, 10 * 60_000);
+      if (limited) return limited;
+    }
     const bodyRaw = await readBodyCapped(req, 8 * 1024);
     if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
     const body = schema.parse(JSON.parse(bodyRaw.raw));
-
-    const user = await optionalUser();
-    if (user) {
-      // Per-account ceiling on top of the per-IP one, like every other
-      // write-back route: one IP can be many accounts, and one account can
-      // arrive from many IPs.
-      const userLimited = await enforceUserRateLimit(user.id, "feedback", 5, 10 * 60_000);
-      if (userLimited) return fail(userLimited);
-    }
     const email = user?.email ?? body.email;
     if (!email) return fail(new Error("invalid-input: an email address is required when you are not signed in"));
 
