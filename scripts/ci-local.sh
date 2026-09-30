@@ -15,11 +15,18 @@ export REGISTER_RATE_LIMIT="10000"
 export STORAGE_DRIVER="local"
 export LOCAL_STORAGE_DIR="data/files"
 
-echo "[1/9] deployment config (compose render + env-var coverage)"
+echo "[1/9] deployment config (compose render + env-var coverage) + runtime advisories"
 # Mirrors CI's `config` job: renders every compose file and asserts that each
 # variable documented in .env.example AND read by the code actually reaches a
 # container. Needs docker (this script already requires it for db/redis).
 npx tsx scripts/check-config.ts
+# The other half of that job: an advisory that appears WITHOUT a commit, in the
+# runtime tree already shipped — nodemailer 10.0.1 and next 16.3.4 were both
+# found by hand in the daily pass. `--omit=dev` because a dev-only
+# vitest/vite advisory must not fail a deploy gate; `--audit-level=high` because
+# moderate ones are reported by the daily pass rather than blocking. Needs the
+# registry to answer.
+npm audit --omit=dev --audit-level=high
 
 echo "[2/9] container image (dependency stage)"
 # Mirrors CI's `docker` job. The build is the deploy artifact and it had been
@@ -60,7 +67,7 @@ npm run build
 # build` copies .env into .next/standalone unconditionally; the postbuild prune
 # is what removes it, and a silent failure here ships NEXTAUTH_SECRET and the
 # database URL with the artifact. Same assertion as CI's build job.
-LEAKED="$(find .next/standalone -maxdepth 2 -name '.env*' -not -path '*/node_modules/*' 2>/dev/null || true)"
+LEAKED="$(find .next/standalone -maxdepth 3 \( -name '.env*' -o -name '*.db' -o -name '*.sqlite*' \) -not -path '*/node_modules/*' 2>/dev/null || true)"
 if [ -n "$LEAKED" ]; then
   echo "standalone artifact carries dotenv files:" >&2
   echo "$LEAKED" >&2

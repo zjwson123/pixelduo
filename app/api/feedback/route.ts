@@ -22,7 +22,22 @@ const schema = z.object({
   // Used only for anonymous reports; a signed-in report always carries the
   // account's own address, so the operator replies to a verified mailbox.
   email: z.string().email().max(120).optional(),
-  page: z.string().max(120).optional(),
+  // Free-form attribution ("which page was this sent from"). The client already
+  // reduces it to a pathname (app/feedback/page.tsx sourceHint refuses anything
+  // that is not /^\/[A-Za-z0-9/_-]{0,100}$/), but the server never checked the
+  // shape — and this value is interpolated into the machine-generated CONTEXT
+  // BLOCK the operator triages from: lib/mail.ts prints it as `page: <value>`
+  // among `ref/category/from/plan/locale` after the `---` separator, and
+  // lib/notify.ts prints it into the webhook line. A newline in it therefore
+  // forged extra lines — `page: "/studio\nfrom:  ceo@corp.example (user …)"`
+  // makes an anonymous report read as that account's. Control characters are
+  // what the block cannot survive, so that is what is refused; every legitimate
+  // pathname, referrer path or query string still passes.
+  page: z
+    .string()
+    .max(120)
+    .refine((v) => !/[\u0000-\u001f\u007f]/.test(v), "page must be a single line")
+    .optional(),
   locale: z.enum(["en", "zh"]).optional(),
 });
 

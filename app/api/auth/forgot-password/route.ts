@@ -45,36 +45,41 @@ export async function POST(req: Request) {
         { status: 429, headers: { "Retry-After": String(address.retryAfterSec) } },
       );
     }
-    const user = await prisma.user.findUnique({ where: { email } });
-    // The global hourly ceiling (lib/mail.ts) before the rotation it would
-    // otherwise perform: when the budget is spent the mail is skipped AND no
-    // token is created, so a link already in the user's inbox keeps working
-    // instead of being invalidated by a mail that never leaves.
+    // The global hourly ceiling (lib/mail.ts), read BEFORE the lookup and
+    // without spending anything: when the budget is spent the mail is skipped
+    // AND no token is created, so a link already in the user's inbox keeps
+    // working instead of being invalidated by a mail that never leaves.
     //
-    // Read BEFORE the lookup and without spending anything, because this branch
-    // is the one place the refusal can be honest: the ceiling is global, so the
-    // answer is identical for a real and an invented address and discloses
-    // nothing. Deciding it inside `if (user)` — as this did — made a real
-    // address answer 400 while an invented one answered 200, i.e. an existence
-    // oracle, which is what forced the previous version to hide it behind a
-    // uniform `ok({sent:true})` and leave the caller waiting for a mail that was
-    // never sent. The per-address branch above cannot be reported per-caller for
-    // the same reason; that is why it is charged on the submitted address only.
-    const budgetAvailable = await authMailBudgetAvailable("reset");
-    if (!budgetAvailable) {
+    // Read here rather than inside `if (user)` because this branch is the one
+    // place the refusal can be honest: the ceiling is global, so the answer is
+    // identical for a real and an invented address and discloses nothing.
+    // Deciding it after the lookup made a real address answer 400 while an
+    // invented one answered 200 — an existence oracle — which is what forced
+    // the previous version to hide it behind a uniform `ok({sent:true})` and
+    // leave the caller waiting for a mail that was never sent. Reading it first
+    // also means a refused request costs no database round trip. (The
+    // per-address branch above cannot be reported per-caller for the same
+    // reason; that is why it is charged on the submitted address only.)
+    if (!(await authMailBudgetAvailable("reset"))) {
       return errorResponse(
         { ok: false, error: "cannot-send-mail: the reset-mail budget for this hour is used up — try again shortly" },
         { status: 400 },
       );
     }
+    const user = await prisma.user.findUnique({ where: { email } });
     if (user) {
-      // The global hourly ceiling (lib/mail.ts) before the rotation it would
-      // otherwise perform: when the budget is spent the mail is skipped AND no
-      // token is created, so a link already in the user's inbox keeps working
-      // instead of being invalidated by a mail that never leaves. The response
-      // stays uniform (the check is made after the lookup, so it discloses
-      // nothing about the address).
-      if (await reserveAuthMailSend("reset")) {
+      if (!(await reserveAuthMailSend("reset"))) {
+        // The last slot went between the read above and this reserve (a
+        // concurrent request for another address took it). Answer the same
+        // refusal — the budget is global, so this is not address-dependent —
+        // rather than the `ok({sent:true})` for a mail that was never sent,
+        // which is the whole reason this branch exists.
+        return errorResponse(
+          { ok: false, error: "cannot-send-mail: the reset-mail budget for this hour is used up — try again shortly" },
+          { status: 400 },
+        );
+      }
+      {
         const token = await createToken(email, "reset-password", user.id);
         // Deliberately NOT awaited. A uniform `{sent:true}` body closed the
         // content channel, but the unknown-address path answers in ~1ms while

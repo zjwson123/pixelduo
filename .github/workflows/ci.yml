@@ -32,6 +32,20 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      # The one class of finding a source-only audit cannot see: an advisory
+      # that appears WITHOUT a commit, in code already shipped. Both of the last
+      # two were found by hand in the daily pass — nodemailer 10.0.1
+      # (GHSA-6vj9-mwq6-2f5v, the SNI/`servername` reuse) and next 16.3.4
+      # (GHSA-vcvr-r3jv-pc5j, RCE in the Node.js `next/og` renderer, fixed in
+      # 16.3.6) — and neither had a gate that would have caught it.
+      #
+      # `--omit=dev` is the point, not a detail: the runtime tree is what a
+      # deploy ships and what an attacker can reach, and it is CLEAN today,
+      # while the dev-only vitest/vite/esbuild/prisma advisories would fail this
+      # job forever for code that never runs in production. `--audit-level=high`
+      # keeps moderate noise out of the gate; the daily pass reports those.
+      - name: Runtime dependencies carry no high or critical advisory
+        run: npm audit --omit=dev --audit-level=high
       - run: npx tsx scripts/check-config.ts
 
   test-unit:

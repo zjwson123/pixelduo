@@ -176,8 +176,25 @@ describe("pass 22 — /api/files charges the account, not the shared egress", ()
     expect(res.status).toBe(404);
   });
 
-  it("still bounds an anonymous caller on the source address", async () => {
+  it("limits the account itself, not only the egress", async () => {
+    // Without this, deleting the account-keyed charge from the route leaves
+    // every other test in this block green — the 404 in the test above does not
+    // depend on it. The account bucket is the whole point of the change.
     _resetLimiterForTests();
+    const ip = "203.0.113.80";
+    const email = `p22-files-account-${stamp}@test.dev`;
+    madeEmails.push(email);
+    const user = await prisma.user.create({ data: { email, passwordHash: "x", name: "Account budget" } });
+    getServerSession.mockResolvedValue({ user: { id: user.id, sv: user.sessionVersion } });
+
+    await spend(`u:files:${user.id}`);
+    const res = await getFile(reqFrom(ip), { params: Promise.resolve({ key: ["nope.png"] }) });
+    expect(res.status).toBe(429);
+    // ...and the 429 carries the same hint the IP-keyed limiter always sent.
+    expect(res.headers.get("Retry-After")).toBeTruthy();
+  });
+
+  it("still bounds an anonymous caller on the source address", async () => {    _resetLimiterForTests();
     const ip = "203.0.113.78";
     getServerSession.mockResolvedValue(null);
 

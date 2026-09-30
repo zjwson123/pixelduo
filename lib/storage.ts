@@ -121,13 +121,26 @@ class LocalStorage implements StorageDriver {
     // Same async discipline as put/delete: this runs on every /api/health
     // probe, and three synchronous syscalls per probe (one of them a write)
     // stall every concurrent request in the process.
-    const probe = path.join(this.root, ".health");
+    //
+    // The probe path is UNIQUE per call. It used to be one fixed `.health` file
+    // written and unlinked by every probe, so two overlapping probes raced: the
+    // loser's unlink threw ENOENT, the catch below turned that into `false`, and
+    // the route answered 503 {"ok":false,"storage":"down"}. Overlap is easy to
+    // produce — a burst on /api/health before the route's 5s cache is populated,
+    // or two instances healthchecking one shared volume — and every consumer
+    // reads only the STATUS (the compose healthcheck is `wget -qO-`, the CI wait
+    // is `curl -fsS`, orchestrators and load balancers are the same), so a
+    // concurrent probe could forge an outage and take a healthy instance out of
+    // rotation or trip the on-call alert.
+    const probe = path.join(this.root, `.health-${process.pid}-${randomUUID()}`);
     try {
       await fsp.mkdir(this.root, { recursive: true });
       await fsp.writeFile(probe, String(Date.now()));
       await fsp.unlink(probe);
       return true;
     } catch {
+      // Best effort: never leave a probe file behind, whatever failed.
+      await fsp.unlink(probe).catch(() => undefined);
       return false;
     }
   }

@@ -248,17 +248,18 @@ function main() {
   if (duplicates.length) problems.push(`${ENV_EXAMPLE} declares ${duplicates.join(", ")} twice`);
   const read = codeReadNames();
   const { forwarded, unrendered } = composeForwarded();
-  if (forwarded.size === 0) {
+  if (forwarded.size === 0 && unrendered.length === 0) {
     // Skipping is a convenience for a machine with no docker daemon, but in CI
     // it would be a green job that verified nothing — and the compose half is
     // the half that catches the real bugs. There, no docker means failure.
     if (process.env.CI) problems.push("docker is unavailable, so no compose file could be rendered");
     else warnings.push("docker unavailable — compose assertions skipped (.env.example half only)");
-  } else {
-    // Docker was available and these files still did not render: they are broken
-    // (or the fixture could not satisfy them), and every compose check below is
-    // silently inapplicable to them. Never a warning — a file the gate cannot
-    // read is exactly what the gate exists to refuse.
+  } else if (unrendered.length) {
+    // Either some files rendered and these did not, or NOTHING rendered and the
+    // cause was not a missing docker daemon (a broken compose plugin, a failing
+    // shim). Both mean every compose check below is silently inapplicable to
+    // them, so this is never a warning: a file the gate cannot read is exactly
+    // what the gate exists to refuse.
     for (const file of unrendered) {
       problems.push(`could not render ${file} — the compose invariants below do not apply to it`);
     }

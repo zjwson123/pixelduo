@@ -192,6 +192,25 @@ export async function POST(req: Request) {
               credits: order.credits,
             };
           }
+        } else {
+          // A paid event that resolves NO order: the provider captured money and
+          // there is nothing to grant it to — the order row is gone (customer
+          // erasure, the admin delete, a restored database) or the identifier
+          // never matched one. The event is persisted and answered 200, so every
+          // provider retry is deduped by eventId and nothing ever looks at it
+          // again; without this report the only trace is a PaymentEvent row
+          // nobody queries, and the customer has paid for nothing with no
+          // operator signal. The refund branch below reports the mirror case
+          // once its retry budget is spent — this is the same shape, and it is
+          // reported on the FIRST delivery because no retry can resolve it: the
+          // event carries a provider order id, not the internal row it names.
+          const msg = "paid webhook event resolved no order — payment captured with nothing granted";
+          console.error(`[webhook] ${msg}`, { eventId: event.eventId, providerOrderId: event.providerOrderId });
+          captureError(new Error(msg), {
+            scope: "payment",
+            eventId: event.eventId,
+            providerOrderId: event.providerOrderId,
+          });
         }
       } else if (event.type === "refunded") {
         // Only a FULL refund revokes credits AND flips the order: a partial

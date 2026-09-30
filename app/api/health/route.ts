@@ -17,12 +17,31 @@ function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
 // request rate; a 5s TTL is far below any healthcheck interval.
 const PROBE_TTL_MS = 5_000;
 let cachedProbe: { at: number; body: Record<string, unknown>; ok: boolean } | null = null;
+// One probe in flight at a time.
+//
+// The cache above is only populated when a probe FINISHES, so a burst that
+// arrives before that — a container-start healthcheck storm, or anything
+// inside the 60/min budget an anonymous caller is allowed — used to run one
+// full probe PER REQUEST: a DB round-trip, a Redis ping, a Job query and a
+// storage write+unlink each, from an endpoint that needs no credential. Those
+// concurrent probes are also what made the storage driver's single probe file
+// race, which is the other half of this fix (lib/storage.ts).
+let inflightProbe: Promise<{ body: Record<string, unknown>; ok: boolean }> | null = null;
 
 async function probe(): Promise<{ body: Record<string, unknown>; ok: boolean }> {
   const now = Date.now();
   if (cachedProbe && now - cachedProbe.at < PROBE_TTL_MS) {
     return { body: cachedProbe.body, ok: cachedProbe.ok };
   }
+  if (!inflightProbe) {
+    inflightProbe = runProbe(now).finally(() => {
+      inflightProbe = null;
+    });
+  }
+  return inflightProbe;
+}
+
+async function runProbe(now: number): Promise<{ body: Record<string, unknown>; ok: boolean }> {
   const [dbOk, redisOk, storageOk, activeJob] = await Promise.all([
     prisma.$queryRaw`SELECT 1`.then(() => true).catch(() => false),
     withTimeout(checkRedis(), 2500, false),

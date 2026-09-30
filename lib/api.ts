@@ -73,6 +73,8 @@ export class ApiError extends Error {
   constructor(
     public status: number,
     message: string,
+    /** Seconds a 429 tells the client to wait, when the limiter reported one. */
+    public retryAfterSec?: number,
   ) {
     super(message);
   }
@@ -157,7 +159,14 @@ export function errorResponse(body: Record<string, unknown>, init: ResponseInit)
 
 export function fail(error: unknown) {
   if (error instanceof ApiError) {
-    return errorResponse({ ok: false, error: error.message }, { status: error.status });
+    // A 429 that carries no Retry-After is one a client can only guess at, and
+    // the IP-keyed limiter (enforceRateLimit) has always sent one: an
+    // authenticated route that hit its ACCOUNT bucket answered the same status
+    // with none, so the same route returned two different shapes for the same
+    // condition and every honouring client lost its backoff hint.
+    const headers: Record<string, string> = {};
+    if (error.status === 429 && error.retryAfterSec) headers["Retry-After"] = String(error.retryAfterSec);
+    return errorResponse({ ok: false, error: error.message }, { status: error.status, headers });
   }
   // A malformed JSON body is a client error, not an incident.
   if (error instanceof SyntaxError) {
@@ -229,7 +238,7 @@ export async function enforceUserRateLimit(
   windowMs: number,
 ): Promise<ApiError | null> {
   const r = await rateLimit(`u:${scope}:${userId}`, limit, windowMs);
-  return r.ok ? null : new ApiError(429, "rate-limited");
+  return r.ok ? null : new ApiError(429, "rate-limited", r.retryAfterSec);
 }
 
 // Upper bound for ?page=. Clamping only the lower bound left a huge finite

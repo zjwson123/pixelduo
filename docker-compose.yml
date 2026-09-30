@@ -400,6 +400,7 @@ services:
         umask 077;
         mkdir -p /backups/objects;
         chmod 700 /backups/objects 2>/dev/null || true;
+        rm -rf /backups/objects/.*.partial;
         STAMP=$$(date +%Y%m%d-%H%M%S);
         if mc alias set src $${BACKUP_S3_ENDPOINT} $${BACKUP_S3_ACCESS_KEY_ID} $${BACKUP_S3_SECRET_ACCESS_KEY} >/dev/null 2>&1 && mc mirror --overwrite --remove src/$${BACKUP_S3_BUCKET} /backups/objects/.$${STAMP}.partial; then
           mv /backups/objects/.$${STAMP}.partial /backups/objects/$${STAMP};
