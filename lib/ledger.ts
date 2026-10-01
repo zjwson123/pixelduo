@@ -787,6 +787,40 @@ export async function fulfillOrder(
   tx?: Prisma.TransactionClient,
 ) {
   const run = async (client: Prisma.TransactionClient) => {
+    if (kind === "plan" && planId) {
+      // Hold every plan order of this account, ascending id — the same total
+      // order the two erasure sweeps use — BEFORE anything else in this
+      // transaction.
+      //
+      // Why it has to exist: the refund transaction flips the order with a locked
+      // UPDATE and only THEN runs revokeOrderCreditsTx, whose single
+      // `SELECT … FOR UPDATE` snapshots the grants; a ROLLOVER grant inserted
+      // after that snapshot is invisible to it. cycleUsageTx's refund witness is
+      // an unlocked read of the funding order's status, so while the refund is
+      // uncommitted it reads "paid" and the renewal mints 30–100% carryover for
+      // a cycle that is being clawed back — refunded money AND retained credits,
+      // repeatable every cycle. The existing User lock cannot close it: the
+      // refund's snapshot-taking statement runs BEFORE the statement that waits
+      // on the User row.
+      //
+      // With the funding order's row lock held from before the status read to
+      // commit, the two transactions can only serialize: either the refund
+      // commits first (the read below sees "refunded" → revoked = granted → no
+      // carryover) or this one commits first (the refund's post-CAS snapshot
+      // sees the committed ROLLOVER and revokes it with the rest).
+      //
+      // Ordering is the whole point, and it is why this is the FIRST statement
+      // rather than a lock taken beside the User lock below: the claim that
+      // follows takes the INCOMING order's row lock, so claiming first and then
+      // acquiring this ascending set is a non-monotone multi-lock. Two
+      // concurrent fulfillments for one account (a double-clicked checkout, two
+      // provider deliveries — the case the User lock below documents) each
+      // holding their own order and each waiting for the other is a 40P01, and
+      // the payment webhook has no deadlock retry.
+      await client.$queryRaw(
+        Prisma.sql`SELECT id FROM "Order" WHERE "userId" = ${userId} AND kind = 'plan' ORDER BY id FOR UPDATE`,
+      );
+    }
     // Atomic claim: only the first fulfillment of a pending order wins, so two
     // distinct signed events for the same order (or a retry racing the
     // original) can never both pass the status check and grant credits twice.

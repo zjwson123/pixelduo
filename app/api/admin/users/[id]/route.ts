@@ -32,11 +32,20 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
     const images = await prisma.image.findMany({ where: { userId: id }, select: { url: true } });
     const jobs = await prisma.job.findMany({
       where: { userId: id },
-      select: { refImageKey: true, images: true },
+      select: { refImageKey: true, images: true, sourceVideoKey: true },
     });
     const refKeys = jobs.map((j) => j.refImageKey).filter((k): k is string => Boolean(k));
     const staged = jobs.flatMap((j) => checkpointKeys(j.images));
-    await deleteObjectsBounded([...images.map((i) => i.url), ...refKeys, ...staged]);
+    // Job.sourceVideoKey too — see the note in app/api/account/delete: an extend
+    // job is the only row that names the clip it continues, and the cascade
+    // below removes the rows before anything could look again.
+    const sourceKeys = jobs.map((j) => j.sourceVideoKey).filter((k): k is string => Boolean(k));
+    await deleteObjectsBounded([
+      ...images.map((i) => i.url),
+      ...refKeys,
+      ...staged,
+      ...sourceKeys,
+    ]);
     await withDeadlockRetry(() =>
       prisma.$transaction(async (tx) => {
         // Held to commit, so the count and the row deletes are one atomic step.

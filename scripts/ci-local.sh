@@ -24,9 +24,24 @@ npx tsx scripts/check-config.ts
 # runtime tree already shipped — nodemailer 10.0.1 and next 16.3.4 were both
 # found by hand in the daily pass. `--omit=dev` because a dev-only
 # vitest/vite advisory must not fail a deploy gate; `--audit-level=high` because
-# moderate ones are reported by the daily pass rather than blocking. Needs the
-# registry to answer.
-npm audit --omit=dev --audit-level=high
+# moderate ones are reported by the daily pass rather than blocking. The
+# registry's audit endpoint occasionally errors out, and npm exits non-zero for
+# that too — retry only that case, and never report a clean tree it did not
+# confirm. Needs the registry to answer.
+audited=0
+for attempt in 1 2 3; do
+  if out="$(npm audit --omit=dev --audit-level=high 2>&1)"; then
+    echo "$out"; audited=1; break
+  fi
+  echo "$out"
+  if printf '%s' "$out" | grep -qi "audit endpoint returned an error"; then
+    echo "[audit] registry audit endpoint unavailable (attempt $attempt/3) — retrying"
+    sleep 5
+  else
+    exit 1
+  fi
+done
+[ "$audited" = 1 ] || { echo "[audit] the registry audit endpoint stayed unavailable — refusing to report a runtime tree it never checked"; exit 1; }
 
 echo "[2/9] container image (dependency stage)"
 # Mirrors CI's `docker` job. The build is the deploy artifact and it had been

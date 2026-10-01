@@ -45,7 +45,25 @@ jobs:
       # job forever for code that never runs in production. `--audit-level=high`
       # keeps moderate noise out of the gate; the daily pass reports those.
       - name: Runtime dependencies carry no high or critical advisory
-        run: npm audit --omit=dev --audit-level=high
+        run: |
+          # The registry's audit endpoint is occasionally unreachable, and npm
+          # exits non-zero for that too — indistinguishable from a real finding
+          # unless the output is read. Retry only that case, and never report a
+          # clean tree the endpoint never actually confirmed.
+          for attempt in 1 2 3; do
+            if out=$(npm audit --omit=dev --audit-level=high 2>&1); then
+              echo "$out"; exit 0
+            fi
+            echo "$out"
+            if printf '%s' "$out" | grep -qi "audit endpoint returned an error"; then
+              echo "[audit] registry audit endpoint unavailable (attempt $attempt/3) — retrying"
+              sleep 5
+            else
+              exit 1
+            fi
+          done
+          echo "[audit] the registry audit endpoint stayed unavailable — refusing to report a runtime tree it never checked"
+          exit 1
       - run: npx tsx scripts/check-config.ts
 
   test-unit:

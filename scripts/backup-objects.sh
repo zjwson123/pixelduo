@@ -14,8 +14,9 @@ set -euo pipefail
 
 # Every user image and video, unencrypted, lands under ./backups/objects — and
 # the tree was 0755 with 0644 files (measured), readable by any other account or
-# process on the host. Pin the mode here exactly as backup.sh does for the
-# database dump; the compose loops pin the container side too.
+# process on the host. The host umask does NOT cross into the container that
+# performs the mirror, so the mode is pinned there too (inside the `mc` script
+# below) as well as here for anything this script itself creates.
 umask 077
 
 SRC_ENDPOINT="${BACKUP_S3_ENDPOINT:?set BACKUP_S3_ENDPOINT (source)}"
@@ -46,9 +47,12 @@ docker run --rm \
   -v "$PWD/backups:/backups" \
   "$MC_IMAGE" -c '
     set -e
+    umask 077
     mc alias set src "$SRC_ENDPOINT" "$SRC_ACCESS" "$SRC_SECRET" >/dev/null
     STAMP=$(date +%Y%m%d-%H%M%S)
-    mc mirror --overwrite --remove "src/$SRC_BUCKET" "/backups/objects/$STAMP"
+    rm -rf /backups/objects/.*.partial
+    mc mirror --overwrite --remove "src/$SRC_BUCKET" "/backups/objects/.$STAMP.partial"
+    mv "/backups/objects/.$STAMP.partial" "/backups/objects/$STAMP"
     ls -1t /backups/objects/ | tail -n +$((KEEP + 1)) | while read -r f; do rm -rf "/backups/objects/$f"; done
     echo "[backup-objects] $STAMP mirrored from $SRC_BUCKET (keeping $KEEP snapshots)"
     if [ -n "$TARGET_ENDPOINT" ]; then

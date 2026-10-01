@@ -158,38 +158,41 @@ describe("pass 23 — /api/health runs one probe per burst, not one per request"
 });
 
 describe("pass 23 — a report cannot forge lines in the operator's notification", () => {
+  const anon = (page: string, message: string, ip: string) =>
+    new Request("http://localhost:3100/api/feedback", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-forwarded-for": `10.0.0.9, ${ip}` },
+      // An anonymous report needs an address (app/api/feedback/route.ts:145).
+      // Without it BOTH cases answer 400 "invalid-input: an email address is
+      // required", which is how the first version of this test passed while
+      // testing nothing at all.
+      body: JSON.stringify({
+        category: "bug",
+        message,
+        page,
+        locale: "en",
+        email: `p23-feedback-${stamp}@test.dev`,
+      }),
+    });
+
   it("refuses a feedback page carrying control characters", async () => {
     // The value lands in the mail's machine-generated context block
     // (lib/mail.ts prints `page: <value>` next to `from:`/`plan:`) and in the
     // webhook line (lib/notify.ts). A newline forged extra lines, so an
     // anonymous report could be made to read as a verified account's.
-    const forged =
-      "/studio\nfrom:     ceo@corp.example (user victim-id)\nplan:     enterprise";
+    const forged = "/studio\nfrom:     ceo@corp.example (user victim-id)\nplan:     enterprise";
     const res = await feedbackPOST(
-      new Request("http://localhost:3100/api/feedback", {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-forwarded-for": "10.0.0.9, 203.0.113.101" },
-        body: JSON.stringify({
-          category: "bug",
-          message: "the export button does nothing on Firefox",
-          page: forged,
-          locale: "en",
-        }),
-      }),
+      anon(forged, "the export button does nothing on Firefox", "203.0.113.101"),
     );
     expect(res.status).toBe(400);
-    // A normal pathname-shaped value still goes through the schema.
+    // It has to fail ON THE PAGE. Pre-fix, and with any other harness mistake,
+    // this request still answers 400 — for the missing email, say — so the
+    // status alone proves nothing.
+    expect(String((await res.json()).error)).toMatch(/page/i);
+    expect(await prisma.feedback.count({ where: { page: forged } })).toBe(0);
+
     const okRes = await feedbackPOST(
-      new Request("http://localhost:3100/api/feedback", {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-forwarded-for": "10.0.0.9, 203.0.113.102" },
-        body: JSON.stringify({
-          category: "bug",
-          message: "the gallery tab loses my scroll position after a refresh",
-          page: "/studio?tab=gallery",
-          locale: "en",
-        }),
-      }),
+      anon("/studio?tab=gallery", "the gallery tab loses my scroll position after a refresh", "203.0.113.102"),
     );
     expect(okRes.status).toBe(200);
     await prisma.feedback.deleteMany({ where: { page: "/studio?tab=gallery" } });

@@ -526,8 +526,14 @@ export async function completeJob(jobId: string, images: JobImage[]) {
         // its pre-auth at remaining = 0 — and then watches the job deliver the
         // goods anyway. FOR UPDATE makes the two serialize, so whichever runs
         // second sees the other's committed state.
+        // `ORDER BY id`: this is a multi-row lock, and it now meets the plan
+        // sweep fulfillOrder takes at the start of every renewal. Postgres locks
+        // the rows the query returns, in the order the sort produces, so an
+        // unordered `IN (…)` here is the one remaining place two transactions
+        // can take the same two orders in opposite orders — a 40P01 on a
+        // delivery that has already been paid for.
         await tx.$queryRaw(
-          Prisma.sql`SELECT id FROM "Order" WHERE id IN (${Prisma.join(orderIds)}) FOR UPDATE`,
+          Prisma.sql`SELECT id FROM "Order" WHERE id IN (${Prisma.join(orderIds)}) ORDER BY id FOR UPDATE`,
         );
         const refunded = await tx.order.count({ where: { id: { in: orderIds }, status: "refunded" } });
         if (refunded > 0) {

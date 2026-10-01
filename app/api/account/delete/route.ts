@@ -107,11 +107,24 @@ export async function POST(req: Request) {
     const images = await prisma.image.findMany({ where: { userId }, select: { url: true } });
     const jobs = await prisma.job.findMany({
       where: { userId },
-      select: { refImageKey: true, images: true },
+      select: { refImageKey: true, images: true, sourceVideoKey: true },
     });
     const refKeys = jobs.map((j) => j.refImageKey).filter((k): k is string => Boolean(k));
     const staged = jobs.flatMap((j) => checkpointKeys(j.images));
-    await deleteObjectsBounded([...images.map((i) => i.url), ...refKeys, ...staged]);
+    // Job.sourceVideoKey is the OTHER durable pointer to a stored object: an
+    // extend job names the clip it continues (app/api/video/route.ts:102), and
+    // nothing else in the schema or the code reaches that column — only the
+    // worker reads it. Gallery delete removes the Image row first and deletes
+    // the blob best-effort, so a single transient failure there would leave the
+    // object with no row naming it, and this sweep is the last chance to reach
+    // it. Erasure has to collect every pointer the user's own rows hold.
+    const sourceKeys = jobs.map((j) => j.sourceVideoKey).filter((k): k is string => Boolean(k));
+    await deleteObjectsBounded([
+      ...images.map((i) => i.url),
+      ...refKeys,
+      ...staged,
+      ...sourceKeys,
+    ]);
     await withDeadlockRetry(() =>
       prisma.$transaction(async (tx) => {
         // Re-checked under a lock held to commit, in the same transaction as the

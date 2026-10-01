@@ -1,5 +1,5 @@
 import { prisma } from "../lib/prisma";
-import { getMailer } from "../lib/mail";
+import { getMailer, mailDeliverable } from "../lib/mail";
 import { clearTwoFactorFailures } from "../lib/twofa";
 
 // Operator-only 2FA reset. There is deliberately no API route for this: the
@@ -57,18 +57,32 @@ async function main() {
   );
 
   if (notify) {
-    await getMailer().send(
-      e,
-      "Two-factor authentication was reset on your PixelDuo account",
-      [
-        "An operator reset the two-factor authentication on your account, for example because you lost access to your authenticator and backup codes.",
-        "",
-        "All active sessions and API keys have been revoked. Sign in with your password and set up two-factor authentication again as soon as possible.",
-        "",
-        "If you did not request this, reply to this email immediately — your password may be compromised.",
-      ].join("\n"),
-    );
-    console.log(`[reset-2fa] notified ${e}`);
+    // The RECEIPT decides, not the call. `getMailer()` returns the log-only
+    // DevMailer whenever no SMTP_URL is configured (lib/mail.ts), and its send()
+    // RESOLVES — so the old unconditional "notified" line confirmed a message
+    // that never left the box. That is exactly the silence this script exists to
+    // prevent ("a silent reset would be indistinguishable from an attack"), and
+    // the modal case is an operator running it in a shell without the mail env.
+    // Report it as the failure it is and exit non-zero, so a wrapper notices.
+    if (!mailDeliverable()) {
+      console.error(
+        `[reset-2fa] ${e}: 2FA cleared, but the owner was NOT notified — no SMTP_URL is configured, so the mailer only logs. Tell them out of band, or set SMTP_URL and re-run with --notify.`,
+      );
+      process.exitCode = 1;
+    } else {
+      await getMailer().send(
+        e,
+        "Two-factor authentication was reset on your PixelDuo account",
+        [
+          "An operator reset the two-factor authentication on your account, for example because you lost access to your authenticator and backup codes.",
+          "",
+          "All active sessions and API keys have been revoked. Sign in with your password and set up two-factor authentication again as soon as possible.",
+          "",
+          "If you did not request this, reply to this email immediately — your password may be compromised.",
+        ].join("\n"),
+      );
+      console.log(`[reset-2fa] notified ${e}`);
+    }
   } else {
     console.log("[reset-2fa] owner NOT notified (pass --notify to email them)");
   }
