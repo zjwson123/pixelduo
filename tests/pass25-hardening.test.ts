@@ -3,6 +3,7 @@ import { Prisma } from "@prisma/client";
 import { spawnSync } from "child_process";
 import fs from "fs";
 import net from "net";
+import os from "os";
 import path from "path";
 
 // Pass 25. Each case below was confirmed to FAIL against the pre-fix source.
