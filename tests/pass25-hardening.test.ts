@@ -601,7 +601,11 @@ describe("pass 25 — deploy artifacts carry no secrets and no history", () => {
   });
 
   it("leaves no hidden partial behind when the host backup fails", () => {
-    const dir = fs.mkdtempSync(path.join(REPO, "backups", ".p25-probe-"));
+    // Under os.tmpdir(), not <repo>/backups: a CI checkout has no backups/
+    // directory (it is gitignored) — mkdtemp there is an ENOENT — and the probe
+    // must not write into the repo's real snapshot directory anyway. BACKUP_DIR
+    // below is what the script operates on.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "p25-backup-probe-"));
     try {
       const res = spawnSync("bash", ["scripts/backup.sh", "p25-no-such-container", "pixelduo"], {
         encoding: "utf8",
