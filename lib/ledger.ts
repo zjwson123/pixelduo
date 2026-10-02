@@ -950,17 +950,40 @@ export async function revokeOrderCreditsTx(
   // into the loop, where it only decides whether there is anything to take.
   // GRANT_LOCK_ORDER keeps this consistent with every other grant-locking
   // statement (without it, a revoke racing a refund could deadlock).
-  const grants = await tx.$queryRaw<Array<{ id: string; remaining: number }>>(
-    Prisma.sql`SELECT id, remaining FROM "CreditGrant"
-      WHERE "refId" = ${order.id} AND "refType" = 'order'
-      ${GRANT_LOCK_ORDER}
-      FOR UPDATE`,
-  );
+  //
+  // Re-scan until a pass turns up no row the previous passes did not see.
+  // `SELECT … FOR UPDATE` fixes its snapshot when the STATEMENT starts, so this
+  // revoke blocking on a grant lock held by a job's terminal refund — and that
+  // refund then INSERTING the replacement grant for an expired portion
+  // (refundCreditsTx's expiredByRef branch, stamped with this same order's
+  // refId on purpose) — resumes on a pre-insert snapshot that cannot see the
+  // new row. The order flips, the tier is revoked, and the drained quota
+  // survives as spendable credits stamped with the refunded order, for good:
+  // every later refund event CASes to zero and is acked. Re-scanning closes it
+  // because a replacement can only be inserted by a transaction that held the
+  // row lock of a grant this scan also matches — the grant being replaced
+  // carries the order's refId — so this scan waits for that transaction, and
+  // the pass after the wait sees the insert. A pass that adds nothing ends it:
+  // the only inserters are job-failure refunds, bounded by the per-account
+  // in-flight cap, and the caller's transaction timeout bounds a hostile
+  // stream regardless.
+  const seen = new Set<string>();
   let revoked = 0;
-  for (const g of grants) {
-    if (g.remaining <= 0) continue;
-    await tx.creditGrant.update({ where: { id: g.id }, data: { remaining: 0 } });
-    revoked += g.remaining;
+  for (;;) {
+    const grants = await tx.$queryRaw<Array<{ id: string; remaining: number }>>(
+      Prisma.sql`SELECT id, remaining FROM "CreditGrant"
+        WHERE "refId" = ${order.id} AND "refType" = 'order'
+        ${GRANT_LOCK_ORDER}
+        FOR UPDATE`,
+    );
+    const fresh = grants.filter((g) => !seen.has(g.id));
+    if (fresh.length === 0) break;
+    for (const g of fresh) {
+      seen.add(g.id);
+      if (g.remaining <= 0) continue;
+      await tx.creditGrant.update({ where: { id: g.id }, data: { remaining: 0 } });
+      revoked += g.remaining;
+    }
   }
   // No spendable remainder (already spent, or drained and revoked elsewhere):
   // nothing to take, so no ledger entry either — a zero-delta REVOKE would

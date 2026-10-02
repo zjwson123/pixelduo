@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { requireAdmin } from "@/lib/admin";
-import { zodMessage, ok, fail, readBodyCapped, enforceUserRateLimit } from "@/lib/api";
+import { enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, zodMessage } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { adminGrantTx, adminClawbackTx } from "@/lib/ledger";
 
@@ -28,7 +28,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     if (adminLimited) return fail(adminLimited);
     const bodyRaw = await readBodyCapped(req, 8 * 1024);
     if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
-    const body = schema.parse(JSON.parse(bodyRaw.raw));
+    const body = schema.parse(parseJsonBody(bodyRaw.raw));
     const user = await prisma.user.findUnique({ where: { id: id }, select: { id: true } });
     if (!user) return fail(new Error("user-not-found"));
     // Self-targeting is deliberately ALLOWED, and that is a decision rather than

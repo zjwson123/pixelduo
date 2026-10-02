@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { Prisma } from "@prisma/client";
-import { zodMessage, requireUserId, ok, fail, enforceUserRateLimit, readBodyCapped, ApiError } from "@/lib/api";
+import { ApiError, enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, requireUserId, zodMessage } from "@/lib/api";
 import { prisma, withDeadlockRetry } from "@/lib/prisma";
 import { passwordReauthRefusal } from "@/lib/auth";
 import { GRANT_LOCK_ORDER } from "@/lib/ledger";
@@ -48,7 +48,7 @@ export async function POST(req: Request) {
     if (await isTwoFactorLocked(userId)) return fail(new ApiError(429, TWOFA_LOCKED_ERROR));
     const bodyRaw = await readBodyCapped(req, 8 * 1024);
     if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
-    const body = schema.parse(JSON.parse(bodyRaw.raw));
+    const body = schema.parse(parseJsonBody(bodyRaw.raw));
     const user = await prisma.user.findUniqueOrThrow({
       where: { id: userId },
       select: { email: true, passwordHash: true, totpSecret: true, totpEnabled: true, role: true },

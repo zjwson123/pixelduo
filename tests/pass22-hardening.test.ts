@@ -295,7 +295,22 @@ describe("pass 22 — a failed object mirror cannot masquerade as a good snapsho
 
   function scratch(withSnapshots: string[]): string {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pd-objects-"));
-    for (const name of withSnapshots) fs.mkdirSync(path.join(dir, name));
+    withSnapshots.forEach((name, i) => {
+      const p = path.join(dir, name);
+      fs.mkdirSync(p);
+      // Snapshots are rotated by `ls -1t`, so their AGE is what the assertions
+      // below depend on. Created back-to-back they can share an mtime — Linux
+      // filesystems stamp directories from the coarse clock (jiffy
+      // granularity), and `ls -t` then falls back to NAME order, where an
+      // "old-1"/"old-2" pair sorts the wrong way round and the rotation deletes
+      // the newer fixture. That is what turned this test red in CI (2026-09-29
+      // → 10-01) while it stayed green on APFS. Real snapshots are written a day
+      // apart; give the fixtures distinct ages instead of distinct creation
+      // instants.
+      const ageHours = withSnapshots.length - i;
+      const t = Date.now() / 1000 - ageHours * 3600;
+      fs.utimesSync(p, t, t);
+    });
     return dir;
   }
 

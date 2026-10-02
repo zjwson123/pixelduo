@@ -26,7 +26,7 @@ afterAll(async () => {
 
 describe("API keys", () => {
   it("creates a key and stores only the hash + prefix", async () => {
-    const { key, prefix, id } = await createApiKey(userId, "prod");
+    const { key, prefix, id } = await createApiKey(userId, "prod", 0);
     expect(key).toMatch(/^pd_live_[a-f0-9]{48}$/);
     expect(prefix).toBe(key.slice(0, "pd_live_".length + 4));
     const rec = await prisma.apiKey.findUniqueOrThrow({ where: { id } });
@@ -35,7 +35,7 @@ describe("API keys", () => {
   });
 
   it("authenticates valid keys and rejects missing/revoked ones", async () => {
-    const { key, id } = await createApiKey(userId, "auth");
+    const { key, id } = await createApiKey(userId, "auth", 0);
     const auth = await authenticateApiKey(bearer(key));
     expect(auth?.userId).toBe(userId);
 

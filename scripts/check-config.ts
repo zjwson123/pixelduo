@@ -68,7 +68,16 @@ const NOT_FORWARDED: Record<string, { files: string[]; reason: string }> = {
     files: ["docker-compose.prod.yml"],
     reason: BUILD_ARG_REASON,
   },
-  SENTRY_AUTH_TOKEN: { files: ["docker-compose.prod.yml"], reason: BUILD_ARG_REASON },
+  // Forwarded by NO file, deliberately: an image build must not receive this as
+  // a build argument (ARG values are recorded in the image history and in every
+  // `docker save` tarball — verified), and nothing consumed it anyway, because
+  // next.config.mjs gates the Sentry wrapper on SENTRY_DSN, which no build sets.
+  // Wiring source-map upload means a BuildKit secret mount, not an anchor here.
+  SENTRY_AUTH_TOKEN: {
+    files: COMPOSE_FILES,
+    reason:
+      "a build ARG that would leak the token into the image history, and the upload it enabled was never wired (see the Dockerfile note). Use a BuildKit secret if symbolication is wanted.",
+  },
   LOCAL_STORAGE_DIR: {
     files: COMPOSE_FILES,
     reason:

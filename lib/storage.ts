@@ -12,6 +12,7 @@ import {
   HeadBucketCommand,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { outboundTimeoutMs } from "./runtime-env";
 
 export interface StorageStream {
   stream: ReadableStream<Uint8Array>;
@@ -161,6 +162,30 @@ class S3Storage implements StorageDriver {
       credentials: {
         accessKeyId: process.env.S3_ACCESS_KEY_ID ?? "",
         secretAccessKey: process.env.S3_SECRET_ACCESS_KEY ?? "",
+      },
+      // Deadlines on every storage call. Both SDK defaults are 0 — INFINITE — so
+      // a bucket that accepts the connection and then never answers (a network
+      // drop, a paused container, a full TCP window) hung the caller for ever.
+      // In the worker that is not a slow job, it is a stopped one: the 20s
+      // heartbeat keeps firing while the promise hangs, so recoverStuckJobs
+      // never reaps the job, the pre-auth is never refunded, the in-flight slot
+      // stays held, and `await tick()` in the claim loop means NO job for ANY
+      // user is claimed until somebody restarts the process. Measured against a
+      // black-hole listener before the fix: put() and get() still pending at 25s.
+      //
+      // requestTimeout is time-to-response-headers (smithy clears it when the
+      // response arrives), so it does not cut off a long /api/files download;
+      // socketTimeout bounds a body that stops sending mid-stream, and
+      // connectionTimeout bounds the TCP handshake. throwOnRequestTimeout is
+      // required — without it smithy logs a warning and carries on. They belong
+      // to the request HANDLER, not to the client config: S3ClientConfig has no
+      // such fields, and an options object here is what NodeHttpHandler.create
+      // accepts.
+      requestHandler: {
+        requestTimeout: outboundTimeoutMs(30_000),
+        connectionTimeout: outboundTimeoutMs(5_000),
+        socketTimeout: 60_000,
+        throwOnRequestTimeout: true,
       },
     });
   }

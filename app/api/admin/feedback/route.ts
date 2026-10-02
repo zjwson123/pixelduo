@@ -1,4 +1,4 @@
-import { clampPage, ok, fail } from "@/lib/api";
+import { clampPage, ok, fail, enforceUserRateLimit } from "@/lib/api";
 import { requireAdmin } from "@/lib/admin";
 import { prisma } from "@/lib/prisma";
 import { lastMailAttempt, mailDeliverable } from "@/lib/mail";
@@ -15,7 +15,9 @@ const PAGE_SIZE = 50;
 // is being sent never opens this tab.
 export async function GET(req: Request) {
   try {
-    await requireAdmin();
+    const adminId = await requireAdmin();
+    const limited = await enforceUserRateLimit(adminId, "admin-feedback", 60, 60_000);
+    if (limited) return fail(limited);
     const params = new URL(req.url).searchParams;
     const status = params.get("status") === "all" ? null : "new";
     const page = clampPage(params.get("page"));

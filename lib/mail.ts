@@ -2,6 +2,7 @@ import nodemailer, { type Transporter } from "nodemailer";
 import fs from "fs";
 import path from "path";
 import { captureError } from "./observability";
+import { quoteUntrusted } from "./untrusted-text";
 import { isProductionRuntime, usableUrl } from "./runtime-env";
 import { rateLimit, peekRateLimit, envLimit } from "./rate-limit";
 import {
@@ -466,6 +467,12 @@ export interface FeedbackNotificationInput {
 
 // One place builds the notification, so the pre-flight check below sends byte
 // for byte what a real submission sends.
+//
+// The reporter's own text is quoted line by line (quoteUntrusted, shared with
+// the webhook channel): it is arbitrary multi-line text sitting directly above
+// the machine-generated context block the operator triages from, so an unquoted
+// message could reproduce that block — `ref:`, and `from: <address> (user
+// <id>)` naming somebody else's account — byte for byte, above the real one.
 function buildFeedbackNotification(input: FeedbackNotificationInput) {
   const context = [
     `ref:      ${input.ref}`,
@@ -480,7 +487,7 @@ function buildFeedbackNotification(input: FeedbackNotificationInput) {
   return {
     to: feedbackRecipient(),
     subject: `[PixelDuo] ${input.category} · ${input.email}`,
-    text: `New feedback from the PixelDuo ${input.page ?? "app"}.\n\n${input.message}\n\n---\n${context}\n\nReply to this mail to answer ${input.email} directly.`,
+    text: `New feedback from the PixelDuo ${input.page ?? "app"}.\n\n${quoteUntrusted(input.message)}\n\n---\n${context}\n\nReply to this mail to answer ${input.email} directly.`,
     replyTo: input.email,
   };
 }

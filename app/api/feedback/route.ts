@@ -1,15 +1,6 @@
 import { z } from "zod";
 import { createHash } from "crypto";
-import {
-  ApiError,
-  enforceRateLimit,
-  enforceUserRateLimit,
-  fail,
-  ok,
-  readBodyCapped,
-  requireUserId,
-  zodMessage,
-} from "@/lib/api";
+import { ApiError, enforceRateLimit, enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, requireUserId, zodMessage } from "@/lib/api";
 import { envLimit, rateLimit } from "@/lib/rate-limit";
 import { prisma } from "@/lib/prisma";
 import { sendFeedbackEmail } from "@/lib/mail";
@@ -140,7 +131,7 @@ export async function POST(req: Request) {
     }
     const bodyRaw = await readBodyCapped(req, 8 * 1024);
     if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
-    const body = schema.parse(JSON.parse(bodyRaw.raw));
+    const body = schema.parse(parseJsonBody(bodyRaw.raw));
     const email = user?.email ?? body.email;
     if (!email) return fail(new Error("invalid-input: an email address is required when you are not signed in"));
 

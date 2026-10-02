@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { zodMessage, requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
+import { enforceRateLimit, enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, requireVerifiedUser, zodMessage } from "@/lib/api";
 import { checkPrompt } from "@/lib/safety";
 import { createGenerationJob, createMediaJob } from "@/lib/queue";
 import { enabledImageModelIds, modelEnum } from "@/lib/model-registry";
@@ -27,7 +27,7 @@ export async function POST(req: Request) {
     if (limited) return fail(limited);
     const bodyRaw = await readBodyCapped(req, GENERATE_MAX_BYTES);
     if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
-    const body = schema.parse(JSON.parse(bodyRaw.raw));
+    const body = schema.parse(parseJsonBody(bodyRaw.raw));
     const safety = checkPrompt(body.prompt);
     if (!safety.ok) return fail(new Error(`blocked:${safety.reason}`));
     const key = body.idempotencyKey || `${userId}:${randomUUID()}`;

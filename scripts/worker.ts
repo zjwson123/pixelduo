@@ -81,15 +81,23 @@ export async function processImageJob(job: {
       console.log(`[worker ${workerId}] job ${job.id}: resuming with ${saved.length}/${expectedTotal} images already stored`);
     }
 
-    // Get reference image if this is an edit job
+    // Get reference image if this is an edit job. A refImageKey exists only
+    // because the caller submitted an EDIT (/api/edit charges the edit price and
+    // stores the upload), so a null here is not "no reference", it is "the
+    // reference is gone" — a deleted object, an expired bucket, a storage
+    // error. The provider call would then fall through to the text-to-image
+    // path and the caller would pay the edit price for a plain generation, with
+    // no error and no refund. Terminal, because nothing about a retry brings a
+    // deleted object back (isPermanentProviderError).
     let imageBase64: string | undefined;
     let imageBase64List: string[] | undefined;
     if (job.refImageKey) {
       const refBuf = await getStorage().get(job.refImageKey);
-      if (refBuf) {
-        imageBase64 = refBuf.toString("base64");
-        imageBase64List = [imageBase64];
+      if (!refBuf) {
+        throw new Error("ref-image-missing: the reference image for this job is no longer in storage");
       }
+      imageBase64 = refBuf.toString("base64");
+      imageBase64List = [imageBase64];
     }
 
     // Watermark policy (product decision): free plans get marked outputs,
@@ -330,10 +338,16 @@ export async function processVideoJob(job: {
     // Phase 1: create the upstream task exactly once. providerTaskId is the
     // source of truth — re-creating on retry would double-bill the provider.
     if (!job.providerTaskId) {
+      // Same rule as the image lane: a refImageKey means the caller asked for
+      // image-to-video and paid for it. Dropping the frame silently would ship a
+      // text-to-video clip and bill the i2v price for it.
       let imageBase64: string | undefined;
       if (job.refImageKey) {
         const refBuf = await getStorage().get(job.refImageKey);
-        if (refBuf) imageBase64 = refBuf.toString("base64");
+        if (!refBuf) {
+          throw new Error("ref-image-missing: the reference image for this job is no longer in storage");
+        }
+        imageBase64 = refBuf.toString("base64");
       }
       let extendVideoUrl: string | undefined;
       if (job.sourceVideoKey) {

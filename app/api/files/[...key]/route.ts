@@ -1,4 +1,4 @@
-import { requireUserId, ApiError, enforceRateLimit, enforceUserRateLimit, fail } from "@/lib/api";
+import { requireUserId, ApiError, enforceRateLimit, enforceUserRateLimit, fail, refuseNul } from "@/lib/api";
 import { authenticateApiKey } from "@/lib/apikey";
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
@@ -58,6 +58,11 @@ function parseRange(
 export async function GET(req: Request, { params }: { params: Promise<{ key: string[] }> }) {
   const { key: keyParts } = await params;
   const key = keyParts.join("/");
+  // The key is compared against Image.url / Template.img and then handed to the
+  // storage driver, so a NUL in it is a Postgres 22021 — a masked 500 plus a
+  // captured incident, reachable without a credential (`/api/files/img/x%00.png`
+  // answered 500 for anyone). Refused as the client error it is.
+  refuseNul(key);
   // requireUserId (not raw getServerSession) so a partial 2FA session or a
   // stale JWT revoked via sessionVersion can't read files. Bearer API keys
   // authenticate too — v1 API responses under the local storage driver hand

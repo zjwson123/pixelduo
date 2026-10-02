@@ -40,6 +40,17 @@ export function numberFromEnv(raw: string | undefined, fallback: number): number
 // message is dropped. Returns null when the value is unusable, so a caller can
 // treat "set but broken" exactly like "not set" instead of finding out one
 // failed send at a time.
+// Deadline for ONE outbound call — a provider/LLM request in lib/store.ts, an
+// S3/MinIO request in lib/storage.ts — when the call site has no more specific
+// value. Overridable so a test can exercise a deadline without waiting the
+// production interval out, and it lives here rather than in lib/store.ts
+// because lib/store.ts imports lib/storage.ts: an S3 deadline that had to be
+// imported from the store would be a cycle.
+export function outboundTimeoutMs(defaultMs: number): number {
+  const raw = Number(process.env.OUTBOUND_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : defaultMs;
+}
+
 export function usableUrl(raw: string | undefined, protocols: string[]): URL | null {
   if (!raw || raw.trim() === "") return null;
   let url: URL;

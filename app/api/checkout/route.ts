@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { zodMessage, requireVerifiedUser, ok, fail, enforceRateLimit, enforceUserRateLimit, readBodyCapped } from "@/lib/api";
+import { enforceRateLimit, enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, requireVerifiedUser, zodMessage } from "@/lib/api";
 import { getPlan, getPack } from "@/lib/catalog";
 import { prisma } from "@/lib/prisma";
 import { fulfillOrder } from "@/lib/ledger";
@@ -28,7 +28,7 @@ export async function POST(req: Request) {
     if (limited) return fail(limited);
     const bodyRaw = await readBodyCapped(req, 16 * 1024);
     if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
-    const body = schema.parse(JSON.parse(bodyRaw.raw));
+    const body = schema.parse(parseJsonBody(bodyRaw.raw));
     const item = body.kind === "pack" ? getPack(body.itemId) : getPlan(body.itemId);
     if (!item) return fail(new Error("item-not-found"));
     // Prefixed `invalid-` so fail() classifies it as a 400: the previous bare

@@ -22,6 +22,21 @@ mkdir -p "$BACKUP_DIR"
 OUT="$BACKUP_DIR/${DB}-${STAMP}.sql.gz"
 TMP="$BACKUP_DIR/.${DB}-${STAMP}.partial"
 
+# A failed dump must take its partial file with it. Without this, any failure
+# between the redirect below and the rename (a stopped container, a lock
+# timeout, a full disk) aborts on `set -e`/pipefail and leaves a full-database-
+# sized HIDDEN file behind: the retention glob, `ls backups/*.dump.gz` and every
+# monitoring check ignore dotfiles, so nothing ever removes it — and a directory
+# that keeps filling is what causes the next failure. The compose loops already
+# delete their partials on the failure path; this is the same guarantee for the
+# host script, which cannot fail-write a partial at all now.
+trap 'rm -f "$TMP"' EXIT
+
+# Partials from earlier runs (before the trap, or from a killed shell) are
+# invisible to the rotation above and accumulate for ever. Purge them here,
+# where the directory is already being touched.
+find "$BACKUP_DIR" -maxdepth 1 -name ".*.partial" -type f -mtime +1 -delete 2>/dev/null || true
+
 # Write through a partial name and rename on success. `docker exec pg_dump | gzip
 # > $OUT` left a truncated file under the FINAL name whenever the dump failed
 # (a stopped container, a bad password, a full disk), and the extension is what

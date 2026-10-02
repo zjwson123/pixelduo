@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { ADMIN_GUARD_LOCK, assertAnotherAdminRemains, requireAdmin } from "@/lib/admin";
-import { zodMessage, ok, fail, readBodyCapped, enforceUserRateLimit } from "@/lib/api";
+import { enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, zodMessage } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 
 const schema = z.object({ role: z.enum(["user", "admin"]) });
@@ -16,7 +16,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     if (adminLimited) return fail(adminLimited);
     const bodyRaw = await readBodyCapped(req, 8 * 1024);
     if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
-    const body = schema.parse(JSON.parse(bodyRaw.raw));
+    const body = schema.parse(parseJsonBody(bodyRaw.raw));
     if (id === adminId && body.role !== "admin") {
       return fail(new Error("cannot-demote-self"));
     }

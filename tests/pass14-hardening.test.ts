@@ -459,7 +459,7 @@ describe("v1 job status honours the account gate (pass 14)", () => {
       count: 1,
       prompt: "v1 gate",
     });
-    const { key } = await createApiKey(user.id, "p14");
+    const { key } = await createApiKey(user.id, "p14", user.sessionVersion);
     // Only reachable in this state by a DB-level change: POST /api/account/keys
     // requires a verified account and nothing writes the column back to null.
     await prisma.user.update({ where: { id: user.id }, data: { emailVerified: null } });

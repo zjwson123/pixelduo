@@ -1,6 +1,6 @@
 import { Prisma } from "@prisma/client";
 import { ADMIN_GUARD_LOCK, assertAnotherAdminRemains, requireAdmin } from "@/lib/admin";
-import { ok, fail } from "@/lib/api";
+import { ok, fail, enforceUserRateLimit } from "@/lib/api";
 import { prisma, withDeadlockRetry } from "@/lib/prisma";
 import { GRANT_LOCK_ORDER } from "@/lib/ledger";
 import { deleteObjectsBounded } from "@/lib/storage";
@@ -11,6 +11,11 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
   const { id } = await params;
   try {
     const adminId = await requireAdmin();
+    // Account-keyed leg: the destructive admin routes had only middleware's
+    // coarse 300/min, so a stolen admin session could delete 300 accounts a
+    // minute (each one a cascade plus a bounded object sweep).
+    const limited = await enforceUserRateLimit(adminId, "admin-user-delete", 30, 60_000);
+    if (limited) return fail(limited);
     if (id === adminId) return fail(new Error("cannot-delete-self"));
     // P2025 on the cascade delete below would 500; unknown ids are a plain 404.
     const target = await prisma.user.findUnique({ where: { id }, select: { id: true, role: true } });

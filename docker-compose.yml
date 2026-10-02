@@ -180,8 +180,11 @@ services:
         NEXT_PUBLIC_SENTRY_DSN: ${NEXT_PUBLIC_SENTRY_DSN:-}
         NEXT_PUBLIC_SENTRY_ENVIRONMENT: ${NEXT_PUBLIC_SENTRY_ENVIRONMENT:-}
         NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE: ${NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE:-}
-        # Source-map upload during the build (next.config.mjs).
-        SENTRY_AUTH_TOKEN: ${SENTRY_AUTH_TOKEN:-}
+        # (No SENTRY_AUTH_TOKEN here: a build ARG is not a secret — it is
+        # recorded in the image history and in every `docker save` tarball, and
+        # this one bought nothing because next.config.mjs gates the Sentry
+        # wrapper on SENTRY_DSN, which no build in this repository sets. See
+        # the Dockerfile's note; symbolication needs a BuildKit secret.)
     ports:
       # Loopback-only. With no edge in front, publishing on 0.0.0.0 exposes an
       # unencrypted origin AND makes every per-IP limiter (auth, register,
@@ -334,7 +337,17 @@ services:
 
   backup:
     restart: unless-stopped
-
+    # Dumps are written as the OPERATOR's uid, not root. Without this the
+    # container's `umask 077` file lands in ./backups owned by root:root, and
+    # the documented recovery steps — `pg_restore -d "$DATABASE_URL"
+    # backups/<stamp>` on the host, or copying ./backups to object storage, both
+    # in docs/deploy.md — die with "Permission denied" for the non-root operator
+    # the install guide creates (§1: a sudo-capable user in the docker group).
+    # During an incident that reads as a corrupt or missing backup. The loop only
+    # needs write access to /backups, so nothing about it requires uid 0.
+    # Docker Desktop hides this on macOS (files come out host-owned); on the
+    # documented Ubuntu VPS target it is exactly the failure above.
+    user: "${BACKUP_UID:-1000}:${BACKUP_GID:-1000}"
     image: postgres:16-alpine
     depends_on:
       db:
@@ -366,7 +379,17 @@ services:
 
   backup-objects:
     restart: unless-stopped
-
+    # Dumps are written as the OPERATOR's uid, not root. Without this the
+    # container's `umask 077` file lands in ./backups owned by root:root, and
+    # the documented recovery steps — `pg_restore -d "$DATABASE_URL"
+    # backups/<stamp>` on the host, or copying ./backups to object storage, both
+    # in docs/deploy.md — die with "Permission denied" for the non-root operator
+    # the install guide creates (§1: a sudo-capable user in the docker group).
+    # During an incident that reads as a corrupt or missing backup. The loop only
+    # needs write access to /backups, so nothing about it requires uid 0.
+    # Docker Desktop hides this on macOS (files come out host-owned); on the
+    # documented Ubuntu VPS target it is exactly the failure above.
+    user: "${BACKUP_UID:-1000}:${BACKUP_GID:-1000}"
     image: minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
     entrypoint: ["/bin/sh", "-c"]
     depends_on:

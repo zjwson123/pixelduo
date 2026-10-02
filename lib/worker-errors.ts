@@ -17,6 +17,11 @@ export function isPermanentProviderError(msg: string): boolean {
     /model not exist/i.test(msg) ||
     /safety system|content (policy|moderation)|flagged.*moderation/i.test(msg) ||
     /unknown-model|model-not-supported|not-a-video-model|model-disabled/i.test(msg) ||
+    // The job's reference image is gone from storage: /api/edit and the i2v
+    // path both charge for an input the job can no longer read, and a retry
+    // re-reads the same missing object. Terminal so the caller is refunded
+    // immediately instead of after three backoffs.
+    /ref-image-missing/i.test(msg) ||
     // Delivery refused because the funding order was refunded mid-flight (see
     // completeJob): retrying re-bills the provider for output that will be
     // refused again.

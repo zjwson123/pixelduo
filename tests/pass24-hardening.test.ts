@@ -212,12 +212,24 @@ describe("pass 24 — a renewal cannot mint carryover for the refund in flight",
     const gTaken = new Promise<void>((r) => (gLocked = r));
     const g = prisma.$transaction(
       async (tx) => {
-        await tx.$queryRaw`SELECT id FROM "CreditGrant" WHERE "refId" = ${x.id} FOR UPDATE`;
+        const locked = await tx.$queryRaw<Array<{ remaining: number }>>`
+          SELECT id, remaining FROM "CreditGrant" WHERE "refId" = ${x.id} FOR UPDATE`;
+        // The premise of everything below: this grant still holds the quota, so
+        // the refund that will park on it has not run yet.
+        expect(locked).toHaveLength(1);
+        expect(locked[0].remaining).toBe(2000);
         gLocked();
         await gReleased;
       },
       { timeout: 20_000, maxWait: 10_000 },
     );
+
+    // G must hold the grant lock BEFORE the refund transaction exists, or the
+    // two are simply racing: measured, ~40% of runs had the refund flip and
+    // revoke the grant (remaining 2000 → 0) before G's SELECT ever ran, after
+    // which the renewal had nothing to wait for and the timing assertion below
+    // failed while every deterministic assertion still passed.
+    await gTaken;
 
     let casDone!: () => void;
     const cas = new Promise<void>((r) => (casDone = r));
@@ -235,7 +247,6 @@ describe("pass 24 — a renewal cannot mint carryover for the refund in flight",
       { timeout: 20_000, maxWait: 10_000 },
     );
 
-    await gTaken;
     await cas;
     // The renewal starts while the refund is uncommitted and blocked.
     const renewal = fulfillOrder(user.id, y.id, "plan", 800, "starter");

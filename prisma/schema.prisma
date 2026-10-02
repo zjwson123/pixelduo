@@ -51,6 +51,17 @@ model ApiKey {
   name       String
   keyHash    String    @unique
   prefix     String
+  // The account's sessionVersion when this key was minted. A key is a
+  // credential of the session that created it (same rule the JWT follows), so
+  // authenticateApiKey refuses a key whose stamped version no longer matches
+  // the account's. The explicit revokes on reset/revoke-sessions/2FA stay (they
+  // are what the console shows the user), but they are a read-then-write and
+  // this is the atomic half: without it, a mint already inside its locked
+  // transaction could COMMIT after the revocation's `updateMany … revokedAt:
+  // null` had run, leaving a permanent pd_live_ key the reset was supposed to
+  // kill. The version bump travels with the same transaction, so ordering can
+  // no longer matter.
+  sessionVersion Int    @default(0)
   revokedAt  DateTime?
   lastUsedAt DateTime?
   createdAt  DateTime  @default(now())
@@ -103,6 +114,16 @@ model LedgerEntry {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, createdAt])
+  // cycleUsageTx resolves a plan cycle's spend with
+  // `userId = ? AND refId IN (…) AND type IN (…)` (lib/ledger.ts) — once per
+  // chunk of job ids, inside the payment webhook's interactive transaction.
+  // Without this index each chunk is a scan of the account's LIFETIME ledger
+  // (the (userId, createdAt) index cannot serve a refId predicate), so the
+  // cost is cycle-jobs × lifetime-rows: measured 6.3s at 33k cycle jobs and
+  // 10.1s at 100k against a 5s Prisma transaction timeout, i.e. the same
+  // "paid renewal 500s and the retry stream re-runs it" outcome pass 18 fixed
+  // the bind-variable ceiling for.
+  @@index([userId, refId])
 }
 
 // Credit grants with expiry (commercial policy):

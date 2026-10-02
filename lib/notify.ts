@@ -24,6 +24,7 @@ import { isProductionRuntime } from "./runtime-env";
 // must agree here — "how much may we read" and "is the target acceptable" —
 // already have one answer each in that module.
 import { hostIsPublic, isPublicPort, readBodyCapped, ssrfPinnedAgent } from "./store";
+import { quoteUntrusted } from "./untrusted-text";
 
 export type WebhookKind = "feishu" | "wecom" | "dingtalk" | "raw";
 
@@ -77,7 +78,13 @@ export function buildWebhookText(input: NotifyInput): string {
     .join(" · ");
   // Webhooks truncate around 4KB; the message is already capped at 2000 chars by
   // the route, so this stays well inside it.
-  const text = `[PixelDuo] 反馈 · ${input.category}\n${context}\n\n${input.message}\n\nref #${input.ref.slice(-8)}`;
+  //
+  // The message is quoted line by line, for the same reason the operator mail
+  // quotes it (lib/mail.ts): it is arbitrary multi-line text sitting next to
+  // machine-generated lines (`[PixelDuo] 反馈 · …`, the context line, `ref #…`),
+  // so an unquoted message could plant a second, forged set of them — including
+  // a `ref #` pointing at somebody else's report — above the real one.
+  const text = `[PixelDuo] 反馈 · ${input.category}\n${context}\n\n${quoteUntrusted(input.message)}\n\nref #${input.ref.slice(-8)}`;
   // Applied to the assembled text, not to input.message alone: `email` and
   // `page` reach the same payload and are just as caller-controlled.
   return neutraliseMentions(text);

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { zodMessage, requireVerifiedUser, ok, fail, enforceUserRateLimit, readBodyCapped, ApiError } from "@/lib/api";
+import { ApiError, enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, requireVerifiedUser, requireVerifiedUserSession, zodMessage } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { passwordReauthRefusal } from "@/lib/auth";
 import { createApiKey } from "@/lib/apikey";
@@ -55,7 +55,7 @@ const MAX_ACTIVE_KEYS = 10;
 // outlives the session and never consults sessionVersion.
 export async function POST(req: Request) {
   try {
-    const userId = await requireVerifiedUser();
+    const { id: userId, sv } = await requireVerifiedUserSession();
     // Per-account cap, and the only leg: this endpoint is a password + TOTP
     // re-auth gate, so what must not be diluted is the budget for guessing on
     // THIS account — which is what the account key does. The per-IP leg it also
@@ -70,7 +70,7 @@ export async function POST(req: Request) {
     if (await isTwoFactorLocked(userId)) return fail(new ApiError(429, TWOFA_LOCKED_ERROR));
     const bodyRaw = await readBodyCapped(req, 8 * 1024);
     if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
-    const body = schema.parse(JSON.parse(bodyRaw.raw));
+    const body = schema.parse(parseJsonBody(bodyRaw.raw));
     const user = await prisma.user.findUniqueOrThrow({
       where: { id: userId },
       select: { email: true, passwordHash: true, totpSecret: true, totpEnabled: true },
@@ -109,11 +109,23 @@ export async function POST(req: Request) {
     // count, all pass, and each mints a permanent credential.
     const key = await prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${userId}))`;
+      // Re-read the version INSIDE the transaction and stamp it on the row. The
+      // gate at the top of this handler cannot see a revocation that commits
+      // while we are here, and a key minted by a session revoked mid-request
+      // would outlive the reset its owner just performed — a permanent
+      // pd_live_ credential, which is the one thing this route's re-auth exists
+      // to prevent. The stamp makes the ordering irrelevant: a later bump
+      // invalidates this key whenever it commits (authenticateApiKey).
+      const fresh = await tx.user.findUniqueOrThrow({
+        where: { id: userId },
+        select: { sessionVersion: true },
+      });
+      if (fresh.sessionVersion !== sv) throw new ApiError(401, "unauthorized");
       const active = await tx.apiKey.count({ where: { userId, revokedAt: null } });
       if (active >= MAX_ACTIVE_KEYS) {
         throw new Error("too-many-keys: revoke one before creating another");
       }
-      return createApiKey(userId, body.name ?? "default", tx);
+      return createApiKey(userId, body.name ?? "default", fresh.sessionVersion, tx);
     });
     return ok({ ...key, note: "copy now — the full key is shown only once" });
   } catch (e) {

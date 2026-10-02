@@ -3,6 +3,9 @@ import { lookup as dnsLookup } from "dns/promises";
 import { lookup as dnsLookupCb, type LookupAddress, type LookupOptions } from "dns";
 import { Agent, fetch as pinnedFetch } from "undici";
 import { getStorage, newStorageKey } from "./storage";
+// Re-exported for the provider call sites; the deadline helper lives in
+// lib/runtime-env.ts so lib/storage.ts can use it without a cycle.
+export { outboundTimeoutMs } from "./runtime-env";
 import { storeContentType, extensionForContentType, sniffContentType, type MediaKind } from "./media-type";
 
 export async function saveBase64Image(base64: string, ext = "png"): Promise<string> {
@@ -285,14 +288,6 @@ export async function hostIsPublic(hostname: string): Promise<boolean> {
 export interface FetchPublicOptions {
   timeoutMs: number;
   maxBytes: number;
-}
-
-// Deadline for ONE outbound provider/LLM call, body read included, when the
-// call site has no more specific value. Overridable so a test can exercise the
-// deadline without waiting the production interval out.
-export function outboundTimeoutMs(defaultMs: number): number {
-  const raw = Number(process.env.OUTBOUND_TIMEOUT_MS);
-  return Number.isFinite(raw) && raw > 0 ? raw : defaultMs;
 }
 
 // Hardened download of a provider-returned URL, shared by the image and video

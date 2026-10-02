@@ -60,13 +60,22 @@ export async function requireUserId(): Promise<string> {
 // Account gate for credit-consuming actions: email must be verified first
 // (anti-abuse — unverified accounts can't burn provider cost).
 export async function requireVerifiedUser(): Promise<string> {
+  return (await requireVerifiedUserSession()).id;
+}
+
+// Same gate, but it also hands back the session version the request was
+// authorized with. Credential-minting paths need it (ApiKey.sessionVersion):
+// the DB is re-read inside the transaction that writes the credential, because
+// the version checked here at the top of the request can be revoked while the
+// transaction is in flight, and a credential stamped with a superseded version
+// authenticates as nothing.
+export async function requireVerifiedUserSession(): Promise<{ id: string; sv: number }> {
   const { id, sv, totpPending } = await sessionUser();
-  const userId = id;
   if (totpPending) throw new ApiError(403, "2fa-required");
-  const user = await prisma.user.findUnique({ where: { id: userId }, select: { emailVerified: true, sessionVersion: true } });
+  const user = await prisma.user.findUnique({ where: { id }, select: { emailVerified: true, sessionVersion: true } });
   if (!user || user.sessionVersion !== sv) throw new ApiError(401, "unauthorized");
   if (!user.emailVerified) throw new ApiError(403, "verify-email-required");
-  return userId;
+  return { id, sv };
 }
 
 export class ApiError extends Error {
@@ -260,6 +269,15 @@ export function clampPage(raw: string | null, max = PAGE_MAX): number {
 // content-length, so the header pre-check alone is bypassable). Counts bytes,
 // not string length, so multibyte bodies can't slip ~3-4x past the cap.
 // Returns the raw string — callers JSON.parse it themselves.
+//
+// U+0000 is refused here, once, for every JSON route. No schema rejected it and
+// nothing stripped it, but PostgreSQL's text type does: the write died with
+// SQLSTATE 22021, which is an UNEXPECTED error, so fail() masked it as
+// internal-error (500) and captureError() reported an incident — and this
+// helper is on unauthenticated routes (feedback, register, forgot-password), so
+// anyone could burn the error quota and bury real incidents with one request
+// per NUL. Throwing ApiError means fail() answers 400 with the reason, which is
+// what the caller sent: garbage input must not read as a server fault.
 export async function readBodyCapped(
   req: Request,
   maxBytes: number,
@@ -270,7 +288,9 @@ export async function readBodyCapped(
   }
   if (!req.body) {
     const raw = await req.text();
-    return Buffer.byteLength(raw, "utf8") > maxBytes ? { tooLarge: true } : { raw };
+    if (Buffer.byteLength(raw, "utf8") > maxBytes) return { tooLarge: true };
+    refuseNul(raw);
+    return { raw };
   }
   const reader = req.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -287,5 +307,57 @@ export async function readBodyCapped(
     }
     chunks.push(value);
   }
-  return { raw: Buffer.concat(chunks).toString("utf8") };
+  const raw = Buffer.concat(chunks).toString("utf8");
+  refuseNul(raw);
+  return { raw };
+}
+
+// Every JSON request body is parsed through here, so the NUL refusal is one
+// guard rather than one per route (and one per field). The raw-body check
+// above cannot see a NUL that arrived as an ESCAPE: `{"message":"a\u0000b"}`
+// is seven ASCII characters on the wire and a real U+0000 after JSON.parse, and
+// that is how the live probe hit SQLSTATE 22021 on /api/feedback. The walk runs
+// after parsing, so no encoding of the character survives it.
+export function parseJsonBody(raw: string): unknown {
+  const value: unknown = JSON.parse(raw);
+  refuseNulDeep(value, 0);
+  return value;
+}
+
+function refuseNulDeep(value: unknown, depth: number): void {
+  if (depth > 32) return; // Bounded like the body cap: no recursion bombs.
+  if (typeof value === "string") {
+    refuseNul(value);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) refuseNulDeep(item, depth + 1);
+    return;
+  }
+  if (value && typeof value === "object") {
+    for (const item of Object.values(value as Record<string, unknown>)) {
+      refuseNulDeep(item, depth + 1);
+    }
+  }
+}
+
+// Shared by the body reader above and by query-parameter readers: a NUL cannot
+// reach PostgreSQL from either. Kept as a throwing helper rather than a
+// sanitizer — silently deleting bytes out of a prompt or a report would change
+// what the user wrote, and this codebase's rule is that a refusal is honest and
+// a silent substitution is not.
+export function refuseNul(value: string): void {
+  if (value.includes("\u0000")) {
+    throw new ApiError(400, "invalid-input: NUL characters are not allowed");
+  }
+}
+
+// Free-text query parameter, bounded: `?cat=`/`?q=` feed unindexed `contains`
+// scans (only the cost matters), and a NUL in one was the third way into the
+// 22021-masked-500 above — `?cat=%00` on /api/templates produced two Postgres
+// errors and two captured incidents per request, for anyone with an account.
+export function queryText(raw: string | null, max: number): string | null {
+  if (raw === null) return null;
+  refuseNul(raw);
+  return raw.slice(0, max);
 }

@@ -1,7 +1,7 @@
 import NextAuth from "next-auth";
 import { NextRequest } from "next/server";
 import { authOptions } from "@/lib/auth";
-import { enforceRateLimit, readBodyCapped } from "@/lib/api";
+import { ApiError, enforceRateLimit, errorResponse, readBodyCapped } from "@/lib/api";
 import { envLimit } from "@/lib/rate-limit";
 
 const handler = NextAuth(authOptions);
@@ -79,7 +79,17 @@ async function limited(req: NextRequest, ctx: Parameters<typeof handler>[1]) {
   // reads none — delegate as-is.
   if (req.method !== "POST") return handler(req, ctx);
 
-  const bodyRaw = await readBodyCapped(req, MAX_BODY_BYTES);
+  const bodyRaw = await readBodyCapped(req, MAX_BODY_BYTES).catch((e: unknown) => {
+    // readBodyCapped refuses a NUL body with ApiError, and this wrapper is the
+    // one caller with no try/catch of its own — the delegate IS the handler, so
+    // an uncaught throw here answered 500 for what is a client error. Every
+    // other caller funnels through fail(), which maps ApiError to its status.
+    if (e instanceof ApiError) {
+      return { refused: errorResponse({ ok: false, error: e.message }, { status: e.status }) };
+    }
+    throw e;
+  });
+  if ("refused" in bodyRaw) return bodyRaw.refused;
   if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
   // The body has been consumed, so the handler gets a fresh request carrying the
   // same url/headers (next-auth reads nextUrl.searchParams, the cookie header and

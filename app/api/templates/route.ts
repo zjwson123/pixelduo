@@ -1,4 +1,4 @@
-import { requireUserId, ok, fail, enforceUserRateLimit, clampPage } from "@/lib/api";
+import { requireUserId, ok, fail, enforceUserRateLimit, clampPage, queryText } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@prisma/client";
 import { serveUserUrl } from "@/lib/store";
@@ -23,9 +23,11 @@ export async function GET(req: Request) {
     const url = new URL(req.url);
   // Both are free-text inputs feeding an unindexed `contains` scan, so they are
   // bounded before they reach the query (there is no injection risk — the scan
-  // is the cost).
-  const cat = url.searchParams.get("cat")?.slice(0, 40); // category label (Chinese short)
-  const q = url.searchParams.get("q")?.slice(0, 100); // free-text search on title + prompt
+  // is the cost). A NUL is refused rather than sliced: PostgreSQL's text type
+  // rejects U+0000 with 22021, which surfaced as a masked 500 plus a captured
+  // incident, once per request, for any signed-in account.
+  const cat = queryText(url.searchParams.get("cat"), 40); // category label (Chinese short)
+  const q = queryText(url.searchParams.get("q"), 100); // free-text search on title + prompt
   const featured = url.searchParams.get("featured") === "1";
   // NaN-guard: garbage ?page= must fall back to 1, not skip: NaN. clampPage
   // also bounds the top end, where a huge finite value produced a skip the

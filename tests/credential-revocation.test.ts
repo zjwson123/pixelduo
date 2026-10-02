@@ -52,7 +52,7 @@ describe("credential revocation on 2FA enablement", () => {
       data: { totpPendingSecret: setup.secret },
     });
 
-    const key = await createApiKey(userId, "minted-before-2fa");
+    const key = await createApiKey(userId, "minted-before-2fa", user.sessionVersion);
     expect((await authenticateApiKey(bearer(key.key)))?.userId).toBe(userId);
 
     getServerSession.mockResolvedValue({
@@ -86,7 +86,7 @@ describe("credential revocation on 2FA enablement", () => {
     const before = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
     expect(before.totpEnabled).toBe(true);
 
-    const key = await createApiKey(userId, "minted-while-2fa-on");
+    const key = await createApiKey(userId, "minted-while-2fa-on", before.sessionVersion);
     expect((await authenticateApiKey(bearer(key.key)))?.userId).toBe(userId);
 
     getServerSession.mockResolvedValue({
