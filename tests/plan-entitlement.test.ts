@@ -135,11 +135,19 @@ describe("30% carryover is computed from the cycle's funding grant", () => {
     // grant's quota is what gets measured — the window version returned 0 here
     // and the promised carryover vanished while the leftover quota was still
     // swept at the cycle end.
+    const rewound = new Date(Date.now() - 60_000);
     await prisma.user.update({
       where: { id: userId },
-      data: { planRenewsAt: new Date(Date.now() - 60_000) },
+      data: { planRenewsAt: rewound },
     });
-    const usage = await cycleUsage(userId, new Date());
+    // The anchor is the STORED witness of the cycle end — what fulfillOrder
+    // passes (`user.planRenewsAt ?? now`) — not the app's `new Date()`. Once the
+    // plan/cycle boundary moved to the database clock, an anchor and the clock it
+    // is compared against have to be on the same timeline; `new Date()` here only
+    // ever worked because both sides were the app clock and the `Date.now()`
+    // inside the function is necessarily later than the value the test had just
+    // constructed.
+    const usage = await cycleUsage(userId, rewound);
     expect(usage).toMatchObject({ granted: 2000, spentNet: 0, fundingRefId: second.id });
 
     // Nothing was spent, so the carryover must be 30% of the full 2000.

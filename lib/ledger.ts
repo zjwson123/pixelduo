@@ -155,6 +155,27 @@ export { GRANT_LOCK_ORDER };
 // swept at the cycle end). Anchoring on the grant also keeps the cash-out
 // protection: it survives planRenewsAt being moved, and its `createdAt` bounds
 // the spend scan.
+/**
+ * The DATABASE's clock, as a JS Date.
+ *
+ * Every money decision has to be made on one clock, and it is the one the rows
+ * live in: spending (`spendCreditsTx`), the sweep (`lib/expiry.ts`) and the
+ * refund's deadline (pass 19) all compare against `now()` inside SQL. The
+ * plan/cycle boundary was the last family still on `new Date()` — the app's
+ * clock. Where the two differ (the app in one container and Postgres elsewhere,
+ * or NTP correcting either after a host sleep), a cycle the database still
+ * considers live measured as ended and minted its 30% carryover on top of quota
+ * that was still spendable; the mirror direction silently destroyed one; and the
+ * renewal anchor moved by the skew, so an early renewal could drop paid days.
+ *
+ * Inside a transaction `now()` is that transaction's start time, so every
+ * comparison in that transaction — and the deadline it mints — agrees.
+ */
+export async function dbNow(client: Prisma.TransactionClient | typeof prisma): Promise<Date> {
+  const [row] = await client.$queryRaw<Array<{ now: Date }>>(Prisma.sql`SELECT now() AS now`);
+  return row.now;
+}
+
 export async function cycleUsageTx(
   tx: Prisma.TransactionClient,
   userId: string,
@@ -164,6 +185,13 @@ export async function cycleUsageTx(
   // when the plan clock and the grant clock disagree.
   cycleAnchor: Date,
 ): Promise<CycleUsage> {
+  // Which cycle counts as "ended" is a money decision, so it is made on the
+  // DATABASE's clock — the one the grant rows and the spend scan use. On
+  // `new Date()` a skew made a cycle the database still considers live measure
+  // as ended, and its 30% carryover was minted on top of quota that was still
+  // spendable. Inside a transaction `now()` is that transaction's start time, so
+  // every comparison below agrees with the reads that follow.
+  const now = await dbNow(tx);
   const grantSelect = { id: true, amount: true, refId: true, createdAt: true, expiresAt: true } as const;
   // The quota whose unused portion is being measured is the newest SUBSCRIPTION
   // grant whose OWN cycle has already ended. Two reasons it must be "ended"
@@ -187,13 +215,13 @@ export async function cycleUsageTx(
   // cycle) — without it that state would measure as "no cycle at all" and the
   // callers that rely on it would silently stop granting carryover.
   const ended = await tx.creditGrant.findFirst({
-    where: { userId, source: "SUBSCRIPTION", expiresAt: { lte: new Date() } },
+    where: { userId, source: "SUBSCRIPTION", expiresAt: { lte: now } },
     orderBy: { createdAt: "desc" },
     select: grantSelect,
   });
   const funding =
     ended ??
-    (cycleAnchor.getTime() <= Date.now()
+    (cycleAnchor.getTime() <= now.getTime()
       ? await tx.creditGrant.findFirst({
           where: { userId, source: "SUBSCRIPTION" },
           orderBy: { createdAt: "desc" },
@@ -846,7 +874,11 @@ export async function fulfillOrder(
       await client.$queryRaw(Prisma.sql`SELECT id FROM "User" WHERE id = ${userId} FOR UPDATE`);
       const user = await client.user.findUnique({ where: { id: userId } });
       if (!user) throw new Error("user-not-found");
-      const now = new Date();
+      // The renewal's own clock is the database's too: this value decides whether
+      // an early renewal EXTENDS the paid cycle or restarts it, when the carryover
+      // gate opens, and the deadline of the grant this transaction is about to
+      // mint — which spendCreditsTx and the sweep later compare against now().
+      const now = await dbNow(client);
       // Renewal extends from the current cycle end when bought early, otherwise
       // starts a fresh cycle from now.
       const base = user.planRenewsAt && user.planRenewsAt > now ? user.planRenewsAt : now;
@@ -1033,7 +1065,7 @@ export async function revokePlanEntitlementTx(
       source: "SUBSCRIPTION",
       refType: "order",
       refId: { not: null },
-      expiresAt: { gt: new Date() },
+      expiresAt: { gt: await dbNow(tx) },
     },
     orderBy: { expiresAt: "desc" },
     select: { refId: true, expiresAt: true },

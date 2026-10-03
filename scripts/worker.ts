@@ -9,6 +9,7 @@ import { initObservability, captureError } from "../lib/observability";
 import { bakeWatermark } from "../lib/watermark";
 import { storeContentType } from "../lib/media-type";
 import { getModel } from "../lib/model-registry";
+import { dbNow } from "../lib/ledger";
 import { prisma } from "../lib/prisma";
 import { isPermanentProviderError } from "../lib/worker-errors";
 import { isProductionRuntime } from "../lib/runtime-env";
@@ -35,9 +36,18 @@ const VIDEO_HARD_TIMEOUT_MS = 30 * 60_000;
 // deployment that does not run the service. A paid plan with no cycle end at
 // all is treated the same way, because nothing proves it is live; a live plan
 // (planRenewsAt in the future) is unchanged.
-export function isFreeTier(user: { plan: string; planRenewsAt: Date | null } | null): boolean {
+export function isFreeTier(
+  user: { plan: string; planRenewsAt: Date | null } | null,
+  // The clock this decision is made on. The caller passes the DATABASE's now
+  // (dbNow): the worker is its own process, often on its own host, while the
+  // values compared here — planRenewsAt, and the grant deadlines it mirrors — are
+  // written and read on Postgres's timeline. On the app's clock a skew watermarks
+  // a paying customer's output, or leaves a lapsed plan unmarked. Optional so
+  // pure callers (tests) need no database.
+  now: Date = new Date(),
+): boolean {
   if (!user || user.plan === "free") return true;
-  return !user.planRenewsAt || user.planRenewsAt.getTime() <= Date.now();
+  return !user.planRenewsAt || user.planRenewsAt.getTime() <= now.getTime();
 }
 
 export async function processImageJob(job: {
@@ -106,7 +116,7 @@ export async function processImageJob(job: {
     // get our badge baked in for free users. Videos carry a UI badge only —
     // file-level video marking would need ffmpeg transcoding.
     const user = await prisma.user.findUnique({ where: { id: job.userId } });
-    const isFree = isFreeTier(user);
+    const isFree = isFreeTier(user, await dbNow(prisma));
 
     // Checkpoint each newly persisted image so a later retry resumes here.
     // Persisting a checkpoint must never fail the generation itself, and the
