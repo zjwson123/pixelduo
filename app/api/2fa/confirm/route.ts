@@ -89,13 +89,15 @@ export async function POST(req: Request) {
         },
       });
       if (claim.count !== 1) return false;
-      // Revoke API keys alongside the session bump. authenticateApiKey never
-      // consults sessionVersion, so an attacker who trialled the password
-      // before 2FA was on could mint a pd_live_ key that survived the very
-      // remediation the alert tells the owner to perform ("enable 2FA") — the
-      // key has no expiry and keeps spending the victim's credits. This is the
-      // same pairing reset-password and revoke-sessions already do; enablement
-      // is the one sessionVersion bump that was missing it.
+      // Revoke API keys alongside the session bump. An attacker who trialled
+      // the password before 2FA was on could mint a pd_live_ key that survived
+      // the very remediation the alert tells the owner to perform ("enable
+      // 2FA") — the key has no expiry and keeps spending the victim's credits.
+      // (Written when authenticateApiKey did not consult sessionVersion at
+      // all; pass 25's stamp now backs this up atomically, and the explicit
+      // revoke stays as the immediate half.) This is the same pairing
+      // reset-password and revoke-sessions already do; enablement is the one
+      // sessionVersion bump that was missing it.
       await tx.apiKey.updateMany({
         where: { userId, revokedAt: null },
         data: { revokedAt: new Date() },

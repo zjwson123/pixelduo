@@ -87,6 +87,20 @@ function emailVerifiedClaim(claim: unknown): boolean | null {
   return null;
 }
 
+// A control character in an address is garbage no user typed and no provider
+// emits, and a NUL specifically reaches PostgreSQL as SQLSTATE 22021: the
+// credentials callback's lookup dies with an UNEXPECTED error, and next-auth
+// reflects the exception's message to the caller (401, message = the Prisma
+// invocation snippet with build paths and the Postgres error) — on an
+// anonymous, pre-login endpoint. The auth route's raw-body NUL check cannot
+// see this one: `{"email":"a\u0000b"}` is ASCII on the wire and a real U+0000
+// only after JSON.parse, exactly the escape gap pass 25 closed for JSON routes
+// (parseJsonBody); this is the credentials body, which next-auth parses
+// itself, so the refusal lives here instead.
+function hasControlChars(value: string): boolean {
+  return /[\u0000-\u001f\u007f]/.test(value);
+}
+
 export const authOptions: NextAuthOptions = {
   session: { strategy: "jwt" },
   pages: { signIn: "/login" },
@@ -97,6 +111,9 @@ export const authOptions: NextAuthOptions = {
       async authorize(credentials, req) {
         if (!credentials?.email || !credentials?.password) return null;
         const email = credentials.email.toLowerCase().trim();
+        // Refused as the non-credential it is — uniform with a wrong password,
+        // so nothing about accounts leaks (see hasControlChars).
+        if (hasControlChars(email)) return null;
         const user = await prisma.user.findUnique({ where: { email } });
         if (!user) {
           await bcrypt.compare(credentials.password, DUMMY_HASH);
@@ -297,13 +314,20 @@ export async function ensureOAuthUser(
   const e = email.toLowerCase().trim();
   if (!e) return null;
   if (providerEmailVerified !== true) return null;
+  // Same refusal as the credentials path: a control character (a NUL
+  // specifically) would die inside the lookup/create below as SQLSTATE 22021 —
+  // an unexpected error reflected to the browser by next-auth's error page.
+  if (hasControlChars(e)) return null;
   let user = await prisma.user.findUnique({ where: { email: e } });
   if (!user) {
     user = await prisma.user.create({
       data: {
         email: e,
         passwordHash: randomBytes(32).toString("hex"), // OAuth users have no password
-        name: name || e.split("@")[0],
+        // Display metadata, not user-authored content, so it is filtered rather
+        // than refused: control characters would hit the same 22021 on the
+        // create, and no legitimate provider sends them.
+        name: (name || e.split("@")[0]).replace(/[\u0000-\u001f\u007f]/g, ""),
         emailVerified: new Date(),
       },
     });

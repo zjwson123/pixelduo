@@ -1,5 +1,6 @@
 import Stripe from "stripe";
 import { isProductionRuntime } from "../runtime-env";
+import { captureError } from "../observability";
 import {
   IGNORED_WEBHOOK,
   type CheckoutSession,
@@ -66,12 +67,40 @@ export class StripeProvider implements PaymentProvider {
   async verifyWebhook(
     rawBody: string,
     headers: Headers,
+    clock?: { nowSec: number },
   ): Promise<PaymentWebhookEvent | IgnoredWebhook | null> {
     if (!this.webhookSecret) return null;
     const signature = headers.get("stripe-signature");
     if (!signature) return null;
+    // The SDK judges the timestamp against THIS process's clock; the route
+    // hands us the database's (pass 26's doctrine), and the SDK cannot take a
+    // clock. Widening its tolerance by the measured skew makes its decision —
+    // |app clock − ts| ≤ tolerance — equivalent to one taken on the reference
+    // clock: a genuine delivery is accepted exactly while it is within 300s of
+    // THAT clock. Capped at one hour; past that the environment is broken in a
+    // way no window should paper over.
+    const appNowSec = Date.now() / 1000;
+    const skewSec = clock ? Math.abs(clock.nowSec - appNowSec) : 0;
+    const tolerance = 300 + Math.min(skewSec, 3600);
+    let event: Stripe.Event;
     try {
-      const event = this.stripe.webhooks.constructEvent(rawBody, signature, this.webhookSecret);
+      event = this.stripe.webhooks.constructEvent(rawBody, signature, this.webhookSecret, tolerance);
+    } catch (e) {
+      // A bad MAC is a forged/junk delivery: silent 400, unchanged. A
+      // timestamp rejection of an otherwise well-formed signature is either a
+      // clock fault (every genuine delivery lands here, and nothing else in
+      // the system reports it) or a replay — worth an incident, because the
+      // 400 the route answers is deliberately unreported.
+      if (/timestamp outside the tolerance/i.test(String((e as Error)?.message ?? ""))) {
+        captureError(
+          new Error(
+            `stripe-webhook-stale: signature timestamp outside the tolerance (clock skew ${Math.round(skewSec)}s, tolerance ${Math.round(tolerance)}s)`,
+          ),
+        );
+      }
+      return null;
+    }
+    try {
       const obj = event.data.object as Stripe.Checkout.Session & {
         metadata?: Record<string, string>;
         payment_intent?: string;

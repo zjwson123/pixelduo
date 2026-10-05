@@ -33,17 +33,24 @@ KEEP="${BACKUP_KEEP:-7}"
 # note in docker-compose.yml. Override MC_IMAGE to bump it deliberately.
 MC_IMAGE="${MC_IMAGE:-minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727}"
 
+# Credentials travel via the CHILD ENVIRONMENT, never the argv: `docker run -e
+# VAR=value` writes the value into this command's argv, which /proc exposes to
+# every account on the host (`ps -ww`) for as long as the mirror runs — same
+# class this script already pins file modes for. `-e VAR` (no `=value`) takes
+# the value from this shell's environment, so export first.
+export SRC_ENDPOINT SRC_ACCESS SRC_SECRET SRC_BUCKET
+export TARGET_ENDPOINT TARGET_ACCESS TARGET_SECRET TARGET_BUCKET KEEP
 docker run --rm \
   --entrypoint /bin/sh \
-  -e SRC_ENDPOINT="$SRC_ENDPOINT" \
-  -e SRC_ACCESS="$SRC_ACCESS" \
-  -e SRC_SECRET="$SRC_SECRET" \
-  -e SRC_BUCKET="$SRC_BUCKET" \
-  -e TARGET_ENDPOINT="$TARGET_ENDPOINT" \
-  -e TARGET_ACCESS="$TARGET_ACCESS" \
-  -e TARGET_SECRET="$TARGET_SECRET" \
-  -e TARGET_BUCKET="$TARGET_BUCKET" \
-  -e KEEP="$KEEP" \
+  -e SRC_ENDPOINT \
+  -e SRC_ACCESS \
+  -e SRC_SECRET \
+  -e SRC_BUCKET \
+  -e TARGET_ENDPOINT \
+  -e TARGET_ACCESS \
+  -e TARGET_SECRET \
+  -e TARGET_BUCKET \
+  -e KEEP \
   -v "$PWD/backups:/backups" \
   "$MC_IMAGE" -c '
     set -e

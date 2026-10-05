@@ -43,13 +43,53 @@ for attempt in 1 2 3; do
 done
 [ "$audited" = 1 ] || { echo "[audit] the registry audit endpoint stayed unavailable — refusing to report a runtime tree it never checked"; exit 1; }
 
-echo "[2/9] container image (dependency stage)"
+echo "[2/9] container images (deps + web + worker, artifact asserted)"
 # Mirrors CI's `docker` job. The build is the deploy artifact and it had been
 # broken for three weeks with nothing in this script able to see it: `npm ci`
 # cannot install this lockfile without .npmrc, and no Dockerfile stage copied it,
 # while every host-side step here runs with .npmrc next to the manifests.
-docker build --progress=plain --target deps . > /tmp/pd-ci-docker.log 2>&1 \
+#
+# One retry per stage: the worker stage runs `npx prisma generate`, which
+# fetches the Prisma query engine from binaries.prisma.sh at build time (a
+# transient TLS disconnect failed this step's first run), and a network blip
+# must not read as a broken Dockerfile. Same rule as the npm-audit retry above:
+# retry the network; never report a build that did not finish.
+run_build() {
+  local label="$1"; shift
+  for attempt in 1 2; do
+    if docker build --progress=plain "$@" . >> /tmp/pd-ci-docker.log 2>&1; then return 0; fi
+    echo "[docker] $label build failed (attempt $attempt/2) — see /tmp/pd-ci-docker.log"
+    if [ "$attempt" = 1 ]; then sleep 5; else return 1; fi
+  done
+}
+run_build deps --target deps \
   || { echo "docker build --target deps FAILED — see /tmp/pd-ci-docker.log"; tail -20 /tmp/pd-ci-docker.log; exit 1; }
+# Pass 27: deps alone left the two RUNTIME stages unbuilt by any job, and a
+# regression in exactly those instructions (public/ and prisma/ copied into
+# themselves — a 13 MB duplicate plus a second URL space) shipped with green
+# CI. Build both deploy stages and assert the web artifact's shape, the same
+# checks CI runs. NEXTAUTH_URL is required in practice: the /login prerender
+# imports next-auth/react, which builds new URL() from it, so an arg-less build
+# fails with TypeError: Invalid URL (found by this step the first time it ran).
+run_build web --target web -t pd-ci-web --build-arg NEXTAUTH_URL=http://localhost:3100 \
+  || { echo "docker build --target web FAILED — see /tmp/pd-ci-docker.log"; tail -20 /tmp/pd-ci-docker.log; exit 1; }
+run_build worker --target worker -t pd-ci-worker \
+  || { echo "docker build --target worker FAILED — see /tmp/pd-ci-docker.log"; tail -20 /tmp/pd-ci-docker.log; exit 1; }
+docker run --rm --entrypoint sh pd-ci-web -c '
+  set -e
+  test -e /app/public/templates
+  test -e /app/prisma/schema.prisma
+  test ! -e /app/public/public
+  test ! -e /app/prisma/prisma
+  test ! -e /app/docs
+  test ! -e /app/tests
+  test ! -e /app/e2e
+  test ! -e /app/Dockerfile
+  for f in /app/.env /app/.env.local /app/.env.production; do
+    if [ -e "$f" ]; then echo "dotenv in image: $f"; exit 1; fi
+  done
+  echo "web image shape OK"
+' || { echo "web image artifact assertion FAILED"; exit 1; }
 
 echo "[3/9] prisma generate + migrate"
 npx prisma generate >/dev/null

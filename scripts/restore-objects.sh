@@ -62,11 +62,15 @@ if [ "${RESTORE_DRILL_CONFIRM:-0}" != "1" ]; then
   exit 1
 fi
 
+# Same argv rule as scripts/backup-objects.sh: the bucket credentials go in
+# through the child environment (`-e VAR` with the value exported), never as
+# `-e VAR=value` in an argv every local account can read with `ps -ww`.
+export SRC_ENDPOINT SRC_ACCESS SRC_SECRET
 docker run --rm \
   --entrypoint /bin/sh \
-  -e SRC_ENDPOINT="$SRC_ENDPOINT" \
-  -e SRC_ACCESS="$SRC_ACCESS" \
-  -e SRC_SECRET="$SRC_SECRET" \
+  -e SRC_ENDPOINT \
+  -e SRC_ACCESS \
+  -e SRC_SECRET \
   -e SCRATCH_BUCKET="$SCRATCH_BUCKET" \
   -e SRC_COUNT="$SRC_COUNT" \
   -v "$SNAPSHOT:/snapshot:ro" \

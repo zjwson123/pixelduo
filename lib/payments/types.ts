@@ -59,8 +59,14 @@ export interface PaymentProvider {
   createCheckout(input: CreateCheckoutInput): Promise<CheckoutSession>;
   // null = invalid signature (reject). IGNORED_WEBHOOK = valid signature,
   // event type we don't handle (ack). Otherwise the parsed event.
+  //
+  // `clock` is the time the timestamp window is judged by — the route passes
+  // the DATABASE's clock (pass 26's doctrine: one clock, and it is the rows'),
+  // because a bad app/host clock otherwise rejects every genuine delivery as a
+  // forgery. Optional so direct callers and tests keep the app-clock default.
   verifyWebhook(
     rawBody: string,
     headers: Headers,
+    clock?: { nowSec: number },
   ): Promise<PaymentWebhookEvent | IgnoredWebhook | null>;
 }

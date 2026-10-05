@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { errorResponse, fail, ok, parseJsonBody, readBodyCapped, zodMessage } from "@/lib/api";
+import { enforceRateLimit, errorResponse, fail, ok, parseJsonBody, readBodyCapped, zodMessage } from "@/lib/api";
 import { rateLimit } from "@/lib/rate-limit";
 import { authenticateApiKey } from "@/lib/apikey";
 import { checkPrompt } from "@/lib/safety";
@@ -27,6 +27,12 @@ export const dynamic = "force-dynamic";
 // Auth via `Authorization: Bearer pd_live_…`
 export async function POST(req: Request) {
   try {
+    // The per-key bucket below can only key on a VALID key, so it never bounds
+    // the invalid-key flood — and the two lookups authenticateApiKey costs
+    // (ApiKey by hash, User by PK) ran before any limiter at all. Same shape as
+    // /api/files: an address leg first, for the caller with no credential yet.
+    const ipLimited = await enforceRateLimit(req, "v1-create", 60, 60_000);
+    if (ipLimited) return ipLimited;
     const auth = await authenticateApiKey(req);
     if (!auth) return errorResponse({ ok: false, error: "unauthorized" }, { status: 401 });
     if (!auth.emailVerified) {

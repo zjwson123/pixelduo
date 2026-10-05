@@ -290,6 +290,12 @@ describe("an authenticated route's budget is the account's, never the egress's",
       "app/api/health/route.ts",
       "app/api/register/route.ts",
       "app/api/webhooks/payment/route.ts",
+      // Public API: key-authenticated, not session-authenticated. The address
+      // leg runs BEFORE the key lookup — the per-key bucket cannot bound a
+      // flood of invalid keys, and these are the routes such a flood costs two
+      // DB lookups on (pass 27).
+      "app/api/v1/images/generations/route.ts",
+      "app/api/v1/images/generations/[id]/route.ts",
     ];
     const offenders: string[] = [];
     const walk = (dir: string) => {
@@ -390,8 +396,11 @@ describe("a failed database dump cannot masquerade as a good backup", () => {
       const loop = start === -1 ? "" : src.slice(start, end);
       // Pre-fix the loop was `pg_dump …; ls -1t … | xargs rm; echo written` — a
       // failing dump still rotated the old set (deleting a GOOD backup) and
-      // printed success, with the container showing "Up".
-      expect(loop).toMatch(/if pg_dump -Fc -f \$\$TMP; then/);
+      // printed success, with the container showing "Up". (`-d "$$PGDATABASE"`
+      // is pass 27's in docker-compose.yml only: that file builds DATABASE_URL
+      // from ${POSTGRES_DB}, so a literal name here stopped the dumps for any
+      // renamed database; single.yml pins the literal name throughout.)
+      expect(loop).toMatch(/if pg_dump -Fc(?: -d "\$\$PGDATABASE")? -f \$\$TMP; then/);
       expect(loop).toMatch(/mv \$\$TMP \/backups\/pixelduo-\$\$\{STAMP\}\.dump\.gz/);
       expect(loop).toMatch(/FAILED/);
       // The rotation must sit inside the success branch, after the rename.

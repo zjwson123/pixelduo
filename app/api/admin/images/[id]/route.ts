@@ -1,5 +1,5 @@
 import { requireAdmin } from "@/lib/admin";
-import { ok, fail, enforceUserRateLimit } from "@/lib/api";
+import { ok, fail, enforceUserRateLimit, refuseNul } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { getStorage } from "@/lib/storage";
 
@@ -8,6 +8,9 @@ import { getStorage } from "@/lib/storage";
 export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   try {
+    // %00 → U+0000 → SQLSTATE 22021 → masked 500 + captured incident; the
+    // sibling leg of pass 25's body/query NUL guards.
+    refuseNul(id);
     const adminId = await requireAdmin();
     const limited = await enforceUserRateLimit(adminId, "admin-image-delete", 60, 60_000);
     if (limited) return fail(limited);

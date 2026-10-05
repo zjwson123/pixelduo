@@ -356,7 +356,13 @@ services:
       PGHOST: db
       PGUSER: ${POSTGRES_USER:-pixelduo}
       PGPASSWORD: ${POSTGRES_PASSWORD:-pixelduo}
-      PGDATABASE: pixelduo
+      # Same variable that builds DATABASE_URL (see the db service above and
+      # .env.example's "change them for any shared environment"): a renamed
+      # database with a literal name here stopped every nightly dump with a
+      # line in `docker compose logs backup` as the only signal — no dump, no
+      # healthcheck, nothing alerts. `-d "$$PGDATABASE"` is explicit so the
+      # name comes from the environment, not PGDATABASE's implicit default.
+      PGDATABASE: ${POSTGRES_DB:-pixelduo}
       BACKUP_KEEP: ${BACKUP_KEEP:-14}
     volumes:
       - ./backups:/backups
@@ -366,7 +372,7 @@ services:
         chmod 700 /backups 2>/dev/null || true;
         STAMP=$$(date +%Y%m%d-%H%M%S);
         TMP=/backups/.pixelduo-$${STAMP}.partial;
-        if pg_dump -Fc -f $$TMP; then
+        if pg_dump -Fc -d "$$PGDATABASE" -f $$TMP; then
           mv $$TMP /backups/pixelduo-$${STAMP}.dump.gz;
           ls -1t /backups/pixelduo-*.dump.gz | tail -n +$$((BACKUP_KEEP + 1)) | xargs -r rm -f;
           echo "[backup] $$STAMP written, keeping $${BACKUP_KEEP}";

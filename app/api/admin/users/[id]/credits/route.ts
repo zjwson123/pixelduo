@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { requireAdmin } from "@/lib/admin";
-import { enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, zodMessage } from "@/lib/api";
+import { enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, refuseNul, zodMessage } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { adminGrantTx, adminClawbackTx } from "@/lib/ledger";
 
@@ -20,6 +20,9 @@ const schema = z.object({
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   try {
+    // %00 → U+0000 → SQLSTATE 22021 → masked 500 + captured incident; the
+    // sibling leg of pass 25's body/query NUL guards.
+    refuseNul(id);
     const adminId = await requireAdmin();
     // ACCOUNT-keyed (the acting admin), and the only leg: the per-IP one it
     // carried alongside refused admin work to every operator behind a shared

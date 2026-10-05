@@ -1,6 +1,7 @@
 import { createHmac, timingSafeEqual } from "crypto";
 import { Paddle, Environment } from "@paddle/paddle-node-sdk";
 import { isProductionRuntime } from "../runtime-env";
+import { captureError } from "../observability";
 import { IGNORED_WEBHOOK, type IgnoredWebhook, type PaymentWebhookEvent } from "./types";
 import type { CheckoutSession, CreateCheckoutInput, PaymentProvider } from "./types";
 
@@ -39,6 +40,16 @@ export class PaddleProvider implements PaymentProvider {
     // a deployment spelling NODE_ENV=staging take the sandbox path silently.
     if (isProductionRuntime() && !opts?.client && process.env.PADDLE_ENVIRONMENT !== "production") {
       throw new Error("PADDLE_ENVIRONMENT must be 'production' in production");
+    }
+    // The environment string alone does not prove the CREDENTIAL matches it: a
+    // sandbox key with PADDLE_ENVIRONMENT=production boots healthy and 500s
+    // every checkout at runtime, because the live API rejects the key — the
+    // "looks up, does not work" shape the Stripe gate above already refuses
+    // (sk_live_ check). Paddle Billing keys are `pdl_live_…` (live) and
+    // `pdl_sdbx_…` (sandbox); in production, anything that is not a live
+    // credential is refused at boot rather than at the first customer.
+    if (isProductionRuntime() && !opts?.client && key && !key.startsWith("pdl_live_")) {
+      throw new Error("PADDLE_API_KEY must be a live key (pdl_live_…) in production — sandbox keys only work with PADDLE_ENVIRONMENT=sandbox");
     }
     const secret = opts?.webhookSecret ?? process.env.PADDLE_WEBHOOK_SECRET;
     if (isProductionRuntime() && !opts?.client && !secret) {
@@ -81,6 +92,7 @@ export class PaddleProvider implements PaymentProvider {
   async verifyWebhook(
     rawBody: string,
     headers: Headers,
+    clock?: { nowSec: number },
   ): Promise<PaymentWebhookEvent | IgnoredWebhook | null> {
     const signature = headers.get("paddle-signature");
     if (!this.webhookSecret || !signature) return null;
@@ -92,13 +104,34 @@ export class PaddleProvider implements PaymentProvider {
     const ts = Number(parts.ts);
     const mac = parts.v1 ?? parts.h1;
     if (!Number.isFinite(ts) || !mac) return null;
-    if (Math.abs(Date.now() / 1000 - ts) > 300) return null;
     // Compare hex-to-hex: the signature carries the hex digest, so digest()
     // must be hex-encoded too or the byte lengths never match.
     const expectedHex = createHmac("sha256", this.webhookSecret).update(`${ts}:${rawBody}`).digest("hex");
     const a = Buffer.from(expectedHex, "utf8");
     const b = Buffer.from(mac, "utf8");
+    // MAC BEFORE the timestamp window, deliberately: the staleness report below
+    // must be reachable only for a payload whose signature actually verifies —
+    // otherwise any anonymous caller could make us capture incidents with junk.
     if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
+    // The replay window is judged on the clock the route handed us — the
+    // DATABASE's (pass 26's doctrine, see dbNow in lib/ledger), not this
+    // process's. On the app clock a host skewed by more than 5 minutes rejected
+    // EVERY genuine delivery as "invalid webhook signature": money taken,
+    // credits never granted, and a 400 the route deliberately does not report,
+    // so nothing anywhere said why. Fallback is the app clock, for direct
+    // callers and tests that pass no clock.
+    const nowSec = clock?.nowSec ?? Math.floor(Date.now() / 1000);
+    if (Math.abs(nowSec - ts) > 300) {
+      // Signature valid, timestamp outside the window: a clock fault, or a
+      // replay. Reported either way — during a fault this is every delivery,
+      // and an incident is the only signal that would ever name it.
+      captureError(
+        new Error(
+          `paddle-webhook-stale: signed delivery is ${Math.round(nowSec - ts)}s from the reference clock (5-minute window)`,
+        ),
+      );
+      return null;
+    }
 
     let parsed: { event_id?: string; event_type?: string; data?: Record<string, unknown> };
     try {

@@ -46,6 +46,7 @@ const INTERNAL_FORWARDED: Record<string, string> = {
   PGUSER: "postgres client's own variable (fed from POSTGRES_USER)",
   PGPASSWORD: "postgres client's own variable (fed from POSTGRES_PASSWORD)",
   PGDATABASE: "postgres client's own variable",
+  REDISCLI_AUTH: "redis-cli's own auth variable, fed from REDIS_PASSWORD for the healthcheck (pass 27 — the `-a` flag put the password in the probe's argv)",
   BACKUP_S3_ENDPOINT: "the backup service's own source-bucket wiring",
   BACKUP_S3_ACCESS_KEY_ID: "the backup service's own source-bucket wiring",
   BACKUP_S3_SECRET_ACCESS_KEY: "the backup service's own source-bucket wiring",

@@ -225,11 +225,19 @@ export async function claimNextJob(worker: string) {
       orderBy: { createdAt: "asc" },
     });
     if (!candidate) break;
-    const res = await prisma.job.updateMany({
-      where: { id: candidate.id, status: "queued", ...due },
-      data: { status: "running", worker, startedAt: new Date(), heartbeatAt: new Date() },
-    });
-    if (res.count === 1) return prisma.job.findUnique({ where: { id: candidate.id } });
+    // startedAt/heartbeatAt are stamped with the DATABASE's clock, not this
+    // process's: recoverStuckJobs decides "is this worker dead?" by comparing
+    // them with SQL now(), and with `--scale worker=3` the writer and the
+    // reaper are different processes, often different hosts — a fast-clocked
+    // reaper used to fail a live peer's job, and the retry re-billed the
+    // provider for the images the checkpoint had not reached yet. `due` keeps
+    // its own app clock: it is a scheduling predicate, not a liveness decision.
+    const res = await prisma.$executeRaw(Prisma.sql`
+      UPDATE "Job"
+         SET status = 'running', worker = ${worker}, "startedAt" = now(), "heartbeatAt" = now()
+       WHERE id = ${candidate.id} AND status = 'queued'
+         AND ("nextAttemptAt" IS NULL OR "nextAttemptAt" <= ${now})`);
+    if (res === 1) return prisma.job.findUnique({ where: { id: candidate.id } });
   }
 
   // 2. Async (video) tasks due for a poll. Status stays "polling"; the CAS
@@ -241,20 +249,27 @@ export async function claimNextJob(worker: string) {
       orderBy: { nextAttemptAt: "asc" },
     });
     if (!candidate) return null;
-    const res = await prisma.job.updateMany({
-      where: { id: candidate.id, status: "polling", ...due },
-      data: { worker, heartbeatAt: new Date(), nextAttemptAt: new Date(Date.now() + POLL_LEASE_MS) },
-    });
-    if (res.count === 1) return prisma.job.findUnique({ where: { id: candidate.id } });
+    // Same clock split as above: heartbeatAt is the reaper's input (database
+    // clock); nextAttemptAt is the poll scheduler's (app clock, written and
+    // read by the same claim path).
+    const res = await prisma.$executeRaw(Prisma.sql`
+      UPDATE "Job"
+         SET worker = ${worker}, "heartbeatAt" = now(),
+             "nextAttemptAt" = ${new Date(Date.now() + POLL_LEASE_MS)}
+       WHERE id = ${candidate.id} AND status = 'polling'
+         AND ("nextAttemptAt" IS NULL OR "nextAttemptAt" <= ${now})`);
+    if (res === 1) return prisma.job.findUnique({ where: { id: candidate.id } });
   }
   return null;
 }
 
 export async function heartbeat(jobId: string) {
-  await prisma.job.updateMany({
-    where: { id: jobId, status: { in: ["running", "polling"] } },
-    data: { heartbeatAt: new Date() },
-  });
+  // Database clock: recoverStuckJobs compares heartbeatAt against SQL now()
+  // (see claimNextJob) — a heartbeat stamped by this process's clock would
+  // reintroduce the peer-skew reap this conversion removes.
+  await prisma.$executeRaw(Prisma.sql`
+    UPDATE "Job" SET "heartbeatAt" = now()
+     WHERE id = ${jobId} AND status IN ('running', 'polling')`);
 }
 
 function backoffMs(attempts: number): number {
@@ -477,18 +492,24 @@ export async function checkpointJobArtifact(
 // cutoff than for running (image) jobs so a slow provider doesn't get
 // reaped mid-poll. schedulePoll refreshes heartbeatAt on every tick, so
 // a live worker's polling job never approaches this threshold.
+//
+// The cutoff is computed and compared IN SQL, on the database's clock — the
+// one the heartbeat writes use (see claimNextJob/setJobPolling). This used to
+// be `Date.now() - maxAgeMs` against heartbeats written by whichever worker
+// held the job: with `--scale worker=3` those are different processes, often
+// different hosts, so one worker's clock being fast by more than the cutoff
+// made it reap a LIVE peer's job. The re-claim that follows re-runs the lane,
+// and for the image lane the provider is billed again for every image the
+// checkpoint had not reached yet. The cutoffs are still passed in as ms.
 export async function recoverStuckJobs(maxAgeMs = 180_000, pollMaxAgeMs = 600_000): Promise<number> {
-  const cutoff = new Date(Date.now() - maxAgeMs);
-  const pollCutoff = new Date(Date.now() - pollMaxAgeMs);
-  const stuck = await prisma.job.findMany({
-    where: {
-      OR: [
-        { status: "running", OR: [{ heartbeatAt: null, startedAt: { lte: cutoff } }, { heartbeatAt: { lte: cutoff } }] },
-        { status: "polling", OR: [{ heartbeatAt: null, startedAt: { lte: pollCutoff } }, { heartbeatAt: { lte: pollCutoff } }] },
-      ],
-    },
-    take: 20,
-  });
+  const stuck = await prisma.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+    SELECT id FROM "Job"
+     WHERE (status = 'running'
+            AND EXTRACT(EPOCH FROM (now() - COALESCE("heartbeatAt", "startedAt"))) * 1000 > ${maxAgeMs})
+        OR (status = 'polling'
+            AND EXTRACT(EPOCH FROM (now() - COALESCE("heartbeatAt", "startedAt"))) * 1000 > ${pollMaxAgeMs})
+     ORDER BY id
+     LIMIT 20`);
   for (const job of stuck) {
     await failJob(job.id, "stuck-timeout: worker heartbeat expired");
   }
@@ -579,30 +600,27 @@ export async function completeJob(jobId: string, images: JobImage[]) {
 // which the CAS below still matches, so its task id is recorded normally and
 // the next claim polls the existing task instead of creating a second one.)
 export async function setJobPolling(jobId: string, providerTaskId: string): Promise<boolean> {
-  const claim = await prisma.job.updateMany({
-    where: { id: jobId, status: { in: ["running", "queued"] } },
-    data: {
-      status: "polling",
-      providerTaskId,
-      // The clock the 30-minute cap runs on (scripts/worker.ts). Stamped with
-      // the task, not the job: a job that waited 25 minutes for a worker slot
-      // used to spend that wait out of the polling budget, so the task was
-      // billed at minute 25 and killed at minute 30.
-      taskCreatedAt: new Date(),
-      heartbeatAt: new Date(),
-      nextAttemptAt: new Date(Date.now() + POLL_INTERVAL_MS),
-    },
-  });
-  return claim.count === 1;
+  // Mixed clocks on purpose: heartbeatAt is the reaper's input and goes on the
+  // DATABASE's clock (see recoverStuckJobs); taskCreatedAt is the 30-minute
+  // budget's input and stays on THIS process's clock because scripts/worker.ts
+  // compares it against its own Date.now() — one budget, one timeline.
+  const claim = await prisma.$executeRaw(Prisma.sql`
+    UPDATE "Job"
+       SET status = 'polling', "providerTaskId" = ${providerTaskId},
+           "taskCreatedAt" = ${new Date()}, "heartbeatAt" = now(),
+           "nextAttemptAt" = ${new Date(Date.now() + POLL_INTERVAL_MS)}
+     WHERE id = ${jobId} AND status IN ('running', 'queued')`);
+  return claim === 1;
 }
 
 // Keep polling: task still pending/running upstream. Re-arms nextAttemptAt
 // and refreshes the heartbeat so recoverStuckJobs doesn't reap an active task.
 export async function schedulePoll(jobId: string, delayMs = POLL_INTERVAL_MS) {
-  await prisma.job.updateMany({
-    where: { id: jobId, status: { in: ["running", "polling", "queued"] } },
-    data: { status: "polling", heartbeatAt: new Date(), nextAttemptAt: new Date(Date.now() + delayMs) },
-  });
+  await prisma.$executeRaw(Prisma.sql`
+    UPDATE "Job"
+       SET status = 'polling', "heartbeatAt" = now(),
+           "nextAttemptAt" = ${new Date(Date.now() + delayMs)}
+     WHERE id = ${jobId} AND status IN ('running', 'polling', 'queued')`);
 }
 
 export async function getJobForUser(userId: string, jobId: string) {

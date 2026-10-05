@@ -161,9 +161,16 @@ describe("registration → email verification", () => {
 
 describe("password reset", () => {
   it("sends a reset token and changes the password once", async () => {
-    // forget-password always returns ok, even for unknown accounts.
+    // forget-password always returns ok, even for unknown accounts. The address
+    // is per-run unique: the route charges its per-ADDRESS bucket (5/15min,
+    // uniform for unknown addresses so there is no existence oracle) and a
+    // fixed one answered 429 by the second `npm test` inside the window — which
+    // reads as "no .sent" and looks like a code failure. (The per-run IP octet
+    // at the top of the file fixes the same problem on the address leg.)
     const missing = await forgotPOST(
-      jsonRequest("http://localhost/api/auth/forgot-password", { email: "nobody@authflow.test" }),
+      jsonRequest("http://localhost/api/auth/forgot-password", {
+        email: `nobody-${Date.now()}@authflow.test`,
+      }),
     );
     expect((await missing.json()).sent).toBe(true);
 

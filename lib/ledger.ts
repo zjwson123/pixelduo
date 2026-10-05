@@ -402,7 +402,18 @@ async function writeOffExcessTx(
   target: number,
   reason: string,
 ): Promise<void> {
-  if (target >= held) return;
+  // `held` is the caller's view, used for the early-out and the log. The ROW is
+  // re-read before arithmetic: the balance delta below is derived from what the
+  // row actually holds, and callers can hold a snapshot rather than the current
+  // value (two consumption rows naming one grant — see heldPerGrant in
+  // refundCreditsTx). A stale value here would drop User.credits below
+  // SUM(remaining) silently: every row-side write stays in the CHECK's range, so
+  // nothing fires, and the account answers insufficient-credits to spends it can
+  // afford. The FOR UPDATE lock is already held, so the re-read sees this
+  // transaction's own earlier writes.
+  const fresh = await tx.creditGrant.findUnique({ where: { id: grantId }, select: { remaining: true } });
+  const current = fresh?.remaining ?? held;
+  if (target >= current) return;
   // The balance comes down by exactly as much as the row does, or
   // credits == SUM(remaining) breaks in the other direction. Reading the column
   // (instead of assuming it equals the rows' sum) keeps the ledger arithmetic
@@ -412,7 +423,7 @@ async function writeOffExcessTx(
   const user = await tx.user.findUnique({ where: { id: userId }, select: { credits: true } });
   if (!user) throw new Error("user-not-found");
   await tx.creditGrant.update({ where: { id: grantId }, data: { remaining: target } });
-  const delta = Math.max(target - held, -user.credits);
+  const delta = Math.max(target - current, -user.credits);
   await addCreditsTx(
     tx,
     userId,
@@ -420,10 +431,10 @@ async function writeOffExcessTx(
     delta,
     "grant",
     grantId,
-    `credit invariant repair on touch: grant ${grantId} held ${held} credits for a grant of ${cap}, and a row above its own amount cannot be written any more (CHECK) — the unbacked excess was written off (${reason})`,
+    `credit invariant repair on touch: grant ${grantId} held ${current} credits for a grant of ${cap}, and a row above its own amount cannot be written any more (CHECK) — the unbacked excess was written off (${reason})`,
   );
   console.warn(
-    `[ledger] wrote off ${held - target} unbacked credit(s) from grant ${grantId} (held ${held} of ${cap}) for user ${userId} — ${reason}`,
+    `[ledger] wrote off ${current - target} unbacked credit(s) from grant ${grantId} (held ${current} of ${cap}) for user ${userId} — ${reason}`,
   );
 }
 
@@ -624,6 +635,17 @@ export async function refundCreditsTx(
   // name the same grant, and a stale read of `remaining` would let the second
   // increment cross `amount` even though the first one was checked.
   const restoredPerGrant = new Map<string, number>();
+  // What this call has left the row HOLDING, per grant. `rows` is the FOR
+  // UPDATE snapshot from the top of the transaction; a second consumption row
+  // for the same grant judged against that snapshot would both mis-decide (a
+  // row that held > amount at lock time reads over-cap even after the first
+  // iteration already brought it back to `amount`) and mis-arithmetic — the
+  // write-off's balance delta is derived from the value it is handed, and a
+  // stale one drops User.credits below SUM(remaining). That drift is silent:
+  // every row-side write stays in range so the CHECK never fires, and the
+  // account simply answers insufficient-credits to spends it can afford, until
+  // scripts/repair-credit-invariant.ts runs.
+  const heldPerGrant = new Map<string, number>();
   for (const c of consumption) {
     const row = rows.find((r) => r.id === c.grantId);
     // A vanished grant has no provenance left to inherit — fall back to the
@@ -690,7 +712,7 @@ export async function refundCreditsTx(
     //    already refunded (or predates grant tracking). No excess exists to
     //    write off, and minting here would be free credits: keep refusing.
     const cap = row ? row.amount : null;
-    const held = row ? row.remaining : null;
+    const held = row ? (heldPerGrant.get(c.grantId) ?? row.remaining) : null;
     const restoring = restoredPerGrant.get(c.grantId) ?? 0;
     if (cap !== null && held !== null && held + restoring + c.amount > cap) {
       if (held > cap && cap >= restoring + c.amount) {
@@ -709,6 +731,7 @@ export async function refundCreditsTx(
           target,
           "refund of a failing job needed the room",
         );
+        heldPerGrant.set(c.grantId, target);
       } else {
         // Either the row is legitimately at its cap — this consumption was
         // already refunded, and minting here would be free credits — or it is a
@@ -726,6 +749,7 @@ export async function refundCreditsTx(
             0,
             `row smaller than the refund (amount ${cap}, restoring ${c.amount})`,
           );
+          heldPerGrant.set(c.grantId, 0);
         }
         console.warn(
           `[ledger] refund of ${c.amount} credit(s) refused by grant ${c.grantId}: it holds ${held}/${cap} and the invariant forbids remaining > amount — not restored (user ${userId}); run scripts/repair-credit-invariant.ts --fix`,
@@ -739,6 +763,12 @@ export async function refundCreditsTx(
       where: { id: c.grantId },
       data: { remaining: { increment: c.amount } },
     });
+    // The map's value is the row's current holding, so it must come from what
+    // the write-off LEFT (if this iteration ran one) — not from `held`, which
+    // is the pre-write-off value: tracking that would make the next occurrence
+    // read an inflated row and take the write-off branch again, destroying the
+    // customer's BACKED credits while keeping credits == SUM(remaining) intact.
+    heldPerGrant.set(c.grantId, (heldPerGrant.get(c.grantId) ?? held ?? row.remaining) + c.amount);
   }
   for (const bucket of expiredByRef.values()) {
     await tx.creditGrant.create({

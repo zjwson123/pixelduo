@@ -16,7 +16,11 @@ x-appenv: &appenv
   STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
   STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
   PADDLE_API_KEY: ${PADDLE_API_KEY:-}
-  PADDLE_ENVIRONMENT: ${PADDLE_ENVIRONMENT:-production}
+  # Fail-closed default, same as docker-compose.prod.yml: a Paddle deployment
+  # must state PADDLE_ENVIRONMENT=production explicitly (docs/deploy.md does).
+  # The old `:-production` default quietly paired an unset variable with a
+  # sandbox key — the app booted and every checkout 500'd at the provider.
+  PADDLE_ENVIRONMENT: ${PADDLE_ENVIRONMENT:-sandbox}
   PADDLE_WEBHOOK_SECRET: ${PADDLE_WEBHOOK_SECRET:-}
   # Checkout return URLs. Named by docker-compose.yml and docker-compose.prod.yml
   # but not by this anchor, so an operator who set them (documented in
@@ -216,9 +220,17 @@ services:
   redis:
     image: redis:7-alpine
     command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD}"]
+    environment:
+      # redis-cli takes its auth from REDISCLI_AUTH. The healthcheck used to
+      # pass `-a ${REDIS_PASSWORD}`, which put the password into the probe's
+      # argv every 5 seconds — world-readable on the host via `ps -ww`. The
+      # server's own --requirepass stays in argv deliberately: this image's
+      # entrypoint ignores REDIS_ARGS (probed: the server came up WITHOUT auth),
+      # so moving it would silently disable authentication.
+      REDISCLI_AUTH: ${REDIS_PASSWORD:?set REDIS_PASSWORD}
     volumes: [redisdata:/data]
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 10

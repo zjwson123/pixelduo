@@ -336,8 +336,17 @@ export async function processVideoJob(job: {
     // wait (30 minutes) instead. That guard sits ABOVE phase 1 deliberately —
     // checked only in phase 2, a job that had already waited out its budget
     // still created (and paid for) a task that the very next poll threw away.
+    //
+    // Each half is judged on the clock that stamped it: taskCreatedAt is THIS
+    // process's write (setJobPolling) so app-vs-app is one timeline, while
+    // createdAt carries the DATABASE's default (CURRENT_TIMESTAMP) and is
+    // compared against the database's clock like every other money decision
+    // (pass 26). On `Date.now()` an app clock ahead of the database's failed a
+    // queued job before its FIRST provider call — the paid feature refused with
+    // a message blaming a provider timeout that never happened.
     const budgetFrom = job.taskCreatedAt ?? job.createdAt;
-    if (Date.now() - new Date(budgetFrom).getTime() > VIDEO_HARD_TIMEOUT_MS) {
+    const budgetNow = job.taskCreatedAt ? Date.now() : (await dbNow(prisma)).getTime();
+    if (budgetNow - new Date(budgetFrom).getTime() > VIDEO_HARD_TIMEOUT_MS) {
       const msg = "video-timeout: task exceeded 30 minutes";
       await failJob(job.id, msg, { terminal: true });
       console.error(

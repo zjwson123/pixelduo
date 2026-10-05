@@ -31,6 +31,8 @@ cp .env.example .env.production
 #   MODELVERSE_IMAGE_API_KEY / ARK_IMAGE_API_KEY / DEEPSEEK_API_KEY
 #   VISION_MODERATION_API_KEY（+ BASE_URL，若不走默认网关）
 #   PAYMENT_PROVIDER=stripe|paddle + 对应 key / webhook secret
+#   （Paddle 时还须 PADDLE_ENVIRONMENT=production；.env.example 的 sandbox 值
+#     会让生产启动被拒——这是故意的，防沙箱密钥误用于线上）
 #   SMTP_URL / EMAIL_FROM
 #   SENTRY_DSN（可选）
 set -a; source .env.production; set +a

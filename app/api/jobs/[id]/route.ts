@@ -1,4 +1,4 @@
-import { requireUserId, ok, fail, enforceUserRateLimit } from "@/lib/api";
+import { requireUserId, ok, fail, enforceUserRateLimit, refuseNul } from "@/lib/api";
 import { deliveredVideoSeconds, getJobForUser } from "@/lib/queue";
 import { serveUserUrl } from "@/lib/store";
 
@@ -8,6 +8,10 @@ import { serveUserUrl } from "@/lib/store";
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   try {
+    // Path params are the sibling leg of pass 25's body/query NUL guards:
+    // `/api/jobs/x%00y` decodes to a real U+0000, the Prisma lookup dies with
+    // SQLSTATE 22021, and fail() masks that as a 500 plus a captured incident.
+    refuseNul(id);
     const userId = await requireUserId();
     const limited = await enforceUserRateLimit(userId, "jobs-get", 600, 60_000);
     if (limited) return fail(limited);

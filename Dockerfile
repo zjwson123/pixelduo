@@ -21,9 +21,16 @@ ENV NEXT_TELEMETRY_DISABLED=1
 # every static page. Without it `next build` writes the http://localhost:3000
 # fallback, so a deployment served share previews pointing at the operator's own
 # machine. It can only arrive as a build ARG: `.dockerignore` deliberately keeps
-# `.env*` out of the build context. Untyped/optional — robots.txt and sitemap.xml
-# read the same value at REQUEST time instead (lib/site.ts), so an unset arg
-# degrades those two rather than the build.
+# `.env*` out of the build context.
+#
+# REQUIRED in practice, and the empty default is what makes that loud: the /login
+# prerender imports next-auth/react, which builds `new URL(NEXTAUTH_URL)`, so a
+# build with no argument fails with `TypeError: Invalid URL` instead of shipping
+# an image whose share previews point at localhost. (Pass 19's bug was the silent
+# version of this; pass 27 discovered the loud one when the pipeline started
+# building this stage — `docker build --target web .` without the arg fails.)
+# The compose files pass it from the same variable their runtime anchors require;
+# the pipeline passes it explicitly.
 ARG NEXTAUTH_URL=""
 ENV NEXTAUTH_URL=$NEXTAUTH_URL
 # The browser-side Sentry DSN is a BUILD-time value too (instrumentation-client.ts
@@ -87,16 +94,26 @@ ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1
 #
 # chown -R at the end because a bind-mount copy brings the builder stage's
 # root:root along; the app runs as `node` (see USER below).
+#
+# The `/.` suffix on the public/ and prisma/ copies is load-bearing: the
+# standalone tree already contains both directories (Next traces them), and
+# `cp -a SRC DST` with DST already existing copies SRC *into* it — producing
+# public/public and prisma/prisma, ~13 MB of duplicated layer content plus a
+# second URL space where the landing assets resolve again. Docker's `COPY`
+# merged directory contents, which is what the pre-pass25 shape did; `SRC/.`
+# restores exactly that, and it also creates DST when a future standalone tree
+# does NOT trace the directory, so both shapes stay correct.
 RUN --mount=type=bind,from=builder,source=/app,target=/b \
     cp -a /b/.next/standalone/. ./ \
  && mkdir -p ./.next \
  && cp -a /b/.next/static ./.next/static \
- && cp -a /b/public ./public \
- && cp -a /b/prisma ./prisma \
+ && cp -a /b/public/. ./public \
+ && cp -a /b/prisma/. ./prisma \
  && rm -rf \
       .env .env.* \
       docs tests e2e designs data backups public/generated perf \
       ./*.md docker-compose*.yml Caddyfile Dockerfile \
+      *.db *.db-journal prisma/*.db prisma/*.db-journal \
       ./*.tsbuildinfo \
  && chown -R node:node /app
 # Never run as root: a compromise (sharp/libvips, a dependency) must not get
@@ -122,6 +139,7 @@ RUN --mount=type=bind,source=.,target=/ctx \
       .env .env.* \
       docs tests e2e designs data backups public/generated public/showcase perf \
       ./*.md docker-compose*.yml Caddyfile Dockerfile \
+      *.db *.db-journal prisma/*.db prisma/*.db-journal \
       ./*.tsbuildinfo \
  && chown -R node:node /app
 RUN npx prisma generate

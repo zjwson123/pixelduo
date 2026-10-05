@@ -1,6 +1,6 @@
 import { Prisma } from "@prisma/client";
 import { ADMIN_GUARD_LOCK, assertAnotherAdminRemains, requireAdmin } from "@/lib/admin";
-import { ok, fail, enforceUserRateLimit } from "@/lib/api";
+import { ok, fail, enforceUserRateLimit, refuseNul } from "@/lib/api";
 import { prisma, withDeadlockRetry } from "@/lib/prisma";
 import { GRANT_LOCK_ORDER } from "@/lib/ledger";
 import { deleteObjectsBounded } from "@/lib/storage";
@@ -10,6 +10,9 @@ import { checkpointKeys } from "@/lib/queue";
 export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   try {
+    // %00 → U+0000 → SQLSTATE 22021 → masked 500 + captured incident; the
+    // sibling leg of pass 25's body/query NUL guards.
+    refuseNul(id);
     const adminId = await requireAdmin();
     // Account-keyed leg: the destructive admin routes had only middleware's
     // coarse 300/min, so a stolen admin session could delete 300 accounts a

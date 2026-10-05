@@ -2,7 +2,7 @@ import { ok, fail, enforceRateLimit, readBodyCapped } from "@/lib/api";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { rateLimit } from "@/lib/rate-limit";
-import { fulfillOrder, revokeOrderCreditsTx, revokePlanEntitlementTx } from "@/lib/ledger";
+import { fulfillOrder, revokeOrderCreditsTx, revokePlanEntitlementTx, dbNow } from "@/lib/ledger";
 import { getPaymentProvider } from "@/lib/payments";
 import { sanitizeWebhookPayload } from "@/lib/payments/sanitize";
 import { sendOrderReceiptEmail, sendRefundEmail } from "@/lib/mail";
@@ -71,7 +71,13 @@ export async function POST(req: Request) {
     const bodyRaw = await readBodyCapped(req, WEBHOOK_MAX_BYTES);
     if ("tooLarge" in bodyRaw) return new NextResponse("payload too large", { status: 413 });
     const raw = bodyRaw.raw;
-    const event = await getPaymentProvider().verifyWebhook(raw, req.headers);
+    // The signature's timestamp window is judged on the DATABASE's clock — the
+    // one every other money decision uses (pass 26). On the app clock, a host
+    // skewed by more than the window rejected EVERY genuine delivery as an
+    // invalid signature; this route answers that 400 without reporting, so the
+    // fault surfaced only as paid orders whose credits never arrived.
+    const nowSec = Math.floor((await dbNow(prisma)).getTime() / 1000);
+    const event = await getPaymentProvider().verifyWebhook(raw, req.headers, { nowSec });
     // null = the signature did not verify (reject). A signed event we don't
     // act on must be ACKed, not 400'd: providers retry "failed" deliveries for
     // days and can disable the endpoint over them, which would stop the paid

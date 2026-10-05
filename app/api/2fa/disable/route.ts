@@ -75,10 +75,14 @@ export async function POST(req: Request) {
           totpEnabled: false,
           // Turning the second factor OFF is a security downgrade, and it was
           // the only such transition that revoked nothing: sessions minted
-          // while 2FA was on stayed valid, and API keys survive sessionVersion
-          // bumps entirely (authenticateApiKey never reads it), so a pd_live_
-          // key kept working against an account the user believed was still
-          // protected. Mirrors 2fa/confirm, reset-password and revoke-sessions.
+          // while 2FA was on stayed valid, and a pd_live_ key kept working
+          // against an account the user believed was still protected. (At the
+          // time this was written, keys survived sessionVersion bumps entirely;
+          // pass 25 later gave ApiKey a sessionVersion stamp that
+          // authenticateApiKey compares, so the bump now also kills keys
+          // atomically — this explicit revoke stays as the immediate,
+          // row-visible half.) Mirrors 2fa/confirm, reset-password and
+          // revoke-sessions.
           sessionVersion: { increment: 1 },
         },
       }),

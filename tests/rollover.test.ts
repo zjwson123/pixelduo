@@ -36,12 +36,18 @@ afterAll(async () => {
 
 describe("subscription carryover and downgrade", () => {
   it("carries 30% of unused quota into the new cycle on renewal after expiry", async () => {
-    // Grant a Pro cycle, then force it to be due (ended yesterday).
+    // Grant a Pro cycle, then force it to be due (ended yesterday). The value is
+    // kept and handed to cycleUsage below: its comparison runs on the DATABASE's
+    // clock (pass 26), so a host-clock `new Date()` anchor taken moments before
+    // is "in the past" only while the two clocks agree to the millisecond
+    // (measured 0-1ms margins; Docker Desktop's VM clock lags after a host
+    // sleep). A day back is unambiguous, and it is what production passes.
     const first = await makeOrder("plan", 2000, "pro");
     await fulfillOrder(userId, first.id, "plan", 2000, "pro");
+    const cycleEnd = new Date(Date.now() - 1000 * 60 * 60 * 24);
     await prisma.user.update({
       where: { id: userId },
-      data: { planRenewsAt: new Date(Date.now() - 1000 * 60 * 60 * 24) },
+      data: { planRenewsAt: cycleEnd },
     });
 
     // Spend 482 credits inside the ended cycle (57 medium + 1 high).
@@ -56,9 +62,8 @@ describe("subscription carryover and downgrade", () => {
     }
     await spend("high", "h");
 
-    // cycleUsage takes the cycle's ANCHOR (its end). The tests rewind
-    // planRenewsAt into the past, so "now" is the anchor of the ended cycle.
-    const usage = await cycleUsage(userId, new Date());
+    // cycleUsage takes the cycle's ANCHOR (its end) — the rewound value.
+    const usage = await cycleUsage(userId, cycleEnd);
     expect(usage).toMatchObject({ granted: 2000, spentNet: 482, revoked: 0, fundingRefId: first.id });
     // The anchor's second source: the funding grant's own expiry, which is what
     // a renewal reads once the daily downgrade sweep has nulled planRenewsAt

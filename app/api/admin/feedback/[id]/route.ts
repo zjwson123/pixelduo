@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, zodMessage } from "@/lib/api";
+import { enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, refuseNul, zodMessage } from "@/lib/api";
 import { requireAdmin } from "@/lib/admin";
 import { prisma } from "@/lib/prisma";
 
@@ -11,6 +11,9 @@ const schema = z.object({ status: z.enum(["new", "done"]) });
 export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   try {
+    // %00 → U+0000 → SQLSTATE 22021 → masked 500 + captured incident; the
+    // sibling leg of pass 25's body/query NUL guards.
+    refuseNul(id);
     const adminId = await requireAdmin();
     const limited = await enforceUserRateLimit(adminId, "admin-feedback-write", 60, 60_000);
     if (limited) return fail(limited);

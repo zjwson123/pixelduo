@@ -202,10 +202,17 @@ describe("carryover ignores clawed-back quota", () => {
       },
     });
     await fulfillOrder(userId, order.id, "plan", 2000, "pro");
-    // Force the cycle to have ended.
+    // Force the cycle to have ended. The value is kept and handed to cycleUsage
+    // below rather than passing `new Date()`: the comparison inside runs on the
+    // DATABASE's clock (pass 26), and a host-clock anchor taken moments before
+    // is "in the past" only while the two clocks agree to the millisecond —
+    // measured margins of 0-1ms, and Docker Desktop's VM clock lags after a
+    // host sleep (see vitest.setup). This stored value is a minute in the past
+    // on any clock, and it is exactly what production passes.
+    const cycleEnd = new Date(Date.now() - 60_000);
     await prisma.user.update({
       where: { id: userId },
-      data: { planRenewsAt: new Date(Date.now() - 60_000) },
+      data: { planRenewsAt: cycleEnd },
     });
 
     // Full refund of that cycle: the quota is clawed back entirely.
@@ -215,9 +222,9 @@ describe("carryover ignores clawed-back quota", () => {
     });
     expect(revoked).toBe(2000);
 
-    // cycleUsage takes the cycle's ANCHOR (its end). The tests rewind
-    // planRenewsAt into the past, so "now" is the anchor of the ended cycle.
-    const usage = await cycleUsage(userId, new Date());
+    // cycleUsage takes the cycle's ANCHOR (its end) — the value the setup
+    // rewound, not this process's clock (see the note at the first rewind).
+    const usage = await cycleUsage(userId, cycleEnd);
     expect(usage.revoked).toBe(2000);
     // Nothing was actually used, but nothing was kept either.
     expect(Math.max(0, usage.granted - usage.spentNet - usage.revoked)).toBe(0);
@@ -263,9 +270,12 @@ describe("carryover ignores clawed-back quota", () => {
       },
     });
     await fulfillOrder(userId, planOrder.id, "plan", 2000, "pro");
+    // Same anchor rule as the test above: hand cycleUsage the value the setup
+    // rewound (its comparison runs on the DATABASE's clock), not `new Date()`.
+    const cycleEnd = new Date(Date.now() - 60_000);
     await prisma.user.update({
       where: { id: userId },
-      data: { planRenewsAt: new Date(Date.now() - 60_000) },
+      data: { planRenewsAt: cycleEnd },
     });
 
     // An unrelated pack bought in the same cycle, then fully refunded.
@@ -276,9 +286,8 @@ describe("carryover ignores clawed-back quota", () => {
     });
     expect(revoked).toBe(6000);
 
-    // cycleUsage takes the cycle's ANCHOR (its end). The tests rewind
-    // planRenewsAt into the past, so "now" is the anchor of the ended cycle.
-    const usage = await cycleUsage(userId, new Date());
+    // cycleUsage takes the cycle's ANCHOR (its end) — the rewound value.
+    const usage = await cycleUsage(userId, cycleEnd);
     expect(usage.granted).toBe(2000);
     expect(usage.spentNet).toBe(0);
     expect(usage.revoked).toBe(0); // the pack clawback is NOT plan quota
