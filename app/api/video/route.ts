@@ -127,9 +127,14 @@ export async function POST(req: Request) {
       //
       // And the same rule about the type: it comes from the BYTES, not from the
       // data URL's declared media type. `newStorageKey("png")` + "image/png"
-      // labelled a JPEG/WebP first frame a PNG — and Ark FETCHES this object from
-      // a presigned URL whose Content-Type is exactly that label, so a mismatch
-      // is a rejected (and billed) video task.
+      // labelled a JPEG/WebP first frame a PNG — the label every later reader
+      // of this object inherits: /api/files serves it under the sniffed type,
+      // the S3 driver records it at PUT (so a presigned URL hands it back), and
+      // the worker inlines the bytes to the provider as a data URL whose type
+      // is sniffed again (lib/providers refImageDataUrl — the i2v path no
+      // longer has Ark fetch this object; this comment used to describe that
+      // older mechanism). A mismatch anywhere on that chain is a rejected (and
+      // billed) task.
       const storage = getStorage();
       let result: Awaited<ReturnType<typeof createMediaJob>>;
       try {

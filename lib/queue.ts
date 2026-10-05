@@ -1,7 +1,8 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "./prisma";
 import { estimateGenerationCost, estimateModelCost, type ModelId, type Quality } from "./cost";
-import { addCreditsTx, spendCreditsTx, refundCreditsTx, type SpendConsumption } from "./ledger";
+import { addCreditsTx, spendCreditsTx, refundCreditsTx, dbNow, type SpendConsumption } from "./ledger";
+import { captureError } from "./observability";
 import { getModel } from "./model-registry";
 import { getStorage } from "./storage";
 
@@ -207,7 +208,18 @@ export const POLL_INTERVAL_MS = 10_000;
 export const POLL_LEASE_MS = 6 * 60_000;
 
 export async function claimNextJob(worker: string) {
-  const now = new Date();
+  // The DATABASE's clock, not this process's. Every nextAttemptAt this
+  // predicate compares against was written by whichever worker last touched
+  // the job — failJob's backoff park, setJobPolling's first poll delay,
+  // schedulePoll's re-arm, a peer's poll lease — and with `--scale worker=3`
+  // that is routinely another process, often another host. On the app clock a
+  // fast reader ate a peer's exponential backoff (three attempts in seconds,
+  // so the transient outage the spacing exists for ended as a terminal failure
+  // plus a provider re-bill for the images the checkpoint had not reached) and
+  // a slow one skipped jobs for as long as the skew lasted. Same rule as
+  // heartbeatAt below and recoverStuckJobs: anything a peer reads is stamped
+  // and compared against SQL now().
+  const now = await dbNow(prisma);
   const due = { OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }] };
 
   // 1. Fresh/retried jobs (queued → running, atomic via status CAS). The CAS
@@ -230,8 +242,9 @@ export async function claimNextJob(worker: string) {
     // them with SQL now(), and with `--scale worker=3` the writer and the
     // reaper are different processes, often different hosts — a fast-clocked
     // reaper used to fail a live peer's job, and the retry re-billed the
-    // provider for the images the checkpoint had not reached yet. `due` keeps
-    // its own app clock: it is a scheduling predicate, not a liveness decision.
+    // provider for the images the checkpoint had not reached yet. `due` (and
+    // the predicate below) runs on the same database clock for the same
+    // reason: nextAttemptAt is a peer's write.
     const res = await prisma.$executeRaw(Prisma.sql`
       UPDATE "Job"
          SET status = 'running', worker = ${worker}, "startedAt" = now(), "heartbeatAt" = now()
@@ -249,13 +262,13 @@ export async function claimNextJob(worker: string) {
       orderBy: { nextAttemptAt: "asc" },
     });
     if (!candidate) return null;
-    // Same clock split as above: heartbeatAt is the reaper's input (database
-    // clock); nextAttemptAt is the poll scheduler's (app clock, written and
-    // read by the same claim path).
+    // heartbeatAt and the lease are both the database's clock (see above): the
+    // lease is re-read by whichever worker claims the next poll, and by this
+    // predicate.
     const res = await prisma.$executeRaw(Prisma.sql`
       UPDATE "Job"
          SET worker = ${worker}, "heartbeatAt" = now(),
-             "nextAttemptAt" = ${new Date(Date.now() + POLL_LEASE_MS)}
+             "nextAttemptAt" = ${new Date(now.getTime() + POLL_LEASE_MS)}
        WHERE id = ${candidate.id} AND status = 'polling'
          AND ("nextAttemptAt" IS NULL OR "nextAttemptAt" <= ${now})`);
     if (res === 1) return prisma.job.findUnique({ where: { id: candidate.id } });
@@ -287,13 +300,18 @@ export async function failJob(jobId: string, error: string, opts?: { terminal?: 
       // The status predicate is the compare-and-set: if another actor
       // (competing failJob/completeJob/claim) already moved the job, this
       // write matches nothing and the transition is abandoned.
+      //
+      // The deadline is derived from the DATABASE's clock: claimNextJob (a
+      // peer, under --scale worker) compares it against SQL now() — see there
+      // for what an app-clock backoff does under skew.
+      const nowMs = (await dbNow(tx)).getTime();
       await tx.job.updateMany({
         where: { id: jobId, status: job.status },
         data: {
           status: "queued",
           attempts: nextAttempts,
           error,
-          nextAttemptAt: new Date(Date.now() + backoffMs(nextAttempts)),
+          nextAttemptAt: new Date(nowMs + backoffMs(nextAttempts)),
           heartbeatAt: null,
         },
       });
@@ -437,14 +455,28 @@ const IN_FLIGHT_STATUSES = ["running", "polling", "queued"] as const;
 // delivered.
 //
 // A database error is swallowed on purpose: persisting a checkpoint must never
-// fail the generation itself.
+// fail the generation itself. Swallowed is not the same as silent, though —
+// while the write is not landing, the objects this attempt stores are named
+// only by the worker's in-memory list, so a crash before the next successful
+// checkpoint leaves them unnamed in the durable column: invisible to
+// /api/files, to failJob's terminal reclaim and to the erasure routes (the
+// class passes 22/24 closed on the success paths). Every failure is reported
+// so the window is at least observable; failing the attempt instead would
+// trade this crash-window residue for aborting generation on any transient
+// statement error.
 export async function checkpointJobProgress(jobId: string, payload: unknown): Promise<void> {
   const res = await prisma.job
     .updateMany({
       where: { id: jobId, status: { in: [...IN_FLIGHT_STATUSES] } },
       data: { images: JSON.stringify(payload) },
     })
-    .catch(() => null);
+    .catch((e) => {
+      console.error(
+        `[queue] checkpoint write failed for job ${jobId}: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      captureError(e, { jobId, checkpoint: "progress" });
+      return null;
+    });
   if (res && res.count === 0) {
     throw new Error(`${JOB_ABANDONED}: the job left the queue while this attempt was running`);
   }
@@ -600,15 +632,19 @@ export async function completeJob(jobId: string, images: JobImage[]) {
 // which the CAS below still matches, so its task id is recorded normally and
 // the next claim polls the existing task instead of creating a second one.)
 export async function setJobPolling(jobId: string, providerTaskId: string): Promise<boolean> {
-  // Mixed clocks on purpose: heartbeatAt is the reaper's input and goes on the
-  // DATABASE's clock (see recoverStuckJobs); taskCreatedAt is the 30-minute
-  // budget's input and stays on THIS process's clock because scripts/worker.ts
-  // compares it against its own Date.now() — one budget, one timeline.
+  // All three timestamps on the DATABASE's clock, which is also where
+  // scripts/worker.ts's 30-minute budget reads them (dbNow in the video lane):
+  // the polling lane has no worker affinity — claimNextJob's lane 2 is claimed
+  // by whichever worker comes next — so taskCreatedAt's writer and reader are
+  // routinely different processes and the app clock would let a lagging
+  // writer's timestamp fail (and refund) a live, already-billed upstream task,
+  // or a fast one's silently disable the cap. nextAttemptAt is a peer's read
+  // for the same reason (claimNextJob's due predicate).
   const claim = await prisma.$executeRaw(Prisma.sql`
     UPDATE "Job"
        SET status = 'polling', "providerTaskId" = ${providerTaskId},
-           "taskCreatedAt" = ${new Date()}, "heartbeatAt" = now(),
-           "nextAttemptAt" = ${new Date(Date.now() + POLL_INTERVAL_MS)}
+           "taskCreatedAt" = now(), "heartbeatAt" = now(),
+           "nextAttemptAt" = now() + make_interval(secs => ${POLL_INTERVAL_MS / 1000})
      WHERE id = ${jobId} AND status IN ('running', 'queued')`);
   return claim === 1;
 }
@@ -616,10 +652,12 @@ export async function setJobPolling(jobId: string, providerTaskId: string): Prom
 // Keep polling: task still pending/running upstream. Re-arms nextAttemptAt
 // and refreshes the heartbeat so recoverStuckJobs doesn't reap an active task.
 export async function schedulePoll(jobId: string, delayMs = POLL_INTERVAL_MS) {
+  // Database clock, same as every other nextAttemptAt (see setJobPolling): a
+  // peer's claimNextJob compares it against SQL now().
   await prisma.$executeRaw(Prisma.sql`
     UPDATE "Job"
        SET status = 'polling', "heartbeatAt" = now(),
-           "nextAttemptAt" = ${new Date(Date.now() + delayMs)}
+           "nextAttemptAt" = now() + make_interval(secs => ${delayMs / 1000})
      WHERE id = ${jobId} AND status IN ('running', 'polling', 'queued')`);
 }
 

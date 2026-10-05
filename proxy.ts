@@ -93,6 +93,14 @@ export async function proxy(req: NextRequest) {
   // authoritative brute-force protection. 40/min leaves room for multi-step
   // 2FA logins (csrf + callback per step).
   // Overridable for load tests / e2e (MIDDLEWARE_AUTH_LIMIT).
+  //
+  // Note this bucket is per (account × `/api`), not per route: for a verified
+  // session it is ONE 300/min budget shared by all 46 routes, so it — not the
+  // 600/min a few routes document for themselves (/api/jobs, /api/files, the
+  // v1 legs) — is the binding ceiling on a single instance. That is
+  // deliberate (a cheaper backstop than 46 buckets, and tighter is the safe
+  // direction); raise MIDDLEWARE_API_LIMIT if a real workload needs the
+  // headroom rather than assuming a route's own number binds.
   const authLimit = envLimit(process.env.MIDDLEWARE_AUTH_LIMIT, 40);
   const apiLimit = envLimit(process.env.MIDDLEWARE_API_LIMIT, 300);
   const bucket = await bucketFor(req, ip);

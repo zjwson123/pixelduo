@@ -72,19 +72,30 @@ export class StripeProvider implements PaymentProvider {
     if (!this.webhookSecret) return null;
     const signature = headers.get("stripe-signature");
     if (!signature) return null;
-    // The SDK judges the timestamp against THIS process's clock; the route
-    // hands us the database's (pass 26's doctrine), and the SDK cannot take a
-    // clock. Widening its tolerance by the measured skew makes its decision —
-    // |app clock − ts| ≤ tolerance — equivalent to one taken on the reference
-    // clock: a genuine delivery is accepted exactly while it is within 300s of
-    // THAT clock. Capped at one hour; past that the environment is broken in a
-    // way no window should paper over.
-    const appNowSec = Date.now() / 1000;
-    const skewSec = clock ? Math.abs(clock.nowSec - appNowSec) : 0;
-    const tolerance = 300 + Math.min(skewSec, 3600);
+    // The timestamp window is judged on the REFERENCE clock — the database's,
+    // handed in by the route (pass 26's doctrine) — because that is the clock
+    // every other money decision runs on. constructEvent's sixth argument
+    // (receivedAt, milliseconds) exists for exactly this: without it the SDK
+    // judges against this process's clock. pass 27 instead widened the
+    // tolerance by the measured skew, and that is not equivalent — the SDK's
+    // age check is one-sided, so acceptance became [appNow − 300 − skew, ∞)
+    // and a host BEHIND the database admitted deliveries up to 300 + 2×skew
+    // seconds stale on the reference clock. Handing the clock in makes the
+    // bound exactly [refNow − 300, ∞): a genuine delivery is accepted exactly
+    // while it is within its 300s window on the database's clock — the same
+    // window Paddle's in-repo check applies (|now − ts| > 300 → reject).
+    // Direct callers that pass no clock keep the SDK's own now().
+    const refNowSec = clock?.nowSec ?? Date.now() / 1000;
     let event: Stripe.Event;
     try {
-      event = this.stripe.webhooks.constructEvent(rawBody, signature, this.webhookSecret, tolerance);
+      event = this.stripe.webhooks.constructEvent(
+        rawBody,
+        signature,
+        this.webhookSecret,
+        300,
+        undefined,
+        refNowSec * 1000,
+      );
     } catch (e) {
       // A bad MAC is a forged/junk delivery: silent 400, unchanged. A
       // timestamp rejection of an otherwise well-formed signature is either a
@@ -94,7 +105,7 @@ export class StripeProvider implements PaymentProvider {
       if (/timestamp outside the tolerance/i.test(String((e as Error)?.message ?? ""))) {
         captureError(
           new Error(
-            `stripe-webhook-stale: signature timestamp outside the tolerance (clock skew ${Math.round(skewSec)}s, tolerance ${Math.round(tolerance)}s)`,
+            `stripe-webhook-stale: signature timestamp outside the 300s window judged on the reference clock (reference now ${Math.round(refNowSec)}s)`,
           ),
         );
       }

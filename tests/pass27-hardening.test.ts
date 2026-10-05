@@ -462,7 +462,11 @@ describe("pass 27 — worker liveness is judged on one clock (the database's)", 
 
   it("judges the queue-wait half of the video budget on the database clock", () => {
     const worker = read("scripts/worker.ts");
-    expect(worker).toContain("job.taskCreatedAt ? Date.now() : (await dbNow(prisma)).getTime()");
+    // pass 28 finished what this pin described: the TASK half was still on
+    // this process's clock (the poll lane has no worker affinity, so a peer
+    // reads the stamp), so BOTH halves read dbNow now — the full pin lives in
+    // pass28-hardening.test.ts.
+    expect(worker).toContain("const budgetNow = (await dbNow(prisma)).getTime();");
   });
 
   it("passes the database clock into webhook verification", () => {

@@ -33,19 +33,33 @@ export async function POST(req: Request) {
         data: { passwordHash, sessionVersion: { increment: 1 } },
       }),
       prisma.apiKey.updateMany({ where: { userId: user.id, revokedAt: null }, data: { revokedAt: new Date() } }),
-      // Retire every OTHER live reset token for this address. createToken only
-      // invalidates siblings older than ROTATION_GRACE_MS (30 min), and that
-      // grace exists so a re-request cannot invalidate the mail the owner is
-      // reading — it must not survive a COMPLETED reset. Without this, a
-      // sibling link issued <30 min earlier (still valid for its full 1h TTL)
-      // keeps working after the reset, which is exactly the credential the
-      // reset-and-revoke remediation is aimed at: anyone who read the mailbox
-      // once (before losing that access) holds a valid re-takeover link for up
-      // to an hour after the victim's own reset. A completed reset is the
-      // strongest signal the account state has moved on, so no outstanding
-      // link should survive it.
+      // Retire every OTHER live link for this address — reset siblings AND any
+      // outstanding verify-email link. createToken only invalidates siblings
+      // older than ROTATION_GRACE_MS (30 min), and that grace exists so a
+      // re-request cannot invalidate the mail the owner is reading — it must
+      // not survive a COMPLETED reset. Without this, a sibling link issued
+      // <30 min earlier (still valid for its full 1h TTL) keeps working after
+      // the reset, which is exactly the credential the reset-and-revoke
+      // remediation is aimed at: anyone who read the mailbox once (before
+      // losing that access) holds a valid re-takeover link for up to an hour
+      // after the victim's own reset. A completed reset is the strongest
+      // signal the account state has moved on, so no outstanding link should
+      // survive it.
+      //
+      // verify-email is the second link purpose because it is the second way
+      // in: consuming one requires the account password, but it is a
+      // mailbox-independent bearer artifact (a forwarded mail, a MAIL_DEV_MODE
+      // container log) that stays live for its full 24h TTL across the reset —
+      // the reset exists for the case where the mailbox was compromised once
+      // and not trusted any more, and this link is that same mailbox's residue.
+      // An owner who still needs to verify can request a fresh link from a
+      // session (unverified accounts can sign in).
       prisma.verificationToken.updateMany({
-        where: { email: user.email, purpose: "reset-password", consumedAt: null },
+        where: {
+          email: user.email,
+          purpose: { in: ["reset-password", "verify-email"] },
+          consumedAt: null,
+        },
         data: { consumedAt: new Date() },
       }),
     ]);

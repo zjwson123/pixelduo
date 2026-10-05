@@ -62,7 +62,19 @@ export async function GET(req: Request, { params }: { params: Promise<{ key: str
   // storage driver, so a NUL in it is a Postgres 22021 — a masked 500 plus a
   // captured incident, reachable without a credential (`/api/files/img/x%00.png`
   // answered 500 for anyone). Refused as the client error it is.
-  refuseNul(key);
+  //
+  // The refusal must be mapped HERE: refuseNul throws an ApiError, this
+  // handler's other try blocks all start below (the session read, the stream
+  // pull), and an escaping throw is Next's uncaught-error path — an anonymous
+  // request got the same 500 the guard exists to remove, one Sentry event per
+  // request (the @sentry/nextjs route wrapper captures handled:false), and the
+  // route's own limiters below were never reached. fail() maps it to 400 and
+  // stamps the no-store every other response here carries.
+  try {
+    refuseNul(key);
+  } catch (e) {
+    return fail(e);
+  }
   // requireUserId (not raw getServerSession) so a partial 2FA session or a
   // stale JWT revoked via sessionVersion can't read files. Bearer API keys
   // authenticate too — v1 API responses under the local storage driver hand

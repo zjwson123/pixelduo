@@ -207,6 +207,39 @@ jobs:
             done
             echo "web image shape OK"
           '
+      - name: Assert the worker image's artifact shape
+        # The worker stage prunes the same material in one COPY+prune layer, and
+        # nothing asserted it — while the Dockerfile itself calls this image the
+        # one that matters most (a registry push or `docker save` carries it off
+        # the host). A future reorder back to `COPY . .` + a separate `RUN rm -rf`
+        # (the pass-25 regression), or a name dropped from the list, would ship
+        # docs/, tests/, e2e/, the compose files and any planted .env in a
+        # pullable image with every job green.
+        run: |
+          docker run --rm --entrypoint sh pd-ci-worker -c '
+            set -e
+            # What the worker actually runs from.
+            test -e /app/package.json
+            test -e /app/prisma/schema.prisma
+            test -e /app/lib/queue.ts
+            test -e /app/scripts/worker.ts
+            test -x /app/node_modules/.bin/tsx
+            # The single-layer prune really removed these from the IMAGE.
+            test ! -e /app/docs
+            test ! -e /app/tests
+            test ! -e /app/e2e
+            test ! -e /app/designs
+            test ! -e /app/perf
+            test ! -e /app/public/showcase
+            test ! -e /app/Dockerfile
+            test ! -e /app/docker-compose.yml
+            test ! -e /app/Caddyfile
+            test ! -e /app/README.md
+            for f in /app/.env /app/.env.local /app/.env.production; do
+              if [ -e "$f" ]; then echo "dotenv in image: $f"; exit 1; fi
+            done
+            echo "worker image shape OK"
+          '
 
   e2e:
     runs-on: ubuntu-latest

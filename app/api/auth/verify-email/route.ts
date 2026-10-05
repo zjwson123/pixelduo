@@ -1,10 +1,11 @@
 import bcrypt from "bcryptjs";
 import { z } from "zod";
-import { enforceRateLimit, fail, ok, parseJsonBody, readBodyCapped } from "@/lib/api";
+import { ApiError, enforceRateLimit, fail, ok, parseJsonBody, readBodyCapped } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { hasUsablePassword } from "@/lib/auth";
 import { signupBonus } from "@/lib/ledger";
 import { previewToken, consumeToken } from "@/lib/tokens";
+import { reserveLoginAttempt, refundLoginFailures, alertLoginAbuse, reauthIp } from "@/lib/login-guard";
 
 const schema = z.object({
   token: z.string().min(20).max(200),
@@ -39,9 +40,26 @@ export async function POST(req: Request) {
     // reset rotates the credential, which is exactly the right move for them.
     if (!user.emailVerified && hasUsablePassword(user.passwordHash)) {
       const given = body.password ?? "";
+      // The compare reserves on the login guard, like every other password
+      // compare in the system (lib/login-guard.ts: "one password, one budget,
+      // whoever asks for it"). This was the sixth and last one that did not:
+      // the per-IP bucket at the top is a rate limit, not a counter, so a live
+      // verify link — a forwarded or archived mail, a container log under
+      // MAIL_DEV_MODE, or a link that predates the owner's completed password
+      // reset — was an unmetered bcrypt oracle: ~10 guesses/minute per address,
+      // unbounded across addresses, with no cumulative cap, no alert to the
+      // owner and no lockout that could ever engage. Correct password refunds
+      // the reservation, exactly as on the login path.
+      const ip = reauthIp(req);
+      const attempt = await reserveLoginAttempt(user.email, ip);
+      if (!attempt.allowed) return fail(new ApiError(429, "rate-limited"));
       if (!given || !(await bcrypt.compare(given, user.passwordHash))) {
+        // Fire-and-forget: the owner hears about a distributed grind, and the
+        // response time does not depend on SMTP (same contract as authorize).
+        void alertLoginAbuse(user.email).catch(() => undefined);
         return fail(new Error("invalid-password"));
       }
+      await refundLoginFailures(user.email, ip);
     }
 
     // Single-use CAS. Losing it means a concurrent request consumed the token.

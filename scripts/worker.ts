@@ -319,8 +319,8 @@ export async function processVideoJob(job: {
   // the job has left the queue must take it back out itself.
   let storedKey: string | null = null;
   try {
-    // The hard cap, on TWO clocks — because the two halves of a video job cost
-    // different things.
+    // The hard cap, on TWO budgets — because the two halves of a video job cost
+    // different things. Both measured on the DATABASE's clock.
     //
     // Upstream task: billed, created exactly once, and the reason the cap has to
     // survive re-claims. Measured from taskCreatedAt, NOT createdAt. It used to
@@ -337,15 +337,20 @@ export async function processVideoJob(job: {
     // checked only in phase 2, a job that had already waited out its budget
     // still created (and paid for) a task that the very next poll threw away.
     //
-    // Each half is judged on the clock that stamped it: taskCreatedAt is THIS
-    // process's write (setJobPolling) so app-vs-app is one timeline, while
-    // createdAt carries the DATABASE's default (CURRENT_TIMESTAMP) and is
-    // compared against the database's clock like every other money decision
-    // (pass 26). On `Date.now()` an app clock ahead of the database's failed a
-    // queued job before its FIRST provider call — the paid feature refused with
-    // a message blaming a provider timeout that never happened.
+    // Each half is judged on the DATABASE's clock — the same rule as every
+    // other liveness/budget decision. taskCreatedAt is stamped in SQL by
+    // setJobPolling and createdAt carries the database default, and the
+    // polling lane has no worker affinity (claimNextJob's lane 2 is claimed by
+    // whichever worker comes next), so the writer and the reader of
+    // taskCreatedAt are routinely different processes on different hosts. On
+    // `Date.now()` a worker whose clock lagged 35 minutes stamped a task the
+    // next poller read as 35 minutes old: the live, already-billed upstream
+    // task was failed and refunded on the spot (its id discarded — an orphan
+    // the house pays for), and in the fast-writer direction the 30-minute cap
+    // silently stopped firing. pass 27 moved the queue-wait half here; this
+    // closes the task half.
     const budgetFrom = job.taskCreatedAt ?? job.createdAt;
-    const budgetNow = job.taskCreatedAt ? Date.now() : (await dbNow(prisma)).getTime();
+    const budgetNow = (await dbNow(prisma)).getTime();
     if (budgetNow - new Date(budgetFrom).getTime() > VIDEO_HARD_TIMEOUT_MS) {
       const msg = "video-timeout: task exceeded 30 minutes";
       await failJob(job.id, msg, { terminal: true });

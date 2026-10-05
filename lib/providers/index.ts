@@ -63,6 +63,27 @@ async function readJsonCapped(res: Response, maxBytes = MAX_PROVIDER_RESPONSE_BY
   return JSON.parse(await readTextCapped(res, maxBytes)) as Record<string, unknown>;
 }
 
+// Inline a reference frame as a data URL whose declared type is the BYTES'.
+//
+// The worker hands providers raw base64 read back out of storage
+// (scripts/worker.ts reads the object the caller uploaded), and the sniffed
+// type lives only in the storage key/metadata the read path does not carry —
+// so four call sites hardcoded `image/png` and a JPEG or WebP first frame
+// travelled under a PNG label the gateway can act on, after the call has been
+// billed. Exactly the rule the multipart edit path states below and
+// storeContentType enforces at PUT time: the type comes from the bytes, never
+// from a claim. Only the leading bytes of the payload are decoded — the sniff
+// reads at most 12 bytes (lib/media-type.ts), so a prefix is exact and the
+// multi-megabyte copy a full decode would make is pointless. Already-prefixed
+// data URLs pass through untouched (the caller knew its own type). Exported
+// for tests/pass28-hardening.test.ts.
+export function refImageDataUrl(imageBase64: string): string {
+  if (imageBase64.startsWith("data:")) return imageBase64;
+  const head = Buffer.from(imageBase64.slice(0, 64), "base64");
+  const mime = storeContentType(head, "image/png");
+  return `data:${mime};base64,${imageBase64}`;
+}
+
 // Provider task ids come from the provider's own JSON and are stored, logged
 // and interpolated into poll URLs every 10s for up to 30 minutes. A hostile or
 // compromised gateway answering `{"id": "<40 MB string>"}` would otherwise put
@@ -253,6 +274,8 @@ export async function generateWithSeedream(
   const keys = [getArkKey()].filter((k): k is string => Boolean(k));
   if (!keys.length) throw new Error("ark key missing — set ARK_IMAGE_API_KEY or ensure ~/.cc-proxy/config.json has ark gateway");
   const out: ProviderImage[] = [];
+  // Built once, outside the loop: the sniff is per-payload, not per-image.
+  const refImage = imageBase64 ? refImageDataUrl(imageBase64) : undefined;
   for (let i = 0; i < count; i++) {
     const body: Record<string, unknown> = {
       model: "doubao-seedream-5-0-260128",
@@ -262,8 +285,8 @@ export async function generateWithSeedream(
       n: 1,
       watermark,
     };
-    if (imageBase64) {
-      body.image = imageBase64.startsWith("data:") ? imageBase64 : `data:image/png;base64,${imageBase64}`;
+    if (refImage) {
+      body.image = refImage;
     }
     const data = await callWithKeys(getArkBaseUrl(), body, keys);
     const items = (data.data as Array<Record<string, unknown>> | undefined) ?? [];
@@ -293,7 +316,7 @@ export async function generateWithWanImage(
   const content: Array<Record<string, unknown>> = [{ text: prompt }];
   if (imageBase64List) {
     for (const img of imageBase64List) {
-      content.push({ image: img.startsWith("data:") ? img : `data:image/png;base64,${img}` });
+      content.push({ image: refImageDataUrl(img) });
     }
   }
   // Both wan image models are billed at 2K; `n` is the only size-ish knob the
@@ -514,7 +537,7 @@ async function createSeedanceTask(appModel: string, prompt: string, durationSec:
   if (imageBase64) {
     content.push({
       type: "image_url",
-      image_url: { url: imageBase64.startsWith("data:") ? imageBase64 : `data:image/png;base64,${imageBase64}` },
+      image_url: { url: refImageDataUrl(imageBase64) },
       role: "first_frame",
     });
   }
@@ -543,7 +566,7 @@ async function createWanVideoTask(
   if (!keys.length) throw new Error("aliyun key missing for video generation");
   const inputObj: Record<string, unknown> = { prompt };
   if (imageBase64) {
-    inputObj.media = [{ type: "first_frame", url: imageBase64.startsWith("data:") ? imageBase64 : `data:image/png;base64,${imageBase64}` }];
+    inputObj.media = [{ type: "first_frame", url: refImageDataUrl(imageBase64) }];
   }
   // DashScope async: POST + X-DashScope-Async: enable
   const controller = new AbortController();

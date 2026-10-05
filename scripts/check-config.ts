@@ -141,7 +141,7 @@ function codeReadNames(): Map<string, string[]> {
       if (entry.isDirectory()) {
         if (entry.name === "node_modules" || entry.name.startsWith(".")) continue;
         walk(p);
-      } else if (/\.(ts|tsx|mjs)$/.test(entry.name)) files.push(p);
+      } else if (/\.(ts|tsx|mjs|cjs|js|mts|cts)$/.test(entry.name)) files.push(p);
     }
   };
   for (const r of roots) if (fs.existsSync(r)) walk(r);
@@ -188,8 +188,22 @@ function codeReadNames(): Map<string, string[]> {
  * CI. The `.env.example` half of this script still cannot see such a file, so
  * the only honest answer is to fail.
  */
-function composeForwarded(): { forwarded: Map<string, Set<string>>; unrendered: string[] } {
+function composeForwarded(): {
+  forwarded: Map<string, Set<string>>;
+  buildArgs: Map<string, Set<string>>;
+  webBuildTargets: Map<string, string[]>;
+  unrendered: string[];
+} {
   const out = new Map<string, Set<string>>();
+  // Kept SEPARATE from `out`, not merged into it. A build arg and a runtime env
+  // are different pipes, and the gate was blind to the difference: deleting
+  // NEXTAUTH_URL from docker-compose.yml's web `build.args` left the name in
+  // the merged set (the runtime `environment:` still forwards it), check 1
+  // stayed green, and the prerendered og:url/og:image silently reverted to
+  // http://localhost:3000 — the exact pass-19 defect this half exists for.
+  // The web target's arg set is asserted below.
+  const buildArgs = new Map<string, Set<string>>();
+  const webBuildTargets = new Map<string, string[]>();
   const unrendered: string[] = [];
   const fixture = new Map<string, string>([
     // Values only need to be non-empty; nothing here is dialled.
@@ -232,23 +246,31 @@ function composeForwarded(): { forwarded: Map<string, Set<string>>; unrendered: 
       continue;
     }
     const cfg = JSON.parse(json) as {
-      services?: Record<string, { environment?: Record<string, unknown>; build?: { args?: unknown } }>;
+      services?: Record<string, {
+        environment?: Record<string, unknown>;
+        build?: { args?: unknown; target?: unknown };
+      }>;
     };
     const names = new Set<string>();
-    for (const svc of Object.values(cfg.services ?? {})) {
+    const args = new Set<string>();
+    const webServices: string[] = [];
+    for (const [svcName, svc] of Object.entries(cfg.services ?? {})) {
       for (const [k, v] of Object.entries(svc.environment ?? {})) {
         // A null value means "pass through from the host", which is how a
         // compose file can forward a name it never spells out.
         if (v === null) continue;
         names.add(k);
       }
-      const args = svc.build?.args;
-      if (Array.isArray(args)) for (const a of args) names.add(String(a).split("=")[0]);
-      else if (args && typeof args === "object") for (const k of Object.keys(args)) names.add(k);
+      const rawArgs = svc.build?.args;
+      if (Array.isArray(rawArgs)) for (const a of rawArgs) { const n = String(a).split("=")[0]; names.add(n); args.add(n); }
+      else if (rawArgs && typeof rawArgs === "object") for (const k of Object.keys(rawArgs)) { names.add(k); args.add(k); }
+      if (svc.build && svc.build.target === "web") webServices.push(svcName);
     }
     out.set(file, names);
+    buildArgs.set(file, args);
+    if (webServices.length) webBuildTargets.set(file, webServices);
   }
-  return { forwarded: out, unrendered };
+  return { forwarded: out, buildArgs, webBuildTargets, unrendered };
 }
 
 function main() {
@@ -257,7 +279,7 @@ function main() {
   const { keys: documented, duplicates } = readEnvExample();
   if (duplicates.length) problems.push(`${ENV_EXAMPLE} declares ${duplicates.join(", ")} twice`);
   const read = codeReadNames();
-  const { forwarded, unrendered } = composeForwarded();
+  const { forwarded, buildArgs, webBuildTargets, unrendered } = composeForwarded();
   if (forwarded.size === 0 && unrendered.length === 0) {
     // Skipping is a convenience for a machine with no docker daemon, but in CI
     // it would be a green job that verified nothing — and the compose half is
@@ -297,6 +319,31 @@ function main() {
       if (documented.has(name) || name.startsWith("NEXT_PUBLIC_")) continue;
       if (INTERNAL_FORWARDED[name]) continue;
       problems.push(`${short(file)} forwards ${name}, which ${ENV_EXAMPLE} does not document`);
+    }
+  }
+
+  // 2a. The web target's BUILD ARGS, asserted as build args — not as "the name
+  //     appears somewhere in the file" (see composeForwarded's note). These
+  //     four are the only build-time inputs the image has: NEXTAUTH_URL is
+  //     baked into the prerendered og: tags and is required in practice (an
+  //     arg-less build fails at /login's prerender), and the three
+  //     NEXT_PUBLIC_SENTRY_* vars have no path into the client bundle except a
+  //     build arg. `docker compose config` gives the target and the arg set, so
+  //     the property is checkable without reading the YAML.
+  const WEB_BUILD_ARGS = [
+    "NEXTAUTH_URL",
+    "NEXT_PUBLIC_SENTRY_DSN",
+    "NEXT_PUBLIC_SENTRY_ENVIRONMENT",
+    "NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE",
+  ];
+  for (const [file, services] of webBuildTargets) {
+    const args = buildArgs.get(file) ?? new Set<string>();
+    for (const name of WEB_BUILD_ARGS) {
+      if (!args.has(name)) {
+        problems.push(
+          `${short(file)} builds target web (${services.join(", ")}) but its build args do not carry ${name} — it would be baked as the default/empty value`,
+        );
+      }
     }
   }
 

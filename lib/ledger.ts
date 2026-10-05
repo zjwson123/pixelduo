@@ -420,6 +420,16 @@ async function writeOffExcessTx(
   // exact even for an account whose balance had ALREADY drifted below its rows:
   // the write-off is capped at what the column holds and the rest of the drift
   // is left for scripts/repair-credit-invariant.ts, which is what reports on it.
+  //
+  // The read is a snapshot, and the clamp can be stale by the time the
+  // increment lands (a concurrent commit lowered the balance — the expiry
+  // sweep, a revoke, another repair). Then the clamped delta still overshoots,
+  // addCreditsTx refuses the negative outcome, and this whole transaction
+  // rolls back — a transient failure the next reap recomputes from the new
+  // balance with no state written. Deliberately not "fixed" with a User-row
+  // FOR UPDATE here: that would introduce a grant→user lock edge against
+  // erasure's user→grants cascade, i.e. a deadlock in exchange for a
+  // self-healing retry.
   const user = await tx.user.findUnique({ where: { id: userId }, select: { credits: true } });
   if (!user) throw new Error("user-not-found");
   await tx.creditGrant.update({ where: { id: grantId }, data: { remaining: target } });
@@ -740,16 +750,23 @@ export async function refundCreditsTx(
         // still made writable (the excess is written off, or the next statement
         // to touch it aborts) but the portion is reported rather than restored.
         if (held > cap) {
+          // Down to `cap`, not to 0: `cap` is the row's own amount — the
+          // backed, legal holding — and everything above it is the unbacked
+          // legacy excess this write-off exists to remove. Writing to 0 took
+          // the backed credits with the excess (the row-side write and the
+          // balance debit move together, so the account simply ended poorer —
+          // consistent, so nothing fired) for a customer whose only sin was a
+          // hand-repaired row.
           await writeOffExcessTx(
             tx,
             userId,
             c.grantId,
             held,
             cap,
-            0,
+            cap,
             `row smaller than the refund (amount ${cap}, restoring ${c.amount})`,
           );
-          heldPerGrant.set(c.grantId, 0);
+          heldPerGrant.set(c.grantId, cap);
         }
         console.warn(
           `[ledger] refund of ${c.amount} credit(s) refused by grant ${c.grantId}: it holds ${held}/${cap} and the invariant forbids remaining > amount — not restored (user ${userId}); run scripts/repair-credit-invariant.ts --fix`,

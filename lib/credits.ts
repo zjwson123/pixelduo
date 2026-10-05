@@ -1,4 +1,5 @@
 import { prisma } from "./prisma";
+import { dbNow } from "./ledger";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -13,7 +14,13 @@ export interface ExpiringCredit {
 // Grants whose remaining credits expire within the horizon (for the
 // workbench banner / retention nudges). Only paid sources count.
 export async function listExpiringCredits(userId: string, days = 14): Promise<ExpiringCredit[]> {
-  const now = new Date();
+  // The DATABASE's clock, like spendCreditsTx and the expiry sweep this list
+  // must agree with: the comment below promises that nothing is advertised
+  // which the spend path refuses, and on the app clock that promise breaks in
+  // both directions — a host behind the database showed (and the reminder
+  // path mailed) credits whose deadline had passed, one ahead hid credits that
+  // were about to be swept. Same class pass 26 moved at the plan boundary.
+  const now = await dbNow(prisma);
   const horizon = new Date(now.getTime() + days * DAY_MS);
   const grants = await prisma.creditGrant.findMany({
     where: {
@@ -25,7 +32,12 @@ export async function listExpiringCredits(userId: string, days = 14): Promise<Ex
       // spendCreditsTx already refuses to spend. The reminder path already
       // filters this way.
       expiresAt: { not: null, gt: now, lte: horizon },
-      source: { in: ["PURCHASE", "SUBSCRIPTION", "ROLLOVER"] },
+      // REFUND is the replacement grant refundCreditsTx mints for a portion
+      // whose original deadline had passed: spendable, expiring, and — until
+      // now — the one paid-source class the banner and the reminders did not
+      // count, so exactly the credits a customer most needed warning about
+      // were the ones never advertised.
+      source: { in: ["PURCHASE", "SUBSCRIPTION", "ROLLOVER", "REFUND"] },
     },
     orderBy: { expiresAt: "asc" },
     select: { id: true, source: true, remaining: true, expiresAt: true },

@@ -1,4 +1,5 @@
 import { prisma } from "./prisma";
+import { dbNow } from "./ledger";
 import { sendCreditExpiryEmail } from "./mail";
 import { captureError } from "./observability";
 
@@ -10,7 +11,10 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 // paid credits (PURCHASE packs + SUBSCRIPTION quota). Deduplicated by
 // CreditReminder(grantId, daysBefore). Failure to send never blocks the cron.
 export async function sendExpiryReminders(): Promise<number> {
-  const now = new Date();
+  // The DATABASE's clock (see listExpiringCredits): a mail that says "1 day
+  // left" is a claim about the deadline the spend path and the expiry sweep
+  // enforce, and those run on the database's clock.
+  const now = await dbNow(prisma);
   const horizon = new Date(now.getTime() + 8 * DAY_MS);
   const grants = await prisma.creditGrant.findMany({
     where: {

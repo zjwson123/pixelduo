@@ -110,6 +110,15 @@ export const authOptions: NextAuthOptions = {
       credentials: { email: {}, password: {} },
       async authorize(credentials, req) {
         if (!credentials?.email || !credentials?.password) return null;
+        // typeof, not just truthiness: next-auth hands authorize the raw parsed
+        // body, so `{"email":123}` (or an object password) passes the falsy
+        // test and then throws inside a string method / bcrypt — and next-auth
+        // reflects the thrown message to the caller as the 401's error=
+        // parameter ("credentials.email.toLowerCase is not a function",
+        // bcryptjs's "Illegal arguments: object, string"). Refused uniformly
+        // with a wrong password, so neither the input shape nor runtime
+        // internals leak.
+        if (typeof credentials.email !== "string" || typeof credentials.password !== "string") return null;
         const email = credentials.email.toLowerCase().trim();
         // Refused as the non-credential it is — uniform with a wrong password,
         // so nothing about accounts leaks (see hasControlChars).

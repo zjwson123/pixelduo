@@ -13,6 +13,25 @@ cd "$(dirname "$0")/.."
 # what the server needs, so the rest is reconstructed here (values match
 # docker-compose.yml's dev defaults + the MinIO container).
 set -a; source .env; set +a
+# Refuse to run against what looks like a real deployment. Everything below
+# boots a PRODUCTION-mode server (`next start` sets NODE_ENV=production) with
+# the test escape hatches ON — PAYMENT_ALLOW_MOCK=1 flips the boot assertions'
+# testDeployment flag, which is also what exempts EMAIL_VERIFY_AUTO (every
+# registration auto-verifies and releases the signup bonus with no mailbox) —
+# so on a production host this "restart" would silently swap the deployment for
+# a mock-payments, auto-verifying stack. The header says LOCAL; this is what
+# enforces it (the app also binds loopback only, below).
+case "${NEXTAUTH_URL:-}" in
+  ""|*localhost*|*127.0.0.1*) ;;
+  *)
+    echo "refusing to start the dev stack: NEXTAUTH_URL=${NEXTAUTH_URL} does not look local" >&2
+    exit 1
+    ;;
+esac
+if [ -n "${CADDY_DOMAIN:-}" ]; then
+  echo "refusing to start the dev stack: CADDY_DOMAIN=${CADDY_DOMAIN} marks a deployment host" >&2
+  exit 1
+fi
 export REDIS_URL="${REDIS_URL:-redis://localhost:6379}"
 # Required for the production-mode boot assertions: NEXTAUTH_URL is http://
 # locally, and PAYMENT_PROVIDER=mock is refused in production without this flag.
@@ -59,7 +78,10 @@ if [ -n "$(lsof -ti:3000 || true)" ]; then
 fi
 
 echo "[2/3] starting app + worker (logs: /tmp/pd-dev-app.log, /tmp/pd-dev-worker.log)"
-nohup npx next start -p 3000 >/tmp/pd-dev-app.log 2>&1 &
+# Loopback only: `next start` without -H binds 0.0.0.0, which on a laptop is a
+# dev server on every interface — no TLS, no edge, and the XFF trust model
+# assumes an edge proxy. Nothing here needs to be reachable from off-host.
+nohup npx next start -p 3000 -H 127.0.0.1 >/tmp/pd-dev-app.log 2>&1 &
 nohup npx tsx scripts/worker.ts >/tmp/pd-dev-worker.log 2>&1 &
 
 echo "[3/3] verifying"

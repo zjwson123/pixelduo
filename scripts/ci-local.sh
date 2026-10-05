@@ -90,6 +90,31 @@ docker run --rm --entrypoint sh pd-ci-web -c '
   done
   echo "web image shape OK"
 ' || { echo "web image artifact assertion FAILED"; exit 1; }
+# Same rule for the worker image (see ci.yml): its prune is what keeps docs/,
+# tests/ and any planted .env out of the artifact a registry push carries off
+# the host, and nothing asserted it until pass 28.
+docker run --rm --entrypoint sh pd-ci-worker -c '
+  set -e
+  test -e /app/package.json
+  test -e /app/prisma/schema.prisma
+  test -e /app/lib/queue.ts
+  test -e /app/scripts/worker.ts
+  test -x /app/node_modules/.bin/tsx
+  test ! -e /app/docs
+  test ! -e /app/tests
+  test ! -e /app/e2e
+  test ! -e /app/designs
+  test ! -e /app/perf
+  test ! -e /app/public/showcase
+  test ! -e /app/Dockerfile
+  test ! -e /app/docker-compose.yml
+  test ! -e /app/Caddyfile
+  test ! -e /app/README.md
+  for f in /app/.env /app/.env.local /app/.env.production; do
+    if [ -e "$f" ]; then echo "dotenv in image: $f"; exit 1; fi
+  done
+  echo "worker image shape OK"
+' || { echo "worker image artifact assertion FAILED"; exit 1; }
 
 echo "[3/9] prisma generate + migrate"
 npx prisma generate >/dev/null
