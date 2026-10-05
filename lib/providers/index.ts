@@ -69,14 +69,19 @@ async function readJsonCapped(res: Response, maxBytes = MAX_PROVIDER_RESPONSE_BY
 // (scripts/worker.ts reads the object the caller uploaded), and the sniffed
 // type lives only in the storage key/metadata the read path does not carry —
 // so four call sites hardcoded `image/png` and a JPEG or WebP first frame
-// travelled under a PNG label the gateway can act on, after the call has been
-// billed. Exactly the rule the multipart edit path states below and
-// storeContentType enforces at PUT time: the type comes from the bytes, never
-// from a claim. Only the leading bytes of the payload are decoded — the sniff
-// reads at most 12 bytes (lib/media-type.ts), so a prefix is exact and the
-// multi-megabyte copy a full decode would make is pointless. Already-prefixed
-// data URLs pass through untouched (the caller knew its own type). Exported
-// for tests/pass28-hardening.test.ts.
+// travelled under a PNG label. Probed against the live Ark gateway
+// (2026-10-05): it does NOT validate the label today — the same JPEG bytes
+// under image/png and image/jpeg both answered 200 — and ModelVerse's edit
+// path sniffed already (below), so this was a correctness fix, not an outage.
+// It stays because the claim is one other consumers DO act on: the S3
+// driver's presigned Content-Type, the external moderation detector and
+// /api/files all read a type that must be the bytes'. Same rule the multipart
+// edit path states below and storeContentType enforces at PUT time. Only the
+// leading bytes of the payload are decoded — the sniff reads at most 12 bytes
+// (lib/media-type.ts), so a prefix is exact and the multi-megabyte copy a full
+// decode would make is pointless. Already-prefixed data URLs pass through
+// untouched (the caller knew its own type). Exported for
+// tests/pass28-hardening.test.ts.
 export function refImageDataUrl(imageBase64: string): string {
   if (imageBase64.startsWith("data:")) return imageBase64;
   const head = Buffer.from(imageBase64.slice(0, 64), "base64");
@@ -226,8 +231,9 @@ export async function editWithGpt(
     fd.append("n", "1");
     // The part's media type is the bytes', not a hardcoded PNG: the reference
     // frame is stored under a sniffed key (lib/store.ts) and this is the same
-    // buffer, so a JPEG upload announced as image/png is a label the gateway can
-    // act on — after the call has been billed.
+    // buffer, so a JPEG upload announced as image/png is a claim on the
+    // payload's type that every reader of it — the gateway's own decode, the
+    // S3 presigned Content-Type, the external detector — has to trust.
     const refBytes = Buffer.from(imageBase64, "base64");
     const refType = storeContentType(refBytes, "image/png");
     fd.append("image", new Blob([refBytes], { type: refType }), `input.${extensionForContentType(refType)}`);

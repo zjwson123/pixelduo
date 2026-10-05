@@ -23,10 +23,14 @@ import { createHmac } from "crypto";
 //     task was failed and refunded on the spot. taskCreatedAt is stamped in SQL
 //     now() and read against dbNow; the nextAttemptAt family (claim predicate,
 //     poll lease, first-poll delay, retry backoff) follows the same rule.
-//   - P3 provider: the four data-URL call sites hardcoded image/png for a
+//   - P4 provider: the four data-URL call sites hardcoded image/png for a
 //     reference frame the worker reads back out of storage, so a JPEG/WebP
-//     upload travelled under a PNG label the gateway can act on — after the
-//     billed call. The declared type is sniffed from the bytes now.
+//     upload travelled under a PNG label. Probed against the live Ark gateway:
+//     it does not validate the label today (identical 200s for the same JPEG
+//     under both labels), so this is a correctness fix — the declared type is
+//     a claim the S3 Content-Type, the moderation detector and /api/files do
+//     read — not the outage the audit hypothesized. The declared type is
+//     sniffed from the bytes now; the edit path is live-verified end to end.
 //   - P4 HTTP: /api/files refused a NUL key by THROWING outside any try, which
 //     escaped to Next's 500 path plus one Sentry event per anonymous request —
 //     the exact shape pass 27 closed on the other eight routes.
@@ -209,8 +213,8 @@ describe("pass 28 — reference frames travel as the type their bytes are", () =
     const jpeg = b64([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46]);
     const webp = b64([0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x45, 0x42, 0x50]);
     const png = b64([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-    // Pre-fix all four call sites said image/png regardless (the label the
-    // gateway can act on, after the call is billed).
+    // Pre-fix all four call sites said image/png regardless — a claim about
+    // the payload's type that every downstream reader has to trust.
     expect(refImageDataUrl(jpeg)).toBe(`data:image/jpeg;base64,${jpeg}`);
     expect(refImageDataUrl(webp)).toBe(`data:image/webp;base64,${webp}`);
     expect(refImageDataUrl(png)).toBe(`data:image/png;base64,${png}`);

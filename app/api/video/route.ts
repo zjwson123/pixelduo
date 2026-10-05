@@ -133,8 +133,9 @@ export async function POST(req: Request) {
       // the worker inlines the bytes to the provider as a data URL whose type
       // is sniffed again (lib/providers refImageDataUrl — the i2v path no
       // longer has Ark fetch this object; this comment used to describe that
-      // older mechanism). A mismatch anywhere on that chain is a rejected (and
-      // billed) task.
+      // older mechanism). A label that disagrees with the bytes is a lie every
+      // later reader inherits — which is why each hop re-sniffs instead of
+      // trusting the claim.
       const storage = getStorage();
       let result: Awaited<ReturnType<typeof createMediaJob>>;
       try {
