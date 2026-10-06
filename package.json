@@ -32,7 +32,7 @@
     "qrcode": "^1.5.4",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
-    "sharp": "^0.35.4",
+    "sharp": "^0.35.5",
     "stripe": "^17.7.0",
     "undici": "^8.10.2",
     "zod": "^3.23.8"
@@ -60,6 +60,6 @@
     "fsevents@2.3.2": true,
     "fsevents@2.3.3": true,
     "prisma@6.19.3": true,
-    "sharp@0.35.4": true
+    "sharp@0.35.5": true
   }
 }
