@@ -114,16 +114,25 @@ export async function grantCreditsTx(
 // drifted the anchor, so a customer billed on the 31st was renewing on the 3rd
 // within a couple of cycles. Clamping keeps the anchor: Jan 31 → Feb 28/29 →
 // Mar 28, which is what a monthly subscription means.
+//
+// The arithmetic runs on the UTC fields (pass 30): getDate/setMonth/getFullYear
+// read the process's LOCAL calendar, so the same build against the same
+// database produced a different renewal instant per host TZ — an anchor at
+// 2026-04-30T20:00Z renewed 2026-05-30 under the UTC containers and 2026-05-31
+// on a +08 dev/operator box (probed), a day of paid tier and of quota validity
+// that differs between two deploys of one build. The instant is compared
+// against now() in SQL and stored as UTC, so the UTC calendar is the one it
+// belongs to.
 export function addBillingMonth(base: Date): Date {
-  const day = base.getDate();
+  const day = base.getUTCDate();
   const renew = new Date(base);
   // Move the month while parked on the 1st, so the intermediate state cannot
   // roll over either.
-  renew.setDate(1);
-  renew.setMonth(renew.getMonth() + 1);
+  renew.setUTCDate(1);
+  renew.setUTCMonth(renew.getUTCMonth() + 1);
   // Day 0 of the next month is the last day of the target month.
-  const lastDay = new Date(renew.getFullYear(), renew.getMonth() + 1, 0).getDate();
-  renew.setDate(Math.min(day, lastDay));
+  const lastDay = new Date(Date.UTC(renew.getUTCFullYear(), renew.getUTCMonth() + 1, 0)).getUTCDate();
+  renew.setUTCDate(Math.min(day, lastDay));
   return renew;
 }
 
@@ -974,9 +983,31 @@ export async function fulfillOrder(
         // but the carryover is a property of the cycle, not of the purchase.
         // The witness is the ROLLOVER grant already stamped with that cycle's
         // funding order: the same provenance the refund clawback depends on.
-        if (rollover > 0 && usage.fundingRefId) {
+        //
+        // Two witness keys, because the refId one cannot see a LEGACY grant.
+        // The migration that added refType/refId (20260811080000) backfilled
+        // nothing, so an account whose newest ended SUBSCRIPTION row predates
+        // it has fundingRefId === null here — the old `if (usage.fundingRefId)`
+        // guard skipped the witness entirely and every further renewal before a
+        // later cycle ended paid the same cycle's 30% again (probed: 600 + 600
+        // from one 2000-credit cycle, each stamped with its own incoming order,
+        // so neither is reachable by the other's refund clawback). The second
+        // key is the cycle itself: a carryover for cycle C can only be minted
+        // at or after C's end (the gate above requires it), and a LATER cycle's
+        // carryover can never have been minted before that later cycle ended —
+        // so `createdAt >= C.expiresAt` names exactly "a carryover already paid
+        // for C". createdAt is the DB default now(), compared against the
+        // DB-stored expiry: both sides of this comparison are the database's.
+        if (rollover > 0 && (usage.fundingRefId || usage.fundingExpiresAt)) {
           const alreadyPaid = await client.creditGrant.count({
-            where: { userId, source: "ROLLOVER", refId: usage.fundingRefId },
+            where: {
+              userId,
+              source: "ROLLOVER",
+              OR: [
+                ...(usage.fundingRefId ? [{ refId: usage.fundingRefId }] : []),
+                ...(usage.fundingExpiresAt ? [{ createdAt: { gte: usage.fundingExpiresAt } }] : []),
+              ],
+            },
           });
           if (alreadyPaid > 0) rollover = 0;
         }
@@ -996,7 +1027,14 @@ export async function fulfillOrder(
         );
       }
     } else {
-      const expiresAt = new Date(Date.now() + PACK_VALIDITY_MS);
+      // The pack's deadline is read by SQL everywhere it matters —
+      // spendCreditsTx's `"expiresAt" > now()` and runExpiry's sweep — and it
+      // was the last grant deadline still derived from the APP clock, so a
+      // host-vs-database skew moved the whole validity window by the skew
+      // (probed: 2h skew → 2h-shifted expiry). The plan branch above already
+      // derives `renew` from dbNow; this is its sibling.
+      const now = await dbNow(client);
+      const expiresAt = new Date(now.getTime() + PACK_VALIDITY_MS);
       await grantCreditsTx(client, userId, "PURCHASE", credits, expiresAt, "order", orderId, "credit pack");
     }
     return { alreadyPaid: false };

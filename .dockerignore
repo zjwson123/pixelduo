@@ -45,3 +45,16 @@ dist
 # Dockerfile prunes perf/ as well — this file stops it entering the context at
 # all.
 perf
+# Editor/agent state a BUILD HOST may carry (pass 31). `.gitignore` lists these
+# precisely because they exist on a working machine, and that is the trap: they
+# are invisible to every check that asks git what is in the tree, while
+# .vscode/settings.json, .vscode/launch.json and .idea/workspace.xml routinely
+# hold pasted tokens, private hostnames and local paths. The worker stage takes
+# whatever is in the context (the bind-mount cp), so both filters must name
+# them — this file keeps them out of the context, the Dockerfile's prune list
+# names them for any path that bypasses this file.
+.vscode
+.idea
+.claude
+.cursor
+*.swp

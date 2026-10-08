@@ -1,4 +1,5 @@
 import Redis from "ioredis";
+import { isProductionRuntime } from "./runtime-env";
 
 export interface RateLimitResult {
   ok: boolean;
@@ -210,6 +211,8 @@ export async function peekRateLimit(key: string, limit: number, windowMs: number
 // request, disabling every per-IP limit (login, register, password reset, mail
 // bombing, 2FA). It is only consulted when the deployment explicitly declares a
 // proxy that sets it.
+let warnedMissingXff = false;
+
 export function clientIp(req: Request): string {
   const fwd = req.headers.get("x-forwarded-for");
   if (fwd) {
@@ -218,6 +221,19 @@ export function clientIp(req: Request): string {
   }
   if (process.env.TRUST_X_REAL_IP === "1") {
     return req.headers.get("x-real-ip") ?? "unknown";
+  }
+  // Without the header every caller shares ONE bucket per scope ("unknown"), so
+  // a single caller can spend the register/login/reset caps for everybody —
+  // pass 31. All three shipped composes put Caddy in front (which appends XFF),
+  // and .env.example documents the requirement, but nothing at RUNTIME noticed
+  // the misconfiguration: a direct-to-app deployment just looked like ordinary
+  // 429s. One warning per process makes it visible in the first minutes
+  // instead of during an incident.
+  if (!warnedMissingXff && isProductionRuntime()) {
+    warnedMissingXff = true;
+    console.warn(
+      "[rate-limit] a production request arrived with no X-Forwarded-For — every caller now shares the 'unknown' IP bucket, so one caller can exhaust the anonymous caps for everyone. Deploy behind the edge proxy (docs/deploy.md) or set TRUST_X_REAL_IP=1 if it sets X-Real-IP.",
+    );
   }
   return "unknown";
 }

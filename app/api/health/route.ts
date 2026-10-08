@@ -55,7 +55,18 @@ async function runProbe(now: number): Promise<{ body: Record<string, unknown>; o
       null as { id: string } | null,
     ),
   ]);
-  const ok = dbOk && redisOk && storageOk;
+  // REDIS_URL unset is a SUPPORTED mode, not a fault: the rate limiter falls
+  // back to per-process memory (documented in .env.example and the README, and
+  // relied on by lib/login-guard.ts and lib/twofa.ts, which preserve their caps
+  // locally), and the body below already renders it as a third state —
+  // "unconfigured", not "down". Counting it as a fault made a healthy no-Redis
+  // instance answer 503 forever: the container healthcheck in all three compose
+  // files is `wget -qO-` (the HTTP status IS the verdict), so the container was
+  // marked unhealthy, `up --wait` aborted, and the documented `curl -fsS`
+  // smoke gate failed while db and storage were green. "Configured but
+  // unreachable" keeps the hard 503 — that is the real multi-instance outage
+  // signal (see checkRedis), which is why this asks the env, not the probe.
+  const ok = dbOk && storageOk && (redisOk || !process.env.REDIS_URL);
   // Public body: reachability + coarse queue liveness only. Queue depths and
   // heartbeat timestamps are recon food for timing submissions — not exposed.
   const body = {

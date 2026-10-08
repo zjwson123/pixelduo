@@ -132,7 +132,21 @@ local i = hasIp and tonumber(redis.call('GET', KEYS[2]) or '0') or 0
 local maxE = tonumber(ARGV[2])
 local maxI = tonumber(ARGV[3])
 if e >= maxE or (hasIp and i >= maxI) then
-  local ttl = redis.call('TTL', KEYS[1])
+  -- The wait is the TRIPPED brake's remaining TTL (pass 31). This always
+  -- answered TTL(KEYS[1]) — the per-email key — even when the per-(email, IP)
+  -- cap is what refused, and the two keys are created by different requests, so
+  -- their expiries differ by up to a full window: a client was told to come
+  -- back up to a window early, and when the email key had already expired the
+  -- answer was the full window for a lock that clears in seconds. With both
+  -- tripped, the longer wait is the honest one (either refuses until it
+  -- clears); ttl < 0 means a key vanished between the checks, where the full
+  -- window is the safe answer.
+  local ttl = -1
+  if e >= maxE then ttl = redis.call('TTL', KEYS[1]) end
+  if hasIp and i >= maxI then
+    local ttlPair = redis.call('TTL', KEYS[2])
+    if ttlPair > ttl then ttl = ttlPair end
+  end
   if ttl < 0 then ttl = tonumber(ARGV[1]) end
   return {0, ttl}
 end

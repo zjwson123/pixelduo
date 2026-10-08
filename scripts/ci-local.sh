@@ -81,9 +81,19 @@ docker run --rm --entrypoint sh pd-ci-web -c '
   test -e /app/prisma/schema.prisma
   test ! -e /app/public/public
   test ! -e /app/prisma/prisma
-  test ! -e /app/docs
-  test ! -e /app/tests
-  test ! -e /app/e2e
+  # The reachable entries of the web prune (pass 31). docs/tests/e2e cannot be
+  # in this image at all (outputFileTracingExcludes removes them from
+  # .next/standalone, which is all the web stage copies), so the three `test !`s
+  # that used to sit here were true no matter what the prune list said; these
+  # seven ARE traced into the tree and only the prune removes them. Same block
+  # as ci.yml — a dropped name must fail both gates.
+  test ! -e /app/designs
+  test ! -e /app/docker-compose.yml
+  test ! -e /app/docker-compose.single.yml
+  test ! -e /app/docker-compose.prod.yml
+  test ! -e /app/Caddyfile
+  test ! -e /app/README.md
+  test ! -e /app/tsconfig.tsbuildinfo
   test ! -e /app/Dockerfile
   for f in /app/.env /app/.env.local /app/.env.production; do
     if [ -e "$f" ]; then echo "dotenv in image: $f"; exit 1; fi
@@ -110,6 +120,19 @@ docker run --rm --entrypoint sh pd-ci-worker -c '
   test ! -e /app/docker-compose.yml
   test ! -e /app/Caddyfile
   test ! -e /app/README.md
+  # The dot-entries (pass 30): in the build context, named by no prune list before,
+  # and outside every assertion — ci.yml (deploy invariants + the published CI
+  # secret) shipped in the worker image with the gate unable to see it.
+  test ! -e /app/.github
+  test ! -e /app/.npmrc
+  test ! -e /app/.gitignore
+  test ! -e /app/.dockerignore
+  # The editor state a build host may carry (pass 31): gitignored, so invisible
+  # to every "is it in the repo" check, and previously named by neither
+  # .dockerignore nor this prune — .vscode/settings.json and .idea/workspace.xml
+  # routinely hold pasted tokens and private hostnames.
+  test ! -e /app/.vscode
+  test ! -e /app/.idea
   for f in /app/.env /app/.env.local /app/.env.production; do
     if [ -e "$f" ]; then echo "dotenv in image: $f"; exit 1; fi
   done
@@ -172,14 +195,20 @@ DEFAULT_MAIL_DEV_DIR="/tmp/pd-ci-mail"
 case "${MAIL_DEV_DIR:-$DEFAULT_MAIL_DEV_DIR}" in
   # `..` first: the /tmp/* arm below matched "/tmp/../Users/<user>/x" textually,
   # so the one typo this guard exists for ("I meant /tmp/pd-ci-mail") still
-  # handed the `rm -rf` on line 74 a directory outside /tmp.
+  # handed the `rm -rf` below a directory outside /tmp.
   *..*)
     echo "refusing to rm -rf MAIL_DEV_DIR='$MAIL_DEV_DIR' — it must not contain '..'" >&2
     exit 1
     ;;
-  /tmp/pd-ci-mail|/tmp/pd-ci-mail/*|/tmp/*|/var/folders/*|"$PWD"/.tmp*) ;;
+  # STRICTLY this script's own scratch directory (pass 31). The arms this
+  # replaced (`/tmp/*`, `/var/folders/*`, "$PWD"/.tmp*) admitted every path under
+  # /tmp — including MAIL_DEV_DIR=/tmp/pd-mail, the value the README's manual dev
+  # flow and the CI e2e job export for a DIFFERENT mailer instance — so the guard
+  # whose whole purpose was "never delete a directory we do not own" deleted
+  # exactly such a directory. The strict pattern is the comment's own rule.
+  /tmp/pd-ci-mail|/tmp/pd-ci-mail/*) ;;
   *)
-    echo "refusing to rm -rf MAIL_DEV_DIR='$MAIL_DEV_DIR' — set it to a directory under /tmp (or unset it)" >&2
+    echo "refusing to rm -rf MAIL_DEV_DIR='$MAIL_DEV_DIR' — unset it (this script owns only /tmp/pd-ci-mail)" >&2
     exit 1
     ;;
 esac

@@ -9,6 +9,7 @@ import { getStorage } from "../storage";
 import { getModel, type ModelInfo } from "../model-registry";
 import { upstreamFor } from "../model-upstream";
 import { storeContentType, extensionForContentType } from "../media-type";
+import { sliceCodePoints } from "../untrusted-text";
 import type { Quality } from "../cost";
 
 export interface ProviderImage {
@@ -49,9 +50,18 @@ const MAX_PROVIDER_RESPONSE_BYTES = 40 * 1024 * 1024;
 // site, not just the ones that happened to slice it: Job.error is an
 // unbounded text column, so one hostile/garbled response could otherwise
 // store ~1 MB per job.
+//
+// The bound is on code points (pass 31): slicing at 240 UTF-16 units could land
+// between the halves of an astral character, and the resulting lone surrogate
+// made failJob's Job.error write throw InvalidArg — so the worker's catch block
+// (whose FIRST statement is that failJob call) lost the provider's error, the
+// retry/terminal classification AND reclaimStoredArtifact for everything the
+// attempt had already stored, and the job sat running until the reaper. The
+// offset is discoverable by a hostile gateway: echo the prompt back on a 4xx
+// with an emoji straddling 240.
 const ERR_TEXT_MAX = 240;
 function errText(value: string): string {
-  return value.slice(0, ERR_TEXT_MAX);
+  return sliceCodePoints(value, ERR_TEXT_MAX);
 }
 
 async function readTextCapped(res: Response, maxBytes = MAX_PROVIDER_RESPONSE_BYTES): Promise<string> {
@@ -360,6 +370,16 @@ export async function generateWithWanImage(
     }
   }
   if (!out.length) throw new Error(`${modelId} returned no images`);
+  // Charge-for-N-deliver-less (pass 31): `parameters.n` is a REQUEST, and the
+  // loop above accepted any shorter response as success — so a job charged
+  // `count` credits settled as done with fewer Image rows and no refund. The
+  // gpt and seedream lanes throw on a missing image (their loops require one
+  // result per call), so failing here is also the consistent classification:
+  // retry, then refund. Latent only while both wan models are disabled
+  // (scripts/worker.ts fails a disabled model before this is reached).
+  if (out.length < count) {
+    throw new Error(`${modelId} returned ${out.length} of ${count} images`);
+  }
   return out;
 }
 
@@ -427,16 +447,24 @@ export async function generateImages(input: {
     // the lanes would race on the caller's array). Wait for BOTH lanes to settle
     // and reclaim a partially-failed batch's objects before surfacing the error,
     // so a retry starts from a clean slate instead of stacking orphans.
+    //
+    // "The images it was handed" was the flaw (pass 31): a lane that stores k
+    // images and THEN throws hands the caller nothing — its local accumulator
+    // dies with the rejected promise — so those k objects were named by no
+    // Image row, no checkpoint and no erasure path, and the retry re-billed the
+    // lane from zero. The collector below is a per-call LOCAL array (no DB
+    // write, so nothing races): every key EITHER lane stores lands in it the
+    // moment it is stored, and the rejection path reclaims from it.
+    const storedKeys: string[] = [];
+    const collect = async (img: ProviderImage) => {
+      storedKeys.push(img.key);
+    };
     const [gpt, seed] = await Promise.allSettled([
-      generateWithGpt(input.prompt, input.quality, input.count),
-      generateWithSeedream(input.prompt, input.count, undefined, input.watermark ?? true),
+      generateWithGpt(input.prompt, input.quality, input.count, collect),
+      generateWithSeedream(input.prompt, input.count, undefined, input.watermark ?? true, collect),
     ]);
     if (gpt.status === "rejected" || seed.status === "rejected") {
-      const stored = [
-        ...(gpt.status === "fulfilled" ? gpt.value : []),
-        ...(seed.status === "fulfilled" ? seed.value : []),
-      ];
-      await Promise.all(stored.map((img) => getStorage().delete(img.key).catch(() => undefined)));
+      await Promise.all(storedKeys.map((key) => getStorage().delete(key).catch(() => undefined)));
       throw gpt.status === "rejected" ? gpt.reason : (seed as PromiseRejectedResult).reason;
     }
     return [...gpt.value, ...seed.value];
@@ -595,8 +623,20 @@ async function createWanVideoTask(
       // Same no-redirect rule as callWithKeys.
       redirect: "manual",
     });
+    // The status check comes FIRST, like every sibling (callWithKeys,
+    // pollSeedanceTask, pollWanVideoTask): parsing before it meant a non-JSON
+    // error reply — an HTML 403 from a gateway or CDN — threw a SyntaxError
+    // that replaced the real status in Job.error, and the transient-looking
+    // message made the already-billed create call retry up to maxAttempts.
+    // Unreachable today (the wan lanes are disabled and the worker fails such
+    // jobs terminally before this), fixed so it stays that way when they are
+    // re-enabled.
+    if (!res.ok) {
+      await res.body?.cancel().catch(() => undefined);
+      throw new Error(`wan video task creation failed: HTTP ${res.status}`);
+    }
     const data = (await readJsonCapped(res, 1024 * 1024)) as { output?: { task_id?: string }; code?: string; message?: string };
-    if (!res.ok || !data.output?.task_id) {
+    if (!data.output?.task_id) {
       throw new Error(
         `wan video task creation failed: ${errText(String(data.code ?? res.status))} ${errText(data.message ?? "")}`,
       );

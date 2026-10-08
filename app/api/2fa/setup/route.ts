@@ -37,7 +37,7 @@ export async function POST(req: Request) {
     // lib/login-guard.ts): this is a password oracle, and the per-minute
     // buckets above are not a cumulative brake.
     const attempt = await reservePasswordReauth(user.email, req);
-    if (!attempt.allowed) return fail(new ApiError(429, "rate-limited"));
+    if (!attempt.allowed) return fail(new ApiError(429, "rate-limited", attempt.retryAfterSec));
     if (!(await bcrypt.compare(body.password, user.passwordHash))) {
       await alertPasswordReauthAbuse(user.email);
       return fail(new Error("invalid-password"));

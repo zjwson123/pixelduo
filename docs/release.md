@@ -75,7 +75,7 @@ curl -sI https://pixelduo.ai/ | grep -iE "content-security-policy|strict-transpo
 
 ## 5. 回滚
 
-- 保留上一版本镜像 tag，`IMAGE_WEB=pixelduo-web:prev docker compose -f docker-compose.prod.yml up -d`
+- 保留上一版本镜像 tag，`IMAGE_WEB=image-gen-web:prev IMAGE_WORKER=image-gen-worker:prev docker compose -f docker-compose.prod.yml up -d`（镜像名是 compose 里 pin 的 `image-gen-web`/`image-gen-worker`，不是目录名 `pixelduo-web`——用错名字会在事故中报 image not found）
 - 含数据库迁移的升级需先备份；迁移回滚人工处理（托管商 PITR）
 
 ## 6. 上线后第一周观察

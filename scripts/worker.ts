@@ -1,4 +1,4 @@
-import { checkpointJobArtifact, checkpointJobProgress, checkpointKeys, claimNextJob, completeJob, failJob, heartbeat, reclaimStoredArtifact, recoverStuckJobs, setJobPolling, schedulePoll } from "../lib/queue";
+import { checkpointJobArtifact, checkpointJobProgress, checkpointKeys, claimNextJob, completeJob, extendPollLease, failJob, heartbeat, reclaimStoredArtifact, recoverStuckJobs, setJobPolling, schedulePoll } from "../lib/queue";
 import { generateImages, laneCountFor, createVideoTask, pollVideoTask, saveRemoteVideo, mockImageProviderEnabled, type ProviderImage } from "../lib/providers";
 import { modelCost, videoCost } from "../lib/cost";
 import { analyzeAllImagesSequentially, moderationRequested } from "../lib/safety";
@@ -10,7 +10,7 @@ import { bakeWatermark } from "../lib/watermark";
 import { storeContentType } from "../lib/media-type";
 import { getModel } from "../lib/model-registry";
 import { dbNow } from "../lib/ledger";
-import { prisma } from "../lib/prisma";
+import { prisma, assertDatabaseSessionUtc } from "../lib/prisma";
 import { isPermanentProviderError } from "../lib/worker-errors";
 import { isProductionRuntime } from "../lib/runtime-env";
 
@@ -415,6 +415,12 @@ export async function processVideoJob(job: {
       // Download and store the video. A retried attempt may find a file the
       // previous one stored: pass it as the key to supersede so the checkpoint
       // never names two objects, and only the live one is left behind.
+      //
+      // The lease is extended before each of the long steps below (pass 31):
+      // the phase's worst case exceeds the lease, and a peer that claims the
+      // job mid-phase duplicates the download and the ffmpeg run — see
+      // extendPollLease in lib/queue.ts.
+      await extendPollLease(job.id, workerId);
       const priorKey = checkpointKeys(job.images)[0] ?? null;
       const segmentKey = await saveRemoteVideo(status.videoUrl);
       storedKey = segmentKey;
@@ -424,6 +430,9 @@ export async function processVideoJob(job: {
         // Extend jobs deliver original + continuation as ONE clip. If the
         // source is gone or ffmpeg fails, ship the segment alone: it is
         // exactly what the provider billed for, and a delivery beat a refund.
+        // (Two reads at up to 90s each, then ffmpeg at up to 180s: one lease
+        // extension before the reads, one before the merge.)
+        await extendPollLease(job.id, workerId);
         const [srcBuf, segBuf] = await Promise.all([
           getStorage().get(job.sourceVideoKey),
           getStorage().get(segmentKey),
@@ -444,6 +453,7 @@ export async function processVideoJob(job: {
           throw new Error("segment-missing: the generated video could not be read back from storage");
         }
         if (srcBuf) {
+          await extendPollLease(job.id, workerId);
           const merged = await concatVideos(srcBuf, segBuf);
           if (merged) {
             const finalKey = newStorageKey("mp4");
@@ -453,7 +463,14 @@ export async function processVideoJob(job: {
             await checkpointJobArtifact(job.id, segmentKey, finalKey);
             console.log(`[worker ${workerId}] job ${job.id}: extended video assembled (${videoKey})`);
           } else {
-            console.warn(`[worker ${workerId}] job ${job.id}: concat failed — delivering segment only`);
+            // A null result is a refusal, not just an ffmpeg failure: concatVideos
+            // returns null for non-ISO-BMFF inputs, for an ffmpeg failure, and —
+            // before spawning anything — when the two buffers exceed
+            // CONCAT_MAX_INPUT_BYTES (lib/video-concat.ts). The sizes tell an
+            // operator which of those happened.
+            console.warn(
+              `[worker ${workerId}] job ${job.id}: concat failed or declined (${srcBuf.length + segBuf.length} input bytes) — delivering segment only`,
+            );
           }
         } else {
           console.warn(`[worker ${workerId}] job ${job.id}: source video missing — delivering the segment alone`);
@@ -564,6 +581,18 @@ async function main() {
   // customer's broken images.
   try {
     mockImageProviderEnabled();
+  } catch (e) {
+    console.error(`[fatal] ${e instanceof Error ? e.message : String(e)}`);
+    process.exit(1);
+  }
+  // The database session timezone, same fail-closed rule as the two gates above
+  // (see lib/prisma.ts's pin): every deadline, lease and timestamp comparison in
+  // this process is written or read on the assumption that a naive `timestamp`
+  // column holds UTC, and a session on the server's local time shifts all of
+  // them by the offset — a worker running that way cannot judge its own video
+  // budget and schedules its polls hours away from when they are due.
+  try {
+    await assertDatabaseSessionUtc();
   } catch (e) {
     console.error(`[fatal] ${e instanceof Error ? e.message : String(e)}`);
     process.exit(1);

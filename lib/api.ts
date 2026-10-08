@@ -5,6 +5,7 @@ import { authOptions } from "./auth";
 import { prisma } from "./prisma";
 import { rateLimit, clientIp } from "./rate-limit";
 import { captureError } from "./observability";
+import { sliceCodePoints } from "./untrusted-text";
 
 // Clients surface the error string verbatim, so a bare "invalid-input" told
 // the user nothing about which field failed (a 2-char prompt, an oversized
@@ -341,14 +342,30 @@ function refuseNulDeep(value: unknown, depth: number): void {
   }
 }
 
-// Shared by the body reader above and by query-parameter readers: a NUL cannot
-// reach PostgreSQL from either. Kept as a throwing helper rather than a
-// sanitizer — silently deleting bytes out of a prompt or a report would change
-// what the user wrote, and this codebase's rule is that a refusal is honest and
-// a silent substitution is not.
+// Shared by the body reader above and by query-parameter readers: neither a NUL
+// nor ill-formed UTF-16 can reach PostgreSQL from either. Kept as a throwing
+// helper rather than a sanitizer — silently deleting bytes out of a prompt or a
+// report would change what the user wrote, and this codebase's rule is that a
+// refusal is honest and a silent substitution is not.
+//
+// The LONE SURROGATE is the NUL's sibling, found by probe in pass 30: the six
+// ASCII characters `\ud800` become a real unpaired half after JSON.parse, and
+// no text column can encode one. Prisma throws InvalidArg quoting the
+// invocation site and build path, bcryptjs throws "Invalid string / salt: Not
+// a string" — both unexpected, so fail() answered 500 internal-error and
+// captureError reported an incident per request, on the anonymous routes
+// (register, feedback) as well as the authenticated ones; and next-auth
+// reflects a credentials-callback throw to the caller, so the login endpoint
+// leaked the Prisma invocation snippet with file paths (its body is parsed by
+// next-auth, not by parseJsonBody — see hasControlChars in lib/auth.ts). A
+// well-formed astral character (every emoji) is unaffected: only an unpaired
+// half is refused.
 export function refuseNul(value: string): void {
   if (value.includes("\u0000")) {
     throw new ApiError(400, "invalid-input: NUL characters are not allowed");
+  }
+  if (!value.isWellFormed()) {
+    throw new ApiError(400, "invalid-input: malformed text encoding");
   }
 }
 
@@ -356,8 +373,16 @@ export function refuseNul(value: string): void {
 // scans (only the cost matters), and a NUL in one was the third way into the
 // 22021-masked-500 above — `?cat=%00` on /api/templates produced two Postgres
 // errors and two captured incidents per request, for anyone with an account.
+//
+// The bound runs on a CODE-POINT boundary (pass 31): `raw.slice(0, max)` cut at
+// `max` UTF-16 units, so a well-formed emoji straddling the bound became a lone
+// surrogate AFTER refuseNul had cleared the input — the exact value the refusal
+// exists to keep out of Prisma, reachable on all four readers (?cat=/?q= of
+// /api/templates, ?q= and ?userId= of the two admin reads) by any signed-in
+// account: probed InvalidArg → fail()'s unexpected path → 500 + one captured
+// incident per request.
 export function queryText(raw: string | null, max: number): string | null {
   if (raw === null) return null;
   refuseNul(raw);
-  return raw.slice(0, max);
+  return sliceCodePoints(raw, max);
 }

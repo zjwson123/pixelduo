@@ -8,8 +8,15 @@ const BUCKETS = [1, 3, 7] as const;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 // Send at most one reminder per grant per bucket (7/3/1 days before expiry) for
-// paid credits (PURCHASE packs + SUBSCRIPTION quota). Deduplicated by
-// CreditReminder(grantId, daysBefore). Failure to send never blocks the cron.
+// expiring paid credits. Deduplicated by CreditReminder(grantId, daysBefore).
+// Failure to send never blocks the cron.
+//
+// The source list matches listExpiringCredits (lib/credits.ts) exactly: pass 28
+// rolled ROLLOVER and REFUND into the in-app banner and left this mail behind,
+// so a 30% carryover or a REFUND replacement grant — both spendable and both
+// expiring, the latter minted exactly when the customer is owed something —
+// was advertised in the workbench and silently destroyed for anyone not
+// looking at it (probed: banner listed three sources, the mail only PURCHASE).
 export async function sendExpiryReminders(): Promise<number> {
   // The DATABASE's clock (see listExpiringCredits): a mail that says "1 day
   // left" is a claim about the deadline the spend path and the expiry sweep
@@ -23,7 +30,7 @@ export async function sendExpiryReminders(): Promise<number> {
       // yet must not be mailed as "1 day left" (Math.max(1, …) below pins the
       // bucket, so nothing else filters it out).
       expiresAt: { not: null, gt: now, lte: horizon },
-      source: { in: ["PURCHASE", "SUBSCRIPTION"] },
+      source: { in: ["PURCHASE", "SUBSCRIPTION", "ROLLOVER", "REFUND"] },
     },
     select: { id: true, userId: true, remaining: true, expiresAt: true },
   });

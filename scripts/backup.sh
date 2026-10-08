@@ -12,11 +12,39 @@ set -euo pipefail
 # compose backup loops pin the container side the same way.
 umask 077
 
-CONTAINER="${1:-pixelduo-db}"
-DB="${2:-pixelduo}"
+CONTAINER="${1:-}"
+DB="${2:-${PGDATABASE:-pixelduo}}"
+DB_USER="${DB_USER:-${POSTGRES_USER:-pixelduo}}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 BACKUP_DIR="${BACKUP_DIR:-backups}"
 KEEP="${KEEP:-14}"
+
+# A container named `pixelduo-db` exists only in the DEV compose (it pins
+# container_name); the single-VPS stack leaves Compose to name it
+# `<project>-db-1`, so the manual dump the README and docs/deploy.md document
+# died with "No such container" on exactly the deployment whose runbook points
+# here (pass 31 — loudly, so nothing was lost, but during an incident). The
+# DEFAULT therefore resolves by the compose service LABEL, which is independent
+# of project directory and file name, and SAYS which container it picked. An
+# explicitly passed name is used as given — a typo must fail loudly rather than
+# silently dump a different database (the pass-25 assertion that a bad
+# container is a nonzero exit pins exactly that). The role comes from
+# POSTGRES_USER for the same reason (.env.example advises changing the default
+# and the compose file makes it configurable) — a hardcoded `-U pixelduo` fails
+# on a stack that followed that advice.
+if [ -z "$CONTAINER" ]; then
+  CONTAINER="${DB_CONTAINER:-pixelduo-db}"
+  if ! docker inspect "$CONTAINER" >/dev/null 2>&1; then
+    FOUND="$(docker ps --filter label=com.docker.compose.service=db --format '{{.Names}}' | head -n1)"
+    if [ -n "$FOUND" ]; then
+      echo "[backup] no container '$CONTAINER' — using '$FOUND' (the running compose 'db' service)" >&2
+      CONTAINER="$FOUND"
+    else
+      echo "[backup] no container '$CONTAINER' and no running compose 'db' service — pass one explicitly: ./scripts/backup.sh <container> [database]" >&2
+      exit 1
+    fi
+  fi
+fi
 
 mkdir -p "$BACKUP_DIR"
 OUT="$BACKUP_DIR/${DB}-${STAMP}.sql.gz"
@@ -43,7 +71,7 @@ find "$BACKUP_DIR" -maxdepth 1 -name ".*.partial" -type f -mtime +1 -delete 2>/d
 # the restore instructions and the rotation glob both key on — an operator
 # restoring that file gets a half database and no warning. `set -o pipefail`
 # makes the failure loud, but only the rename can keep the directory honest.
-docker exec "$CONTAINER" pg_dump -U pixelduo -d "$DB" | gzip > "$TMP"
+docker exec "$CONTAINER" pg_dump -U "$DB_USER" -d "$DB" | gzip > "$TMP"
 mv "$TMP" "$OUT"
 echo "backup written: $OUT ($(du -h "$OUT" | cut -f1))"
 
@@ -53,4 +81,4 @@ ls -1t "$BACKUP_DIR"/"${DB}"-*.sql.gz 2>/dev/null | tail -n +$((KEEP + 1)) | whi
   echo "removed old backup: $old"
 done
 
-echo "restore: gunzip -c $OUT | docker exec -i $CONTAINER psql -U pixelduo -d $DB"
+echo "restore: gunzip -c $OUT | docker exec -i $CONTAINER psql -U $DB_USER -d $DB"

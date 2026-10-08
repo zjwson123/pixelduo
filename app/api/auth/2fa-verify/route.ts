@@ -5,7 +5,7 @@ import {
   verifyTotp,
   useBackupCode,
   createPreAuthToken,
-  isTwoFactorLocked,
+  twoFactorLockStatus,
   recordTwoFactorFailure,
   clearTwoFactorFailures,
   claimTotpCode,
@@ -48,7 +48,8 @@ export async function POST(req: Request) {
     // limit above bounds a burst, this bounds the campaign (see lib/twofa.ts).
     // It applies to backup codes too — the account is under second-factor
     // attack, so every path that accepts one is closed until it clears.
-    if (await isTwoFactorLocked(su.id)) return fail(new ApiError(429, TWOFA_LOCKED_ERROR));
+    const lock = await twoFactorLockStatus(su.id);
+    if (lock.locked) return fail(new ApiError(429, TWOFA_LOCKED_ERROR, lock.retryAfterSec));
     const bodyRaw = await readBodyCapped(req, 8 * 1024);
     if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
     const body = schema.parse(parseJsonBody(bodyRaw.raw));

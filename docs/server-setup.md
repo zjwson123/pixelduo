@@ -28,6 +28,9 @@ cp .env.example .env.production
 #   NEXTAUTH_URL=https://pixelduo.ai
 #   NEXTAUTH_SECRET=$(openssl rand -base64 32)
 #   POSTGRES_PASSWORD / REDIS_PASSWORD / MINIO_ROOT_USER / MINIO_ROOT_PASSWORD
+#   S3_ENDPOINT=https://<对象存储公网域名>（默认值 http://storage:9000 只在容器内可解析，
+#     而预签名 URL 与 IMAGE_NSFW_ENDPOINT 的检测方都要从外部访问它；不填等于
+#     v1 API 给出的链接打不开、开了外部检测器则每个图片任务 fail-closed 退款）
 #   MODELVERSE_IMAGE_API_KEY / ARK_IMAGE_API_KEY / DEEPSEEK_API_KEY
 #   VISION_MODERATION_API_KEY（+ BASE_URL，若不走默认网关）
 #   PAYMENT_PROVIDER=stripe|paddle + 对应 key / webhook secret
@@ -35,6 +38,10 @@ cp .env.example .env.production
 #     会让生产启动被拒——这是故意的，防沙箱密钥误用于线上）
 #   SMTP_URL / EMAIL_FROM
 #   SENTRY_DSN（可选）
+#   （已记录、暂未实现的加固项：应用容器目前用 MinIO root 凭据读写对象，
+#     等于把存储服务的 admin API 也交出去了。改为桶级 service account 需要
+#     init-storage 供应 + 两个新变量，见 docker-compose.single.yml 里
+#     S3_ACCESS_KEY_ID 处的说明——对外提供此栈之前应补上）
 set -a; source .env.production; set +a
 ```
 
@@ -82,6 +89,7 @@ docker compose -f docker-compose.single.yml run --rm worker npx tsx scripts/rese
 - 回滚：升级前把当前镜像存成 prev —— `docker tag image-gen-web:latest image-gen-web:prev && docker tag image-gen-worker:latest image-gen-worker:prev`；
   出问题先 `docker tag image-gen-web:prev image-gen-web:latest && docker tag image-gen-worker:prev image-gen-worker:latest`，
   再 `docker compose -f docker-compose.single.yml up -d --scale worker=3`（**不带** `--build`：带 `--build` 会在启动前重新构建并把 prev 覆盖掉，这也是"回滚后问题照旧"的常见原因）。数据库迁移不随镜像回滚，含迁移的升级要先备份。
+  `migrate` 与 `rollover` 在 compose 里共用 `image-gen-worker` 这一个标签（此前它们没有 `image:`，Compose 按目录名另起 `image-gen-migrate`/`image-gen-rollover`，上面两次 tag 换不到它们——回滚后维护循环仍在跑坏版本），所以两次 tag 即覆盖全部四个服务。
 
 ## 7. 之后想迁移到托管服务
 

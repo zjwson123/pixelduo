@@ -34,7 +34,7 @@ function sweep(now: number) {
 }
 
 // The bucket a request is charged to. A VERIFIED session is keyed by its
-// account id; everything else by source IP.
+// account id AND the session's own cookie; everything else by source IP.
 //
 // The IP alone made this limiter a denial-of-service tool against itself: the
 // bucket is spent before any credential is looked at, so a credential-less
@@ -45,18 +45,43 @@ function sweep(now: number) {
 // knowledge of the victims. That is the shape pass 18 fixed inside
 // /api/auth/2fa-verify; this is the layer in front of all of it.
 //
+// The COOKIE half is pass 31's correction. Keying on the account id alone made
+// one stale cookie a permanent, IP-independent denial of the owner's own
+// traffic: this layer cannot see sessionVersion (it is a database concept; the
+// token's signature is all it can check), so a cookie the owner already revoked
+// — by resetting the password or revoking sessions, the very remediation the
+// product recommends — kept being charged to `u:<victim>:api`, 300/min from any
+// address, and the refusal happens BEFORE any route runs. The owner's live
+// browser shares that key, so their own workbench, gallery and 2FA login all
+// answered 429 while the attacker kept spending. And nothing ages the cookie
+// out: /api/auth/session re-encodes the same token with a fresh 30-day expiry on
+// every call. Hashing the raw cookie into the key bounds each cookie to its own
+// budget: a flood still cannot dodge the throttle by rotating source addresses
+// (the account id is all a stolen cookie can reach), but it can no longer spend
+// the budget of a session it does not hold. The correct reading of the old
+// comment: only an expired or forged token falls to the IP bucket — a revoked
+// but signed one is charged to its own session.
+//
 // Keying by account is safe here because the id is only used when the JWT
 // VERIFIES (an unverified cookie is attacker-chosen, so hashing it as given
-// would hand out a fresh bucket per request). A session that fails to verify —
-// expired, revoked, forged — falls through to the IP bucket, so this can only
-// GIVE protection to requests that carry a real one; it never takes it away
-// from anonymous callers.
+// would hand out a fresh bucket per request), and the hash is of the VERIFIED
+// cookie — so this can only GIVE protection to requests that carry a real one;
+// it never takes it away from anonymous callers.
 //
 // What it does not fix: the pre-login routes still run on the IP bucket, and
 // they have to (there is no credential yet to key on), so a hostile egress can
 // still deny the LOGIN flow to its neighbours. Bounding that would mean
 // removing the limiter in front of password verification, which is the
 // bcrypt-amplification brake — a worse trade. Residual, documented.
+async function sessionTag(raw: string): Promise<string> {
+  // Web Crypto, not node:crypto: this module is the edge middleware. 8 bytes is
+  // plenty — the tag only has to separate one cookie from another.
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(raw));
+  let tag = "";
+  for (const b of new Uint8Array(digest).subarray(0, 8)) tag += b.toString(16).padStart(2, "0");
+  return tag;
+}
+
 async function bucketFor(req: NextRequest, ip: string): Promise<string> {
   const secret = process.env.NEXTAUTH_SECRET;
   if (!secret) return `ip:${ip}`;
@@ -72,7 +97,7 @@ async function bucketFor(req: NextRequest, ip: string): Promise<string> {
     // (salt ""), and it returns null on a token that does not verify.
     const payload = await decode({ token: raw, secret });
     const id = payload?.uid ?? payload?.sub;
-    return typeof id === "string" && id ? `u:${id}` : `ip:${ip}`;
+    return typeof id === "string" && id ? `u:${id}:${await sessionTag(raw)}` : `ip:${ip}`;
   } catch {
     return `ip:${ip}`;
   }

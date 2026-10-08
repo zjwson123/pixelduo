@@ -41,6 +41,19 @@ x-appenv: &appenv
   S3_ENDPOINT: ${S3_ENDPOINT:-http://storage:9000}
   S3_REGION: us-east-1
   S3_BUCKET: pixelduo
+  # These are MinIO's ROOT credentials (pass 31 examined the choice): the app,
+  # worker and maintenance containers sign and fetch objects with the same
+  # identity that carries MinIO's admin API — create/delete buckets, manage
+  # users, read every bucket — so a compromise of the most exposed container is
+  # a compromise of the whole store, not of one bucket. The alternative is a
+  # bucket-scoped service account (`mc admin user add` + a policy limited to
+  # `pixelduo`, provisioned by init-storage), which needs two new operator-set
+  # variables and a provisioning path that cannot be exercised by CI (it runs
+  # STORAGE_DRIVER=local). Accepted for the single-VPS stack, where db/redis/
+  # storage already share the host and the root secret; a managed-S3 deployment
+  # (compose.prod.yml) takes its credentials from the operator's own IAM and
+  # should scope them to the bucket. Implement the service-account path before
+  # this stack is offered to third parties.
   S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER}
   S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD}
   S3_FORCE_PATH_STYLE: "true"
@@ -55,11 +68,19 @@ x-appenv: &appenv
   FEEDBACK_WEBHOOK_KIND: ${FEEDBACK_WEBHOOK_KIND:-feishu}
   EMAIL_VERIFY_AUTO: "0"
   SENTRY_DSN: ${SENTRY_DSN:-}
-  # Read by sentry.server.config.ts, sentry.edge.config.ts,
-  # instrumentation-client.ts and lib/observability.ts to tag events with the
-  # build they came from. Only docker-compose.yml named it, so no production
-  # deployment could set it: every event arrived without a release, and the
-  # regression question ("which deploy introduced this") was unanswerable.
+  # Read by sentry.server.config.ts, sentry.edge.config.ts and
+  # lib/observability.ts to tag events with the build they came from. Only
+  # docker-compose.yml named it, so no production deployment could set it: every
+  # event arrived without a release, and the regression question ("which deploy
+  # introduced this") was unanswerable.
+  #
+  # NOT instrumentation-client.ts, which this paragraph used to list: the
+  # browser bundle only carries NEXT_PUBLIC_* names (the file's own comment says
+  # so), and a non-public name is not inlined no matter what the runtime env
+  # holds — pass 30 read the built chunk to confirm the client-side release is
+  # still undefined. Wiring the browser half means a NEXT_PUBLIC_SENTRY_RELEASE
+  # build arg in three composes, which pass 25 deliberately declined; the
+  # server/edge/worker events are what this variable actually tags.
   SENTRY_RELEASE: ${SENTRY_RELEASE:-}
   SENTRY_ENVIRONMENT: production
   IMAGE_MODERATION: "1"
@@ -135,6 +156,14 @@ services:
     restart: unless-stopped
 
   migrate:
+    # Pinned like web/worker (pass 31): with `build:` and no `image:`, Compose
+    # names this image after the PROJECT DIRECTORY (`image-gen-migrate`), which
+    # no tag swap in the documented rollback touches — so after a rollback the
+    # one-shot migrate and the 24h maintenance loop kept running the broken
+    # build while the operator believed the host was back on the previous one.
+    # Sharing the worker tag makes `IMAGE_WORKER=<tag>` cover every
+    # worker-derived service, exactly as docker-compose.prod.yml already does.
+    image: ${IMAGE_WORKER:-image-gen-worker:latest}
     build: { context: ., target: worker }
     command: npx prisma migrate deploy
     environment: *appenv
@@ -190,6 +219,10 @@ services:
     restart: unless-stopped
 
   rollover:
+    # Same pin as migrate (pass 31) — the loop that runs plan downgrade, credit
+    # expiry and expiry reminders on money-adjacent state is the service a
+    # rollback most needs to actually roll back.
+    image: ${IMAGE_WORKER:-image-gen-worker:latest}
     build: { context: ., target: worker }
     # Every pass is chained with && and a failure ends the container (instead of
     # `;`, which discarded each exit status and looped forever): a persistent

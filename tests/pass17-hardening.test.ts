@@ -356,7 +356,12 @@ describe("admin credit attribution (pass 17)", () => {
 // ---------------------------------------------------------------------------
 describe("billing month and IPv4 literals (pass 17)", () => {
   it("clamps a month-end renewal to the target month's last day", () => {
-    const at = (y: number, m: number, d: number, h = 12, min = 30) => new Date(y, m - 1, d, h, min);
+    // UTC fixtures, because the arithmetic is UTC-based since pass 30. Local
+    // constructors made these assertions TZ-dependent: they passed on a UTC
+    // host and on this +08 one they merely passed for a different reason (both
+    // sides shifted together), while the function itself answered a different
+    // renewal INSTANT per host TZ for the same stored anchor.
+    const at = (y: number, m: number, d: number, h = 12, min = 30) => new Date(Date.UTC(y, m - 1, d, h, min));
     // Jan 31 → Feb 28 (2026 is not a leap year). setMonth alone rolled this to
     // March 3 — three free days of plan and quota, every month-end renewal.
     expect(addBillingMonth(at(2026, 1, 31))).toEqual(at(2026, 2, 28));

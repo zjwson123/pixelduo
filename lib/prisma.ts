@@ -1,6 +1,61 @@
 import { PrismaClient } from "@prisma/client";
 
+// Pin the session timezone to UTC on every connection this process opens.
+//
+// Pass 31 found the timezone-shaped half of the mixed-clock family passes
+// 26-30 kept closing: Prisma maps DateTime to `timestamp WITHOUT time zone`
+// and binds a JS Date as its UTC rendering, which is timezone-independent — but
+// the raw SQL in the money/queue paths uses `now()`, and a timestamptz
+// assigned to (or compared with) a naive column is rendered through the
+// SESSION timezone. So `"startedAt" = now()` and `"expiresAt" > now()` were
+// UTC-correct only while the session's TimeZone happened to be UTC, and
+// DEFAULT CURRENT_TIMESTAMP columns (every `@default(now())`: Job.createdAt,
+// CreditGrant.createdAt — the carryover witness) are stamped the same way. On a
+// database whose default is Asia/Shanghai (probed) the two renderings differ by
+// 8 hours in BOTH directions: Prisma-written deadlines read as expired inside
+// SQL (paid credits unspendable, then destroyed early by the sweep) and
+// SQL-written schedules land 8 hours away (a video job's first poll not
+// claimable for 8h, its task age computing negative so the 30-minute cap never
+// fires) — or the mirror image on a database behind UTC (backoffs and poll
+// spacing collapse, the retry spacing pass 27 exists for silently gone).
+//
+// The fix is one connection-level setting rather than a rewrite of every SQL
+// site: `options=-c timezone=UTC` is honored by the Prisma Postgres connector
+// (probed: SHOW timezone answers UTC / Asia/Shanghai as instructed). An
+// operator-supplied `options=` is left alone — their parameter wins — and
+// assertDatabaseSessionUtc() refuses to start in production if the session did
+// not end up on UTC (instrumentation.ts, scripts/worker.ts and the three
+// maintenance scripts), which covers a pooler that strips the parameter and a
+// runtime that sets DATABASE_URL after this module was imported (in which case
+// the append below never saw it).
+export function withUtcTimezone(url: string | undefined): string | undefined {
+  if (!url) return url;
+  if (/[?&]options=/.test(url)) return url;
+  const sep = url.includes("?") ? (url.endsWith("?") || url.endsWith("&") ? "" : "&") : "?";
+  return `${url}${sep}options=-c%20timezone%3DUTC`;
+}
+
 const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
+
+// The pin is applied to the ENVIRONMENT, not to the client constructor.
+//
+// Passing `datasources: { db: { url: … } }` looked cleaner and was a trap, found
+// by this pass's own suite: the URL is captured at MODULE INIT, while Prisma's
+// schema-level `env("DATABASE_URL")` is resolved LAZILY at connect time. Any
+// runtime that sets the environment after importing this module — which is
+// exactly what the test harness does (vitest.setup.ts assigns DATABASE_URL after
+// its hoisted imports, so yes, the module sees the .env value first) — would
+// then hold a client pinned to the wrong database: the suite created its
+// fixtures in the DEV database while a spawned child read the test one, and a
+// "user not found" three files away was the only symptom. Rewriting the env var
+// keeps the lazy resolution (late setters still win, as before) and still pins
+// every client created from here on, including the ones in scripts/*.ts that
+// construct PrismaClient directly.
+function pinDatasourceTimezone(): void {
+  const pinned = withUtcTimezone(process.env.DATABASE_URL);
+  if (pinned && pinned !== process.env.DATABASE_URL) process.env.DATABASE_URL = pinned;
+}
+pinDatasourceTimezone();
 
 export const prisma =
   globalForPrisma.prisma ??
@@ -9,6 +64,35 @@ export const prisma =
   });
 
 if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
+
+// The session's TimeZone, read from the server. Kept next to the pin above so
+// the two cannot drift apart. Throws if the database is unreachable — callers
+// decide whether that is fatal (at boot it is: every money decision below
+// depends on the answer).
+export async function databaseSessionTimezone(client: PrismaClient = prisma): Promise<string> {
+  const rows = await client.$queryRaw<Array<{ TimeZone: string }>>`SHOW timezone`;
+  return rows[0]?.TimeZone ?? "";
+}
+
+// Fail-closed boot assertion for the pin above. Production only, like every
+// other boot gate: dev and the test suite run against the compose database
+// (UTC by default) and must stay usable without configuration.
+export async function assertDatabaseSessionUtc(opts?: {
+  env?: NodeJS.ProcessEnv;
+  client?: PrismaClient;
+}): Promise<void> {
+  const env = opts?.env ?? process.env;
+  // Imported lazily to keep this module's import graph small (it is loaded by
+  // the worker and by tests that never touch production gating).
+  const { isProductionRuntime } = await import("./runtime-env");
+  if (!isProductionRuntime(env)) return;
+  const tz = await databaseSessionTimezone(opts?.client);
+  if (tz !== "UTC") {
+    throw new Error(
+      `the database session timezone is ${tz || "unknown"}, not UTC — every deadline, schedule and timestamp comparison in this app assumes UTC-naive storage (see lib/prisma.ts). Add ?options=-c%20timezone%3DUTC to DATABASE_URL, or set the database/role default (ALTER DATABASE <db> SET timezone TO 'UTC')`,
+    );
+  }
+}
 
 // PostgreSQL's deadlock_detected. Prisma wraps it differently depending on
 // whether the statement was raw (`$queryRaw` → P2010 with the SQLSTATE in

@@ -171,6 +171,16 @@ export async function register() {
     try {
       assertProductionConfig();
       await assertPaymentProviderUsable();
+      // The database session must be on UTC — see lib/prisma.ts's pin. The pin
+      // there makes this true for every runtime this app controls; this gate is
+      // what catches a DATABASE_URL whose own `options=` parameter (or a
+      // transaction pooler that strips the one we append) left the session on
+      // the server's local time, where every SQL-written deadline and schedule
+      // in the money paths is off by the offset — silently, in both directions.
+      // Dynamic import for the same reason as the payment gate above:
+      // lib/prisma must not be bundled into the edge runtime.
+      const { assertDatabaseSessionUtc } = await import("./lib/prisma");
+      await assertDatabaseSessionUtc();
     } catch (e) {
       // Write to stderr and exit from the write callback: Docker captures
       // stdout as a PIPE (not a TTY), where a console.log write is asynchronous

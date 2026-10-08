@@ -10,7 +10,7 @@ import { ADMIN_GUARD_LOCK, assertAnotherAdminRemains } from "@/lib/admin";
 import {
   verifyTotp,
   useBackupCode,
-  isTwoFactorLocked,
+  twoFactorLockStatus,
   recordTwoFactorFailure,
   clearTwoFactorFailures,
   claimTotpCode,
@@ -45,7 +45,8 @@ export async function POST(req: Request) {
     // Cumulative brake (lib/twofa.ts), consulted before the password and the
     // second factor are compared: erasure is the one irreversible second-factor
     // check, and the account is refused entirely while a grind is in progress.
-    if (await isTwoFactorLocked(userId)) return fail(new ApiError(429, TWOFA_LOCKED_ERROR));
+    const lock = await twoFactorLockStatus(userId);
+    if (lock.locked) return fail(new ApiError(429, TWOFA_LOCKED_ERROR, lock.retryAfterSec));
     const bodyRaw = await readBodyCapped(req, 8 * 1024);
     if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
     const body = schema.parse(parseJsonBody(bodyRaw.raw));
@@ -60,7 +61,7 @@ export async function POST(req: Request) {
     // must be as expensive to guess here as it is on the login endpoint — the
     // per-minute buckets above bound the rate, not the campaign.
     const attempt = await reservePasswordReauth(user.email, req);
-    if (!attempt.allowed) return fail(new ApiError(429, "rate-limited"));
+    if (!attempt.allowed) return fail(new ApiError(429, "rate-limited", attempt.retryAfterSec));
     if (!(await bcrypt.compare(body.password, user.passwordHash))) {
       await alertPasswordReauthAbuse(user.email);
       return fail(new Error("invalid-password"));

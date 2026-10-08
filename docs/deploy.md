@@ -248,7 +248,7 @@ docker compose -f docker-compose.prod.yml up -d
 
 ### 回滚
 
-保留上一版本镜像 tag（`IMAGE_WEB=pixelduo-web:prev`），`docker compose -f docker-compose.prod.yml up -d` 即可回滚；数据库迁移回滚需人工处理（托管商 PITR）。
+保留上一版本镜像 tag（`IMAGE_WEB=image-gen-web:prev IMAGE_WORKER=image-gen-worker:prev`），`docker compose -f docker-compose.prod.yml up -d` 即可回滚；数据库迁移回滚需人工处理（托管商 PITR）。
 
 ## 上线前最后核对（对应 docs/compliance/launch-checklist.md）
 

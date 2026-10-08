@@ -6,7 +6,7 @@ import {
   verifyTotp,
   generateBackupCodes,
   hashBackupCode,
-  isTwoFactorLocked,
+  twoFactorLockStatus,
   recordTwoFactorFailure,
   clearTwoFactorFailures,
   TWOFA_LOCKED_ERROR,
@@ -37,7 +37,8 @@ export async function POST(req: Request) {
     if (limited) return fail(limited);
     // Cumulative brake (lib/twofa.ts): enrollment verifies a code against the
     // pending secret, so it is a second-factor check like any other.
-    if (await isTwoFactorLocked(userId)) return fail(new ApiError(429, TWOFA_LOCKED_ERROR));
+    const lock = await twoFactorLockStatus(userId);
+    if (lock.locked) return fail(new ApiError(429, TWOFA_LOCKED_ERROR, lock.retryAfterSec));
     const bodyRaw = await readBodyCapped(req, 8 * 1024);
     if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
     const body = schema.parse(parseJsonBody(bodyRaw.raw));
@@ -51,7 +52,7 @@ export async function POST(req: Request) {
     // The password compare runs before the code check, so it is a full password
     // oracle: reserve it on the LOGIN guard's counters (lib/login-guard.ts).
     const attempt = await reservePasswordReauth(user.email, req);
-    if (!attempt.allowed) return fail(new ApiError(429, "rate-limited"));
+    if (!attempt.allowed) return fail(new ApiError(429, "rate-limited", attempt.retryAfterSec));
     if (!(await bcrypt.compare(body.password, user.passwordHash))) {
       await alertPasswordReauthAbuse(user.email);
       return fail(new Error("invalid-password"));

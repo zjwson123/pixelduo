@@ -5,7 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { passwordReauthRefusal } from "@/lib/auth";
 import {
   verifyTotp,
-  isTwoFactorLocked,
+  twoFactorLockStatus,
   recordTwoFactorFailure,
   clearTwoFactorFailures,
   claimTotpCode,
@@ -36,7 +36,8 @@ export async function POST(req: Request) {
     // Cumulative brake (lib/twofa.ts) before any comparison: turning the second
     // factor off is the downgrade an attacker who knows the password wants, so
     // it is bound by the same counter as the login step.
-    if (await isTwoFactorLocked(userId)) return fail(new ApiError(429, TWOFA_LOCKED_ERROR));
+    const lock = await twoFactorLockStatus(userId);
+    if (lock.locked) return fail(new ApiError(429, TWOFA_LOCKED_ERROR, lock.retryAfterSec));
     const bodyRaw = await readBodyCapped(req, 8 * 1024);
     if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
     const body = schema.parse(parseJsonBody(bodyRaw.raw));
@@ -53,7 +54,7 @@ export async function POST(req: Request) {
     // own guard — the login guard, which the per-minute buckets above are not:
     // reserve the attempt on it before the compare (lib/login-guard.ts).
     const attempt = await reservePasswordReauth(user.email, req);
-    if (!attempt.allowed) return fail(new ApiError(429, "rate-limited"));
+    if (!attempt.allowed) return fail(new ApiError(429, "rate-limited", attempt.retryAfterSec));
     if (!(await bcrypt.compare(body.password, user.passwordHash))) {
       await alertPasswordReauthAbuse(user.email);
       return fail(new Error("invalid-password"));

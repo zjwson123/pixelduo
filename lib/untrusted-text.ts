@@ -21,3 +21,23 @@ export function quoteUntrusted(text: string): string {
     .map((line) => `> ${line}`)
     .join("\n");
 }
+
+// Bound a string to `max` UTF-16 code units WITHOUT ever splitting a surrogate
+// pair.
+//
+// `str.slice(0, n)` counts code units, so a cut landing between the two halves
+// of an astral character — every emoji, every rare CJK extension glyph — returns
+// a string ending in an unpaired high surrogate: ill-formed UTF-16 that no
+// PostgreSQL text column can encode. Pass 31 found this twice on values that had
+// ALREADY passed refuseNul (pass 30's guard): the guard validated the raw input,
+// the slice then manufactured the very thing it refuses. On the query helpers
+// (lib/api.ts's queryText) that meant Prisma InvalidArg → masked 500 + one
+// captured incident per request on four routes; on the provider error text
+// (lib/providers' errText) it meant failJob's Job.error write threw, so the
+// attempt's real provider error, its reclaim and its retry/terminal decision
+// were all lost. Only a trailing HIGH surrogate is stripped, because in
+// well-formed input a low surrogate always follows its high half: the pair is
+// either complete or the cut landed on the high one.
+export function sliceCodePoints(value: string, max: number): string {
+  return value.slice(0, max).replace(/[\uD800-\uDBFF]$/, "");
+}

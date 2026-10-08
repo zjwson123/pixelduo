@@ -8,6 +8,7 @@ import { reserveLoginAttempt, refundLoginFailures, alertLoginAbuse } from "./log
 import { prisma } from "./prisma";
 import { verifyPreAuthToken } from "./twofa";
 import { signupBonus } from "./ledger";
+import { readJsonCapped } from "./store";
 
 // Source address for the per-(email, IP) login cap. Behind Caddy the LAST
 // X-Forwarded-For entry is the address the edge saw. The value is a hint only:
@@ -67,7 +68,14 @@ async function githubEmailVerified(accessToken: string | undefined, email: strin
       await res.body?.cancel().catch(() => undefined);
       return false;
     }
-    const list = (await res.json()) as Array<{ email?: unknown; verified?: unknown }>;
+    // Capped like every sibling outbound read (providers, safety, router): the
+    // 10s timeout bounds TIME, not bytes, and this was the one uncapped
+    // res.json() left in the codebase — a hostile/compromised response (or a
+    // TLS middlebox) could grow the heap without limit.
+    const list = (await readJsonCapped(res, 256 * 1024)) as unknown as Array<{
+      email?: unknown;
+      verified?: unknown;
+    }>;
     return list.some(
       (e) => typeof e.email === "string" && e.email.toLowerCase() === target && e.verified === true,
     );
@@ -98,7 +106,11 @@ function emailVerifiedClaim(claim: unknown): boolean | null {
 // (parseJsonBody); this is the credentials body, which next-auth parses
 // itself, so the refusal lives here instead.
 function hasControlChars(value: string): boolean {
-  return /[\u0000-\u001f\u007f]/.test(value);
+  // Ill-formed UTF-16 (a lone surrogate) rides the same door: `\ud800` is six
+  // ASCII characters on the wire and an unpaired half after JSON.parse, the
+  // lookup then throws InvalidArg and next-auth reflects the invocation
+  // snippet. Refused by the same uniform null (pass 30).
+  return /[\u0000-\u001f\u007f]/.test(value) || !value.isWellFormed();
 }
 
 export const authOptions: NextAuthOptions = {
@@ -119,6 +131,13 @@ export const authOptions: NextAuthOptions = {
         // with a wrong password, so neither the input shape nor runtime
         // internals leak.
         if (typeof credentials.email !== "string" || typeof credentials.password !== "string") return null;
+        // The password gets its own well-formedness check, before any bcrypt
+        // call: bcryptjs throws "Invalid string / salt: Not a string" on a lone
+        // surrogate (probed), and next-auth reflects the message — the same
+        // leak the email guard below closes, by the same uniform refusal. Also
+        // before reserveLoginAttempt, so garbage input cannot spend a real
+        // account's login budget.
+        if (!credentials.password.isWellFormed()) return null;
         const email = credentials.email.toLowerCase().trim();
         // Refused as the non-credential it is — uniform with a wrong password,
         // so nothing about accounts leaks (see hasControlChars).
@@ -239,18 +258,40 @@ export const authOptions: NextAuthOptions = {
       if (user) {
         if (account?.type === "oauth") {
           // OAuth first sign-in: map the provider profile to our account.
+          //
+          // totpEnabled is re-checked HERE, in the same read that stamps sv
+          // (pass 31): signIn refuses a 2FA account, but its read and this one
+          // happen at two separate instants, so an enablement committing in
+          // between used to mint a token carrying the POST-bump version — a full
+          // session for an account that now has 2FA, which is exactly what
+          // signIn's refusal exists to prevent. Reading the verdict and the
+          // version together closes it from both sides: an enablement before
+          // this read leaves totpEnabled true (no session is stamped below), and
+          // one after it leaves sv stale, which every guard already rejects.
           const db = await prisma.user.findUnique({
             where: { email: (user.email ?? "").toLowerCase().trim() },
-            select: { id: true, sessionVersion: true },
+            select: { id: true, sessionVersion: true, totpEnabled: true },
           });
-          if (db) {
+          if (db && !db.totpEnabled) {
             token.uid = db.id;
             token.sv = db.sessionVersion;
             token.totpPending = false;
           }
         } else {
           token.uid = (user as AuthUser).id;
-          token.sv = (user as AuthUser).sessionVersion ?? 0;
+          // No `?? 0` (pass 31): sessionUser now refuses a token whose sv is not
+          // a number, because the default read as "version 0" and authenticated
+          // every account whose counter had never been bumped (pass 30). Minting
+          // with the same default was that guard's twin — a credentials path
+          // that stopped stamping the field would mint a token that works almost
+          // everywhere. All three authorize branches stamp it; if one ever
+          // stops, fail loudly at mint time instead of shipping a universal
+          // session.
+          const sv = (user as AuthUser).sessionVersion;
+          if (typeof sv !== "number") {
+            throw new Error("authorize returned a user without sessionVersion — refusing to mint a session");
+          }
+          token.sv = sv;
           token.totpPending = (user as AuthUser).totpPending ?? false;
         }
       }

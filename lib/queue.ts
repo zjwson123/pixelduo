@@ -285,14 +285,87 @@ export async function heartbeat(jobId: string) {
      WHERE id = ${jobId} AND status IN ('running', 'polling')`);
 }
 
+// Push a poll lease forward, from the points where phase 2 does its longest
+// work (pass 31).
+//
+// The lease (claimNextJob lane 2) is what keeps a SECOND worker out while phase
+// 2 runs, and the size it was given — 6 minutes, from a budget that counted the
+// provider calls — missed the storage half: a worst-case phase 2 polls (30s),
+// downloads (120s), reads back two objects through the SDK (each up to 3×30s),
+// concatenates (180s) and puts the result, ~600s against a 360s lease. The
+// claim predicate reads nextAttemptAt alone, so a slow-but-healthy phase 2 was
+// claimed by its sibling: two workers downloaded and concatenated the same job
+// (duplicate provider downloads and container CPU, and whichever checkpoint
+// wrote last left the other's object named by nothing). Extending per STEP
+// keeps every silent span below the lease, so the lease keeps its meaning —
+// long enough for the STEP that is running, not for the whole phase — and a
+// worker that really died is still claimable one lease later.
+//
+// Conditional on the worker id: if a peer legitimately took the row over (this
+// worker stalled past its lease), its lease must not be pulled out from under
+// it by the zombie's late extension.
+export async function extendPollLease(jobId: string, worker: string): Promise<void> {
+  await prisma.$executeRaw(Prisma.sql`
+    UPDATE "Job" SET "nextAttemptAt" = now() + make_interval(secs => ${POLL_LEASE_MS / 1000})
+     WHERE id = ${jobId} AND status = 'polling' AND worker = ${worker}`);
+}
+
 function backoffMs(attempts: number): number {
   return Math.min(60_000 * 2 ** Math.max(0, attempts - 1), 600_000);
 }
 
-export async function failJob(jobId: string, error: string, opts?: { terminal?: boolean }) {
+// `expect` is the sweep's observation, required by recoverStuckJobs and unused
+// everywhere else (a worker failing the job it holds passes nothing). It makes
+// the recovery sweep's read-then-fail atomic in effect: without it, two
+// overlapping sweeps (compose runs --scale worker=3, each sweeping on its own
+// ~36s tick) both fail the same job from their own batches — the second one
+// reads the FRESH row, whose status its own retry branch just set to 'queued',
+// matches the CAS, and burns a second attempt. At the last attempt that is a
+// terminal failure with a retry still owed: the customer's generation dies
+// early, one refund, and whatever the provider already billed for the
+// checkpointed images is written off (probed: attempts 1 → 2 on the first
+// sweep, then failed+refunded on the stale second one). The observation
+// carries the three fields a claim rewrites — status, heartbeatAt, startedAt —
+// so a re-queued, re-claimed or re-heartbeated job no longer matches and the
+// stale sweep stands down.
+export interface JobObservation {
+  status: string;
+  heartbeatAt: Date | null;
+  startedAt: Date | null;
+}
+
+function sameInstant(a: Date | null, b: Date | null): boolean {
+  if (a === null || b === null) return a === b;
+  return a.getTime() === b.getTime();
+}
+
+export async function failJob(
+  jobId: string,
+  error: string,
+  opts?: { terminal?: boolean; expect?: JobObservation },
+) {
   return prisma.$transaction(async (tx) => {
     const job = await tx.job.findUnique({ where: { id: jobId } });
     if (!job || job.status === "failed" || job.status === "done") return;
+    if (opts?.expect) {
+      const seen = opts.expect;
+      const unchanged =
+        job.status === seen.status &&
+        sameInstant(job.heartbeatAt, seen.heartbeatAt) &&
+        sameInstant(job.startedAt, seen.startedAt);
+      if (!unchanged) return;
+    }
+    // Job.error is the one text column a PROVIDER shapes, and this write is the
+    // failure bookkeeping itself: the worker's catch blocks call failJob first,
+    // so a throw here (pass 31 probed the shape: errText's slice split a
+    // surrogate pair and Prisma rejected the ill-formed value with InvalidArg)
+    // lost the provider's error, the retry/terminal decision AND
+    // reclaimStoredArtifact, and the job kept running until the reaper re-billed
+    // it. Repairing with U+FFFD — the substitution Buffer.toString already
+    // makes for a bad byte — is the deliberate asymmetry to refuseNul: this is
+    // a diagnostic, not user input, and a refusal that throws would re-break the
+    // bookkeeping it exists to protect. The marker keeps the repair visible.
+    const errorText = error.isWellFormed() ? error : `${error.toWellFormed()} [ill-formed text repaired]`;
     const nextAttempts = job.attempts + 1;
 
     if (!opts?.terminal && nextAttempts < job.maxAttempts) {
@@ -310,7 +383,7 @@ export async function failJob(jobId: string, error: string, opts?: { terminal?: 
         data: {
           status: "queued",
           attempts: nextAttempts,
-          error,
+          error: errorText,
           nextAttemptAt: new Date(nowMs + backoffMs(nextAttempts)),
           heartbeatAt: null,
         },
@@ -326,7 +399,7 @@ export async function failJob(jobId: string, error: string, opts?: { terminal?: 
       data: {
         status: "failed",
         attempts: nextAttempts,
-        error,
+        error: errorText,
         finishedAt: new Date(),
         heartbeatAt: null,
       },
@@ -534,8 +607,13 @@ export async function checkpointJobArtifact(
 // and for the image lane the provider is billed again for every image the
 // checkpoint had not reached yet. The cutoffs are still passed in as ms.
 export async function recoverStuckJobs(maxAgeMs = 180_000, pollMaxAgeMs = 600_000): Promise<number> {
-  const stuck = await prisma.$queryRaw<Array<{ id: string }>>(Prisma.sql`
-    SELECT id FROM "Job"
+  // The observation (status/heartbeatAt/startedAt) is carried into failJob so a
+  // job this batch saw but a peer already requeued or re-claimed stands down
+  // instead of burning another attempt — see the comment on failJob's `expect`.
+  const stuck = await prisma.$queryRaw<
+    Array<{ id: string; status: string; heartbeatAt: Date | null; startedAt: Date | null }>
+  >(Prisma.sql`
+    SELECT id, status, "heartbeatAt", "startedAt" FROM "Job"
      WHERE (status = 'running'
             AND EXTRACT(EPOCH FROM (now() - COALESCE("heartbeatAt", "startedAt"))) * 1000 > ${maxAgeMs})
         OR (status = 'polling'
@@ -543,7 +621,9 @@ export async function recoverStuckJobs(maxAgeMs = 180_000, pollMaxAgeMs = 600_00
      ORDER BY id
      LIMIT 20`);
   for (const job of stuck) {
-    await failJob(job.id, "stuck-timeout: worker heartbeat expired");
+    await failJob(job.id, "stuck-timeout: worker heartbeat expired", {
+      expect: { status: job.status, heartbeatAt: job.heartbeatAt, startedAt: job.startedAt },
+    });
   }
   return stuck.length;
 }

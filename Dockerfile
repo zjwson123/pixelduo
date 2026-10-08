@@ -139,6 +139,8 @@ RUN --mount=type=bind,source=.,target=/ctx \
       .env .env.* \
       docs tests e2e designs data backups public/generated public/showcase perf \
       ./*.md docker-compose*.yml Caddyfile Dockerfile \
+      .github .npmrc .gitignore .dockerignore \
+      .vscode .idea .claude .cursor *.swp \
       *.db *.db-journal prisma/*.db prisma/*.db-journal \
       ./*.tsbuildinfo \
  && chown -R node:node /app
@@ -156,5 +158,19 @@ RUN npx prisma generate
 # S3 key pasted into an override would be readable. perf/ carries the sprint's
 # bench scripts and reports, and perf/bench/session.json is a live session
 # cookie — see the web stage's note.
+# The dot-entries (pass 30) are the same class by another door: they are in the
+# build context, no prune list ever named them, and none of the artifact
+# assertions enumerated them — so `.github/workflows/ci.yml` (the deploy
+# invariants and the published CI secret tests/pass13 deliberately treats as
+# public) shipped in every worker image while the assertion could never fail on
+# it. `.npmrc` is only needed by `npm ci` in the deps stage, which has already
+# run; the removal is safe for `npx prisma generate` (local engine, no registry
+# consult) and for the runtime `npx tsx` (local binary).
+# The editor/agent state (pass 31) is that class's third door, and the one
+# .gitignore hides from every repo-shaped check: `.vscode`/`.idea` are expected
+# to exist on a working machine and routinely carry pasted tokens in
+# settings.json/launch.json/workspace.xml. .dockerignore now filters them from
+# the context too; this list is what covers a build path that bypasses that
+# file, and both artifact gates assert them.
 USER node
 CMD ["npx", "tsx", "scripts/worker.ts"]

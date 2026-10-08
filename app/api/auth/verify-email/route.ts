@@ -52,7 +52,7 @@ export async function POST(req: Request) {
       // the reservation, exactly as on the login path.
       const ip = reauthIp(req);
       const attempt = await reserveLoginAttempt(user.email, ip);
-      if (!attempt.allowed) return fail(new ApiError(429, "rate-limited"));
+      if (!attempt.allowed) return fail(new ApiError(429, "rate-limited", attempt.retryAfterSec));
       if (!given || !(await bcrypt.compare(given, user.passwordHash))) {
         // Fire-and-forget: the owner hears about a distributed grind, and the
         // response time does not depend on SMTP (same contract as authorize).

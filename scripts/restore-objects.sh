@@ -39,9 +39,20 @@ MC_IMAGE="${MC_IMAGE:-minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae64060
 
 # Anything that names real data. A drill into one of these destroys it and is
 # never what the operator meant — refuse rather than ask.
-for forbidden in "${BACKUP_S3_BUCKET:-}" "${S3_BUCKET:-}" "${BACKUP_TARGET_BUCKET:-}"; do
+#
+# The literal 'pixelduo' is the name the compose files PIN (`S3_BUCKET:
+# pixelduo` — docker-compose.single.yml:43, docker-compose.prod.yml), and it
+# was exactly the name the env-derived arms below could not see: the documented
+# single-VPS drill sources `.env.example`, which ships `S3_BUCKET=""` and does
+# not mention BACKUP_S3_BUCKET/BACKUP_TARGET_BUCKET at all — so on the one
+# deployment whose live bucket is a pinned literal, all three arms were empty
+# and `RESTORE_DRILL_CONFIRM=1 ./scripts/restore-objects.sh <stamp> pixelduo`
+# proceeded to `mc mirror --overwrite --remove` into the live bucket (measured
+# with the drill's own dry run in pass 30). A scratch bucket never has to be
+# named this, so the refusal is free.
+for forbidden in pixelduo "${BACKUP_S3_BUCKET:-}" "${S3_BUCKET:-}" "${BACKUP_TARGET_BUCKET:-}"; do
   if [ -n "$forbidden" ] && [ "$SCRATCH_BUCKET" = "$forbidden" ]; then
-    echo "refusing to restore into '$SCRATCH_BUCKET': that is a live bucket (BACKUP_S3_BUCKET/S3_BUCKET/BACKUP_TARGET_BUCKET)." >&2
+    echo "refusing to restore into '$SCRATCH_BUCKET': that is a live bucket (the compose-pinned 'pixelduo', BACKUP_S3_BUCKET, S3_BUCKET or BACKUP_TARGET_BUCKET)." >&2
     echo "This drill mirrors with --remove, so it would delete every object uploaded since the snapshot." >&2
     echo "Name a scratch bucket that does not exist yet." >&2
     exit 1

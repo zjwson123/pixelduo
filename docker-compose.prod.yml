@@ -101,11 +101,13 @@ x-appenv: &appenv
   # (lib/keys.ts) and .env.example documents this spelling, but no anchor named
   # it, so it was silently discarded in every container deployment.
   DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
-  # Read by sentry.server.config.ts, sentry.edge.config.ts,
-  # instrumentation-client.ts and lib/observability.ts to tag events with the
-  # build they came from. Only the local compose named it, so no production
-  # deployment could set one and every event arrived with no release — the
-  # "which deploy introduced this" question was unanswerable.
+  # Read by sentry.server.config.ts, sentry.edge.config.ts and
+  # lib/observability.ts to tag events with the build they came from. Only the
+  # local compose named it, so no production deployment could set one and every
+  # event arrived with no release — the "which deploy introduced this" question
+  # was unanswerable. NOT instrumentation-client.ts, which this paragraph used
+  # to claim: the browser bundle only carries NEXT_PUBLIC_* names (pass 30 read
+  # the built chunk — the client release is undefined by construction).
   SENTRY_RELEASE: ${SENTRY_RELEASE:-}
   HOSTNAME: 0.0.0.0
 
@@ -182,6 +184,14 @@ services:
     # restart loop the operator can see, and `restart: unless-stopped` retries it.
     command: sh -c "while true; do npx tsx scripts/rollover.ts && npx tsx scripts/expire.ts && npx tsx scripts/remind.ts || { echo '[rollover] a maintenance pass failed — exiting for a retry'; exit 1; }; sleep 86400; done"
     environment: *appenv
+    # The other two compose files give this service the same condition; this one
+    # did not, so on a fresh managed database `rollover` raced `migrate` and ran
+    # its passes against a schema that did not exist yet — a restart loop on
+    # first deploy (self-healing, since `restart: unless-stopped` retries, but
+    # log noise and no maintenance until migrate finished).
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
 
 volumes:

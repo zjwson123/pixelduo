@@ -75,13 +75,31 @@ export function concatFfmpegArgs(
   ];
 }
 
+// Ceiling on the two INPUTS together, checked before anything is written to
+// disk. Each input is capped on its own upstream (100 MB per download,
+// lib/providers) but the peak the worker holds is len(a) + len(b) + the output
+// buffer, and a chained source is a previous concat output — up to the 256 MB
+// output cap — so the per-object caps bound nothing: worst case was ~600 MB
+// inside a 512 MB container, and the output cap cannot help because the inputs
+// are already resident when it is computed (the source is a Buffer from the
+// store, the segment a Buffer from the provider). A refusal is a graceful
+// degradation here, not an error: the caller ships the segment alone, which is
+// exactly what the provider billed for.
+export const CONCAT_MAX_INPUT_BYTES = 320 * 1024 * 1024;
+
+export function concatInputsWithinBudget(aBytes: number, bBytes: number): boolean {
+  return aBytes + bBytes <= CONCAT_MAX_INPUT_BYTES;
+}
+
 // Concatenates two mp4 clips (original + continuation segment) into one file.
-// Returns the output buffer, or null when the input is not mp4, ffmpeg is
-// missing, or ffmpeg fails — the caller decides whether segment-only delivery
-// is acceptable (it always is: the segment is exactly what the provider billed
-// for, and a broken concat must never take down an otherwise-successful job).
+// Returns the output buffer, or null when the inputs are not mp4, exceed the
+// combined budget, ffmpeg is missing, or ffmpeg fails — the caller decides
+// whether segment-only delivery is acceptable (it always is: the segment is
+// exactly what the provider billed for, and a broken concat must never take
+// down an otherwise-successful job).
 export async function concatVideos(a: Buffer, b: Buffer): Promise<Buffer | null> {
   if (!looksLikeIsoBmffMedia(a) || !looksLikeIsoBmffMedia(b)) return null;
+  if (!concatInputsWithinBudget(a.length, b.length)) return null;
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "pdconcat-"));
   try {
     const aPath = path.join(dir, "a.mp4");

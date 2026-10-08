@@ -219,16 +219,40 @@ function localFailBump(userId: string): void {
 }
 
 // Consulted BEFORE a second factor is verified, on every route that accepts one.
-export async function isTwoFactorLocked(userId: string): Promise<boolean> {
-  const r = await withRedis(async (c) => Number((await c.get(`2fa:fail:${userId}`)) ?? 0));
-  if (r.state === "ok") return r.value >= MAX_2FA_FAILURES;
+//
+// Returns the remaining lock time alongside the verdict (pass 30): the refusal
+// used to be a bare 429 with no Retry-After at all, so a client honouring
+// backoff read "this account is refused for the rest of a 24h window" as "retry
+// in a moment" — the same missing-hint defect lib/api.ts's fail() documents for
+// the account bucket, on the one refusal where guessing wrong costs a day. The
+// hint is the counter's own TTL; a fail-closed Redis error reports the full
+// window, which is the honest worst case.
+export async function twoFactorLockStatus(
+  userId: string,
+): Promise<{ locked: boolean; retryAfterSec: number }> {
+  const r = await withRedis(async (c) => {
+    const key = `2fa:fail:${userId}`;
+    const [count, ttl] = await Promise.all([c.get(key), c.ttl(key)]);
+    return { count: Number(count ?? 0), ttl };
+  });
+  if (r.state === "ok") {
+    const locked = r.value.count >= MAX_2FA_FAILURES;
+    return { locked, retryAfterSec: locked ? Math.max(1, r.value.ttl) : 0 };
+  }
   // Fail CLOSED when a configured Redis cannot answer: this counter is the only
   // thing between a known password and a month-long 6-digit grind, so "the
   // store is unreachable" must not read as "no failures recorded". With
   // REDIS_URL unset there is no shared store to consult and the process-local
   // mirror above enforces the same cap.
-  if (r.state === "error") return true;
-  return localFailCount(userId) >= MAX_2FA_FAILURES;
+  if (r.state === "error") return { locked: true, retryAfterSec: TWOFA_FAIL_WINDOW_SEC };
+  const locked = localFailCount(userId) >= MAX_2FA_FAILURES;
+  const rec = localFails.get(userId);
+  const ttl = rec ? Math.ceil((rec.expires - Date.now()) / 1000) : 0;
+  return { locked, retryAfterSec: locked ? Math.max(1, ttl) : 0 };
+}
+
+export async function isTwoFactorLocked(userId: string): Promise<boolean> {
+  return (await twoFactorLockStatus(userId)).locked;
 }
 
 export async function recordTwoFactorFailure(userId: string): Promise<void> {

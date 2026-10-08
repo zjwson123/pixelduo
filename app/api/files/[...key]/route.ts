@@ -122,6 +122,17 @@ export async function GET(req: Request, { params }: { params: Promise<{ key: str
     if (!apiKey.emailVerified) {
       return new NextResponse("email not verified", { status: 403, headers: NO_STORE });
     }
+    // The credential resolved, so the account leg applies to bearer clients
+    // exactly as it does to sessions and to the v1 family (which charges the IP
+    // leg AND the key leg). Without it the IP bucket above was this route's
+    // ONLY charge for a machine client: the addresses are shared and spent
+    // BEFORE any credential is examined, so 600 anonymous requests/minute from
+    // one egress answered a paying API customer's own image/video fetches with
+    // 429 for the rest of the window — a bearer client fetching its own 100 MB
+    // videos had no per-account ceiling at all, and rotating addresses removed
+    // even the IP one. The IP leg stays as the pre-auth flood bound.
+    const keyLimited = await enforceUserRateLimit(apiKey.userId, "files", 600, 60_000);
+    if (keyLimited) return fail(keyLimited);
     uid = apiKey.userId;
   }
 
