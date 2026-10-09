@@ -153,6 +153,13 @@ docker run --rm --entrypoint sh pd-ci-web -c '
 # database is published on the host; the image pins its own UTC session.
 # rm -f first: a container this script left behind (a killed run before the
 # trap existed) must not block the name.
+#
+# The schema must exist before the boot: the smoke runs the REAL query path
+# (/api/health reads Job), and on a fresh machine this stage used to run before
+# the migrate step, so the app would answer 503 "the table public.Job does not
+# exist" — exactly what remote CI hit on this gate's first run. migrate deploy
+# is idempotent; step 3 runs it again for the rest of the pipeline.
+npx prisma migrate deploy >/dev/null
 docker rm -f pd-ci-web-smoke >/dev/null 2>&1 || true
 docker run -d --name pd-ci-web-smoke -p 3109:3000 \
   --add-host=host.docker.internal:host-gateway \

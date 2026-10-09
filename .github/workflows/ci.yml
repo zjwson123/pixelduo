@@ -185,6 +185,13 @@ jobs:
           --health-interval 5s --health-timeout 3s --health-retries 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      # Node + npm ci are for the MIGRATE step before the boot smoke, not for
+      # the image builds (those run entirely in Docker).
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
       - name: Build the image's dependency stage
         run: docker build --progress=plain --target deps .
       - name: Build the deploy stages (web + worker)
@@ -267,11 +274,19 @@ jobs:
         # repo tree — never standalone/server.js, which is what every compose
         # file deploys. A standalone tree that builds but cannot start (a
         # traced dependency silently absent, a broken server.js, a query engine
-        # for the wrong platform) shipped with every job green. host.docker.internal
+        # for the wrong platform) shipped with every job green.
+        #
+        # The schema must exist first: on this gate's FIRST run the app booted
+        # against the empty service database, /api/health answered 503 ("The
+        # table public.Job does not exist") and the gate went red — proving the
+        # check runs the real query path rather than a liveness ping. host.docker.internal
         # reaches the job's service containers; the image pins its own UTC
         # session, and PAYMENT_ALLOW_MOCK=1 is what lets a production build boot
         # with an http origin (the same opt-in the e2e job uses).
+        env:
+          DATABASE_URL: postgresql://pixelduo:pixelduo@localhost:5432/pixelduo_test
         run: |
+          npx prisma migrate deploy
           docker run -d --name pd-ci-web-smoke -p 3109:3000 \
             --add-host=host.docker.internal:host-gateway \
             -e DATABASE_URL="postgresql://pixelduo:pixelduo@host.docker.internal:5432/pixelduo_test" \
