@@ -4,6 +4,7 @@ import { _setMailerForTests, type Mailer } from "../lib/mail";
 import { sendExpiryReminders } from "../lib/reminder";
 
 let userId: string;
+let userEmail: string;
 const sent: Array<{ to: string; subject: string }> = [];
 
 const fakeMailer: Mailer = {
@@ -12,10 +13,20 @@ const fakeMailer: Mailer = {
   },
 };
 
+// sendExpiryReminders sweeps the WHOLE database by default, and two test files
+// call it concurrently (pass 30's expiry-mail case is the other) — so this file
+// passes its own scope: a global sweep would let the other file's run claim
+// these grants and send the mail through ITS mailer, and neither file could
+// assert about its own user deterministically (pass 32: the failure was an
+// intermittent red suite whose message named nothing).
+const sweep = () => sendExpiryReminders({ userId });
+const mine = () => sent.filter((m) => m.to === userEmail);
+
 beforeAll(async () => {
   _setMailerForTests(fakeMailer);
+  userEmail = `remind-${Date.now()}@test.dev`;
   const user = await prisma.user.create({
-    data: { email: `remind-${Date.now()}@test.dev`, passwordHash: "x", name: "Remind Test", emailVerified: new Date() },
+    data: { email: userEmail, passwordHash: "x", name: "Remind Test", emailVerified: new Date() },
   });
   userId = user.id;
 });
@@ -37,13 +48,14 @@ describe("credit expiry reminders", () => {
     await addGrant("PURCHASE", 400, new Date(Date.now() + 2 * 24 * 60 * 60 * 1000)); // bucket 3
     await addGrant("SUBSCRIPTION", 200, new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)); // out of horizon
 
-    const sent1 = await sendExpiryReminders();
-    expect(sent1).toBe(1);
-    expect(sent[0].subject).toContain("expire in 3 days");
-    expect(sent[0].subject).not.toContain("400"); // body not subject; subject carries bucket only
+    await sweep();
+    expect(mine()).toHaveLength(1);
+    expect(mine()[0].subject).toContain("expire in 3 days");
+    expect(mine()[0].subject).not.toContain("400"); // body not subject; subject carries bucket only
 
-    // Same run again → no duplicate.
-    expect(await sendExpiryReminders()).toBe(0);
+    // Same run again → no duplicate TO THIS USER, proven by the claim row.
+    await sweep();
+    expect(mine()).toHaveLength(1);
 
     const reminders = await prisma.creditReminder.count({ where: { userId } });
     expect(reminders).toBe(1);
@@ -51,7 +63,9 @@ describe("credit expiry reminders", () => {
 
   it("sends a 7-day bucket for grants expiring in a week", async () => {
     await addGrant("PURCHASE", 100, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
-    expect(await sendExpiryReminders()).toBe(1);
-    expect(sent.at(-1)?.subject).toContain("expire in 7 days");
+    await sweep();
+    expect(mine().at(-1)?.subject).toContain("expire in 7 days");
+    const reminders = await prisma.creditReminder.findMany({ where: { userId } });
+    expect(reminders.map((r) => r.daysBefore).sort()).toEqual([3, 7]);
   });
 });

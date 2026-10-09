@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getStorage } from "@/lib/storage";
 import { sniffContentType, contentTypeFromKey } from "@/lib/media-type";
+import type { StorageStream } from "@/lib/storage";
 
 // Error bodies need the same no-store as the success path, for the reason
 // lib/api.ts centralises it: a 401/403/404 for a URL-addressable resource is
@@ -136,54 +137,72 @@ export async function GET(req: Request, { params }: { params: Promise<{ key: str
     uid = apiKey.userId;
   }
 
-  // 1. User-owned generated image/video
-  const image = await prisma.image.findFirst({ where: { userId: uid, url: key } });
-  // 2. Shared template image (Explore gallery) — any logged-in user
+  // Everything from here to the first chunk is storage/DB work OUTSIDE any
+  // handler-level mapping (pass 32): an unexpected throw — a database fault on
+  // the route every image and video in the UI flows through, or, under the
+  // local driver, a delete landing between getStream()'s lazy open and the
+  // first read (ENOENT) — escaped as Next's bare unmasked 500 and one
+  // handled:false Sentry event per request, the exact shape the refuseNul
+  // guard above exists to remove. fail() maps an ApiError to its status and
+  // anything else to the masked internal-error, with captureError attached.
   let shared = false;
-  if (!image) {
-    const template = await prisma.template.findFirst({ where: { img: key }, select: { id: true } });
-    if (!template) return new NextResponse("not found", { status: 404, headers: NO_STORE });
-    shared = true;
-  }
-
-  // Streaming the object: the old full-buffer get() materialized up to 100 MB
-  // per request in heap. Pull the first chunk to sniff the content type from
-  // magic bytes, then replay it ahead of the rest of the stream.
-  //
-  // The consumer drives the read (pull, one chunk per call). A `start()` loop
-  // that enqueues every chunk as fast as the reader produces them is NOT a
-  // streaming fix: controller.enqueue never blocks, so the whole object sits in
-  // the stream's internal queue within milliseconds of the response being
-  // created — the same N × object-size heap as the get() it replaced, held
-  // until the socket drains (Node's requestTimeout caps that at 300s). ~100
-  // concurrent slow reads of 2-5 MB objects is a 512 MB container's OOM.
-  //
-  // Range support (RFC 9110 §14.2): every `<video>` element asks for one, and a
-  // 200 with no Accept-Ranges is what makes the clip non-seekable — Safari
-  // refuses to play such a source at all, and an interrupted download restarts
-  // from zero. Only when the client asked for one do we pay for the extra size
-  // lookup, so the ordinary image/thumbnail path is unchanged.
-  const rangeHeader = req.headers.get("range");
+  // Definite-assignment assertions: the catch below returns, so every path
+  // that reaches the streaming code has run the whole try.
+  let obj!: StorageStream;
+  let reader!: ReadableStreamDefaultReader<Uint8Array>;
+  let head!: Uint8Array;
   let range: { start: number; end: number } | null = null;
   let total: number | undefined;
-  if (rangeHeader) {
-    total = (await getStorage().size(key)) ?? undefined;
-    if (total === undefined) return new NextResponse("not found", { status: 404, headers: NO_STORE });
-    const parsed = parseRange(rangeHeader, total);
-    if (parsed === "unsatisfiable") {
-      return new NextResponse("range not satisfiable", {
-        status: 416,
-        headers: { ...NO_STORE, "Content-Range": `bytes */${total}`, "Accept-Ranges": "bytes" },
-      });
+  try {
+    // 1. User-owned generated image/video
+    const image = await prisma.image.findFirst({ where: { userId: uid, url: key } });
+    // 2. Shared template image (Explore gallery) — any logged-in user
+    if (!image) {
+      const template = await prisma.template.findFirst({ where: { img: key }, select: { id: true } });
+      if (!template) return new NextResponse("not found", { status: 404, headers: NO_STORE });
+      shared = true;
     }
-    if (parsed !== "ignore") range = parsed;
-  }
 
-  const obj = await getStorage().getStream(key, range ?? undefined);
-  if (!obj) return new NextResponse("not found", { status: 404, headers: NO_STORE });
-  const reader = obj.stream.getReader();
-  const first = await reader.read();
-  const head = first.done ? new Uint8Array(0) : first.value!;
+    // Streaming the object: the old full-buffer get() materialized up to 100 MB
+    // per request in heap. Pull the first chunk to sniff the content type from
+    // magic bytes, then replay it ahead of the rest of the stream.
+    //
+    // The consumer drives the read (pull, one chunk per call). A `start()` loop
+    // that enqueues every chunk as fast as the reader produces them is NOT a
+    // streaming fix: controller.enqueue never blocks, so the whole object sits in
+    // the stream's internal queue within milliseconds of the response being
+    // created — the same N × object-size heap as the get() it replaced, held
+    // until the socket drains (Node's requestTimeout caps that at 300s). ~100
+    // concurrent slow reads of 2-5 MB objects is a 512 MB container's OOM.
+    //
+    // Range support (RFC 9110 §14.2): every `<video>` element asks for one, and a
+    // 200 with no Accept-Ranges is what makes the clip non-seekable — Safari
+    // refuses to play such a source at all, and an interrupted download restarts
+    // from zero. Only when the client asked for one do we pay for the extra size
+    // lookup, so the ordinary image/thumbnail path is unchanged.
+    const rangeHeader = req.headers.get("range");
+    if (rangeHeader) {
+      total = (await getStorage().size(key)) ?? undefined;
+      if (total === undefined) return new NextResponse("not found", { status: 404, headers: NO_STORE });
+      const parsed = parseRange(rangeHeader, total);
+      if (parsed === "unsatisfiable") {
+        return new NextResponse("range not satisfiable", {
+          status: 416,
+          headers: { ...NO_STORE, "Content-Range": `bytes */${total}`, "Accept-Ranges": "bytes" },
+        });
+      }
+      if (parsed !== "ignore") range = parsed;
+    }
+
+    const streamed = await getStorage().getStream(key, range ?? undefined);
+    if (!streamed) return new NextResponse("not found", { status: 404, headers: NO_STORE });
+    obj = streamed;
+    reader = obj.stream.getReader();
+    const first = await reader.read();
+    head = first.done ? new Uint8Array(0) : first.value!;
+  } catch (e) {
+    return fail(e);
+  }
 
   const download = new URL(req.url).searchParams.get("download") === "1";
   // Sanitize filename to prevent header injection (CR/LF, quotes, path traversal).

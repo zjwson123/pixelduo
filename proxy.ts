@@ -7,18 +7,27 @@ import { envLimit } from "./lib/rate-limit";
 // (lib/rate-limit.ts, REDIS_URL) for generate/register/checkout/assistant.
 const buckets = new Map<string, number[]>();
 
-function hit(key: string, limit: number, windowMs: number): number | null {
+// Charge a request to one or more buckets; refuse if ANY of them is spent.
+//
+// A refused request charges NOTHING. That matters when a request carries two
+// buckets (an auth path: the credential's and the source address's): if a spent
+// credential still incremented the shared address bucket, its own exhaustion
+// would become an instrument for exhausting the neighbour's budget — the
+// denial-of-service direction pass 19 removed (an exhausted credential must
+// simply be inert, not a hammer).
+function hitAll(keys: string[], limit: number, windowMs: number): number | null {
   const now = Date.now();
-  const arr = (buckets.get(key) ?? []).filter((t) => now - t < windowMs);
-  if (arr.length >= limit) {
-    buckets.set(key, arr);
-    sweep(now);
-    return Math.max(1, Math.ceil((arr[0] + windowMs - now) / 1000));
+  const windows = keys.map((k) => (buckets.get(k) ?? []).filter((t) => now - t < windowMs));
+  let retry: number | null = null;
+  for (const arr of windows) {
+    if (arr.length >= limit) {
+      retry = Math.max(retry ?? 0, Math.max(1, Math.ceil((arr[0] + windowMs - now) / 1000)));
+    }
   }
-  arr.push(now);
-  buckets.set(key, arr);
+  if (retry === null) for (const arr of windows) arr.push(now);
+  keys.forEach((k, i) => buckets.set(k, windows[i]));
   sweep(now);
-  return null;
+  return retry;
 }
 
 // The map only shrinks on hit — an attacker spraying unique spoofed XFF
@@ -53,14 +62,25 @@ function sweep(now: number) {
 // product recommends — kept being charged to `u:<victim>:api`, 300/min from any
 // address, and the refusal happens BEFORE any route runs. The owner's live
 // browser shares that key, so their own workbench, gallery and 2FA login all
-// answered 429 while the attacker kept spending. And nothing ages the cookie
-// out: /api/auth/session re-encodes the same token with a fresh 30-day expiry on
-// every call. Hashing the raw cookie into the key bounds each cookie to its own
-// budget: a flood still cannot dodge the throttle by rotating source addresses
-// (the account id is all a stolen cookie can reach), but it can no longer spend
-// the budget of a session it does not hold. The correct reading of the old
-// comment: only an expired or forged token falls to the IP bucket — a revoked
-// but signed one is charged to its own session.
+// answered 429 while the attacker kept spending. Hashing the raw cookie into
+// the key bounds each cookie to its own budget: a flood can no longer spend the
+// budget of a session it does not hold.
+//
+// A cookie-keyed bucket alone, though, is only as stable as the cookie — and
+// the cookie is renewable for free (pass 32): `/api/auth/session` re-encodes
+// whatever token it decoded (next-auth v4's session route runs jwt.encode on
+// every call, and this app's session callback returns the session it is asked
+// about), so a session holder can mint a fresh cookie value, and with it a
+// fresh bucket, at the cost of ONE request per window — the throttle becomes
+// 40 requests plus one rotation instead of 40. For /api/* the damage is
+// bounded: every authenticated route carries its own account-keyed Redis
+// limiter (topping out at 600/min), which binds long before a rotated bucket
+// could do harm, and what is lost is this backstop's margin, not the only cap.
+// The bcrypt brake in front of /api/auth/* had no such second line, so AUTH
+// PATHS ALWAYS CHARGE THE SOURCE-ADDRESS BUCKET TOO — and anonymous callers
+// already did (with no cookie, the address IS their bucket), so this changes
+// nothing for them and revokes the rotation escape for everyone else. The
+// price is the residual spelled out below, now extended to cookie holders.
 //
 // Keying by account is safe here because the id is only used when the JWT
 // VERIFIES (an unverified cookie is attacker-chosen, so hashing it as given
@@ -68,11 +88,12 @@ function sweep(now: number) {
 // cookie — so this can only GIVE protection to requests that carry a real one;
 // it never takes it away from anonymous callers.
 //
-// What it does not fix: the pre-login routes still run on the IP bucket, and
-// they have to (there is no credential yet to key on), so a hostile egress can
-// still deny the LOGIN flow to its neighbours. Bounding that would mean
-// removing the limiter in front of password verification, which is the
-// bcrypt-amplification brake — a worse trade. Residual, documented.
+// What it does not fix: the pre-login routes run on the IP bucket, and they
+// have to (there is no credential yet to key on), so a hostile egress can still
+// deny the LOGIN flow — and now the /api/auth/* reads a signed-in neighbour
+// makes — for the whole IP. Bounding that would mean removing the limiter in
+// front of password verification, which is the bcrypt-amplification brake — a
+// worse trade. Residual, documented.
 async function sessionTag(raw: string): Promise<string> {
   // Web Crypto, not node:crypto: this module is the edge middleware. 8 bytes is
   // plenty — the tag only has to separate one cookie from another.
@@ -122,14 +143,35 @@ export async function proxy(req: NextRequest) {
   // Note this bucket is per (account × `/api`), not per route: for a verified
   // session it is ONE 300/min budget shared by all 46 routes, so it — not the
   // 600/min a few routes document for themselves (/api/jobs, /api/files, the
-  // v1 legs) — is the binding ceiling on a single instance. That is
-  // deliberate (a cheaper backstop than 46 buckets, and tighter is the safe
-  // direction); raise MIDDLEWARE_API_LIMIT if a real workload needs the
-  // headroom rather than assuming a route's own number binds.
+  // v1 legs) — was the binding ceiling on a single instance. That is deliberate
+  // (a cheaper backstop than 46 buckets, and tighter is the safe direction);
+  // raise MIDDLEWARE_API_LIMIT if a real workload needs the headroom rather
+  // than assuming a route's own number binds.
+  //
+  // Since pass 32 the per-cookie half of that key is only as stable as the
+  // cookie, and a cookie can be re-minted for free (see the rotation note
+  // above) — so for /api/* the value this layer adds is shape and anonymity,
+  // while the BINDING ceiling for an authenticated session is the per-route
+  // account-keyed limiter in lib/api.ts. That is accepted rather than fixed
+  // with an account-keyed bucket here, because this layer cannot see
+  // sessionVersion: an account key is exactly what let one revoked cookie deny
+  // its owner (pass 31). Auth paths take the other trade — there the brake
+  // matters more than a neighbour's session reads, so they carry the address
+  // key too.
   const authLimit = envLimit(process.env.MIDDLEWARE_AUTH_LIMIT, 40);
   const apiLimit = envLimit(process.env.MIDDLEWARE_API_LIMIT, 300);
   const bucket = await bucketFor(req, ip);
-  const retry = hit(`${bucket}:${isAuth ? "auth" : "api"}`, isAuth ? authLimit : apiLimit, 60_000);
+  // Auth paths: the credential's own bucket AND the source address's (see the
+  // rotation note above). The address key is the SAME one an anonymous caller
+  // gets, so a cookie buys a second bucket to be measured against, never a
+  // way off the shared one. Everywhere else: the credential's bucket alone —
+  // an address key there would restore the CGNAT denial this file exists to
+  // avoid, and the per-route account limiters are the binding ceiling anyway.
+  const keys =
+    isAuth && !bucket.startsWith("ip:")
+      ? [`${bucket}:auth`, `ip:${ip}:auth`]
+      : [`${bucket}:${isAuth ? "auth" : "api"}`];
+  const retry = hitAll(keys, isAuth ? authLimit : apiLimit, 60_000);
   if (retry !== null) {
     return NextResponse.json(
       { ok: false, error: "rate-limited" },

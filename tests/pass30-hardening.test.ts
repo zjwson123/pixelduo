@@ -254,7 +254,10 @@ describe("pass 30 — the expiry mail matches the in-app banner's source list", 
         },
       });
     }
-    await sendExpiryReminders();
+    // Scoped to this user (pass 32): the sweep is global, and reminder.test.ts
+    // runs concurrently and asserts about its own mail — an unscoped run here
+    // could claim that file's grants and send through this file's mailer.
+    await sendExpiryReminders({ userId: user.id });
     const rows = await prisma.creditReminder.findMany({ where: { userId: user.id } });
     expect(rows.map((r) => r.daysBefore).sort()).toEqual([3, 3]);
     expect(subjects.some((s) => s.includes("expire in 3 days"))).toBe(true);

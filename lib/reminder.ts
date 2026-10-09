@@ -17,7 +17,14 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 // expiring, the latter minted exactly when the customer is owed something —
 // was advertised in the workbench and silently destroyed for anyone not
 // looking at it (probed: banner listed three sources, the mail only PURCHASE).
-export async function sendExpiryReminders(): Promise<number> {
+// Optional test scope. The sweep is GLOBAL by design (every user's expiring
+// credits), but two test files call it concurrently and each asserts about its
+// own user's mail — with a global sweep, the other file's run can claim this
+// file's grants and send through ITS mailer, so neither file could tell "my
+// mail" from "nobody's mail" deterministically (pass 32; the failure surfaced
+// as an intermittent red suite whose message named neither file). Production
+// (`scripts/remind.ts`) passes no scope and is unchanged.
+export async function sendExpiryReminders(scope?: { userId?: string }): Promise<number> {
   // The DATABASE's clock (see listExpiringCredits): a mail that says "1 day
   // left" is a claim about the deadline the spend path and the expiry sweep
   // enforce, and those run on the database's clock.
@@ -25,6 +32,7 @@ export async function sendExpiryReminders(): Promise<number> {
   const horizon = new Date(now.getTime() + 8 * DAY_MS);
   const grants = await prisma.creditGrant.findMany({
     where: {
+      ...(scope?.userId ? { userId: scope.userId } : {}),
       remaining: { gt: 0 },
       // Lower bound too: a grant that already expired but has not been swept
       // yet must not be mailed as "1 day left" (Math.max(1, …) below pins the

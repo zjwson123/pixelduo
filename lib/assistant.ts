@@ -1,5 +1,6 @@
 import { getDeepSeekKey, getDeepSeekBaseUrl } from "./keys";
 import { readJsonCapped, outboundTimeoutMs } from "./store";
+import { sliceCodePoints } from "./untrusted-text";
 
 export interface AssistantResult {
   text: string;
@@ -63,8 +64,11 @@ export async function improvePrompt(prompt: string, mode: string): Promise<Assis
         const text = data.choices?.[0]?.message?.content?.trim();
         // Bound what a gateway can hand back: max_tokens is a request, not a
         // guarantee, and the response body is read up to 8 MB. A real reply is
-        // a prompt expansion (a few hundred tokens), so this is generous.
-        if (text) return { text: text.slice(0, 4000), offline: false };
+        // a prompt expansion (a few hundred tokens), so this is generous. The
+        // bound never splits a surrogate pair (pass 32): the workbench copies
+        // this text into the next prompt verbatim, and an ill-formed tail made
+        // /api/generate answer malformed-text for a string the app produced.
+        if (text) return { text: sliceCodePoints(text, 4000), offline: false };
       } else {
         // Cancel the unread body — see lib/router.ts for why.
         await res.body?.cancel().catch(() => undefined);

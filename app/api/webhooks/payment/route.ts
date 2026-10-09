@@ -221,12 +221,33 @@ export async function POST(req: Request) {
       } else if (event.type === "refunded") {
         // Only a FULL refund revokes credits AND flips the order: a partial
         // refund (e.g. $0.01) must neither wipe the remaining balance nor
-        // consume the "paid" status a later full refund still needs. When the
-        // provider doesn't flag full/partial explicitly, compare the refunded
-        // amount against the order amount — and default to FULL when nothing
-        // is comparable (fail closed: a skipped revocation is a fraud win,
-        // an over-broad revoke is an admin-fixable overreaction).
+        // consume the "paid" status a later full refund still needs.
+        //
+        // "Full" cannot be read off this delivery alone. Paddle scopes
+        // `fullRefund` to the adjustment itself, so two partials that together
+        // return the whole price both say `partial` — and the credits and the
+        // paid tier survived a completed refund (pass 32). The order row
+        // accumulates what each delivery actually returned (refundAmountUsd is
+        // that delivery's own amount — Paddle's adjustment total, Stripe's
+        // never set here because it reports cumulatively), and the cumulative
+        // total is what decides. The increment and the promotion share this
+        // transaction, so a rolled-back delivery (below) un-counts itself and
+        // the provider's retry re-accumulates exactly once.
         let fullRefund = event.fullRefund;
+        if (order && event.refundAmountUsd !== undefined) {
+          const accumulated = await tx.order.update({
+            where: { id: order.id },
+            data: { refundedAmountUsd: { increment: event.refundAmountUsd } },
+            select: { refundedAmountUsd: true },
+          });
+          if (fullRefund !== true && accumulated.refundedAmountUsd >= order.amountUsd - 0.005) {
+            fullRefund = true;
+          }
+        }
+        // No amount to accumulate: keep the fail-closed default — a refund we
+        // cannot measure against the order counts as full (a skipped
+        // revocation is a fraud win; an over-broad revoke is an admin-fixable
+        // overreaction).
         if (fullRefund === undefined) {
           fullRefund =
             event.refundAmountUsd === undefined ||

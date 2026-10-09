@@ -79,6 +79,8 @@ docker compose -f docker-compose.prod.yml run --rm migrate
 
 `.next/standalone`（web 镜像的内容，也是非 Docker 部署直接搬运的那棵树）**不含任何 dotenv 文件**：Next 构建时会把构建机的 `.env` 复制进去，而那份文件里是 `NEXTAUTH_SECRET`、`DATABASE_URL` 和 S3 凭据。`npm run build` 之后的 `postbuild`（`scripts/prune-standalone.mjs`）会删掉它们，Dockerfile 阶段也各删一次，CI 与 `scripts/ci-local.sh` 都会断言这件事。因此运行环境变量必须显式提供（compose 的 `environment:`，或主机进程自己的环境）——把 `.env` 放在产物旁边不再是配置方式。
 
+web 镜像还额外删掉 Next 因 prerender source map 一路 trace 进来的 **TypeScript 源码**（`lib/`、`app/`、`components/`、`scripts/` 以及根目录的 `next.config.mjs`、`proxy.ts` 等，pass 32）：镜像里真正运行的是编译产物（`server.js` + `.next/server/*`，instrumentation 与 middleware 各有自己的编译 chunk），源码留在镜像里只会把内部注释、审计历史与运维脚本一起发出去。CI 与 `scripts/ci-local.sh` 既断言这些文件不在镜像里，也会**真正启动 web 镜像**（`node server.js`）并要求 `/api/health` 返回 200——只做文件形状检查的旧门禁发现不了"能构建、起不来"的产物。
+
 ### 用户反馈（`/feedback`）
 
 留言会存进 `Feedback` 表（管理台 **feedback** 标签页 = 收件箱），同时把通知邮件发到 `FEEDBACK_TO`。邮件用纯文本，`Reply-To` 是留言者本人，所以在邮箱里直接回复就是回复用户。

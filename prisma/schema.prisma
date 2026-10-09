@@ -237,6 +237,15 @@ model Order {
   idempotencyKey   String    @unique
   createdAt        DateTime  @default(now())
   paidAt           DateTime?
+  // Money the provider has given back against this order, accumulated across
+  // refund webhooks (pass 32). Stripe reports a refund cumulatively and needs
+  // no state, but Paddle labels every adjustment by its OWN scope: two $25
+  // partials against a $49.99 pack are both `partial`, so "the flag says
+  // partial" stayed true while the customer got everything back — the order
+  // stayed paid and the credits stayed granted. The route sums each delivery's
+  // own amount here and promotes to a full revoke once the total reaches
+  // amountUsd. Existing rows read 0, the correct starting value.
+  refundedAmountUsd Float    @default(0)
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 

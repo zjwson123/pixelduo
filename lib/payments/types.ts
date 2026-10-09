@@ -25,10 +25,12 @@ export interface PaymentWebhookEvent {
   // refunds notify but leave granted credits untouched (revoking everything
   // over a $0.01 partial refund would be wildly disproportionate).
   fullRefund?: boolean;
-  // For "refunded": the refunded amount in USD when the provider states it.
-  // Used as the full/partial fallback when the provider doesn't flag it
-  // explicitly — compared against the order amount in the webhook route,
-  // which is where the order row is loaded.
+  // For "refunded": the refunded amount in USD when the provider states it —
+  // THIS delivery's own amount, never a running total. The webhook route
+  // accumulates it on the order (Order.refundedAmountUsd) and promotes to a
+  // full revoke once the cumulative total reaches the price (pass 32: Paddle
+  // scopes its full/partial flag to each adjustment, so two partials that
+  // return the whole price both read `partial`).
   refundAmountUsd?: number;
   // For "paid": what the provider actually collected, and in which currency.
   // The route refuses fulfillment when this is BELOW the named order's price.

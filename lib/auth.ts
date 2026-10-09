@@ -2,6 +2,7 @@ import type { NextAuthOptions } from "next-auth";
 import CredentialsProvider from "next-auth/providers/credentials";
 import GoogleProvider from "next-auth/providers/google";
 import GitHubProvider from "next-auth/providers/github";
+import { Prisma } from "@prisma/client";
 import bcrypt from "bcryptjs";
 import { randomBytes } from "crypto";
 import { reserveLoginAttempt, refundLoginFailures, alertLoginAbuse } from "./login-guard";
@@ -370,26 +371,42 @@ export async function ensureOAuthUser(
   if (hasControlChars(e)) return null;
   let user = await prisma.user.findUnique({ where: { email: e } });
   if (!user) {
-    user = await prisma.user.create({
-      data: {
-        email: e,
-        passwordHash: randomBytes(32).toString("hex"), // OAuth users have no password
-        // Display metadata, not user-authored content, so it is filtered rather
-        // than refused: control characters would hit the same 22021 on the
-        // create, and no legitimate provider sends them.
-        name: (name || e.split("@")[0]).replace(/[\u0000-\u001f\u007f]/g, ""),
-        emailVerified: new Date(),
-      },
-    });
-    await signupBonus(user.id);
-  } else if (!user.emailVerified) {
+    try {
+      user = await prisma.user.create({
+        data: {
+          email: e,
+          passwordHash: randomBytes(32).toString("hex"), // OAuth users have no password
+          // Display metadata, not user-authored content, so it is filtered rather
+          // than refused: control characters would hit the same 22021 on the
+          // create, and no legitimate provider sends them.
+          name: (name || e.split("@")[0]).replace(/[\u0000-\u001f\u007f]/g, ""),
+          emailVerified: new Date(),
+        },
+      });
+      await signupBonus(user.id);
+    } catch (err) {
+      // Two concurrent first-sign-ins for the same new address (a double-tab
+      // sign-in, a retried callback) both miss the lookup above and race on
+      // the unique index; the loser's create throws P2002. Escaping that is
+      // what next-auth turns into /error?error=Callback plus a logged
+      // incident for a legitimate sign-in — the register route answers the
+      // identical race deliberately (app/api/register/route.ts). The row that
+      // WON is the account this sign-in means, so re-read it; the bonus is not
+      // granted twice (the winner already granted it inside its own call).
+      if (!(err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002")) throw err;
+      user = await prisma.user.findUnique({ where: { email: e } });
+      if (!user) throw err;
+    }
+  }
+  if (!user.emailVerified) {
     // Pre-hijacking guard: an unverified local account was created by a plain
     // password registration that never proved the address (POST /api/register
     // requires no ownership). Anyone can pre-register an address they don't
     // own — auto-linking the OAuth identity into it would verify it AND leave
     // the attacker's password working on the victim's account. The real owner
     // must first verify via the emailed link (or sign in with the password
-    // and verify from there); OAuth sign-in is refused until then.
+    // and verify from there); OAuth sign-in is refused until then. Also the
+    // correct answer for the race above when the winner was NOT this flow.
     return null;
   }
   return { id: user.id, totpEnabled: user.totpEnabled };

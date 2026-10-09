@@ -183,7 +183,7 @@ CI（`.github/workflows/ci.yml`）：Postgres 服务容器下跑单测、构建�
 ## 测试
 
 ```bash
-npm test                 # 单元测试（Postgres 测试库：成本/账本/队列重试/结转/支付/脱敏/账号/OAuth/2FA/管理/API Key/邮件模板/到期提醒/收据/退款，75 例）
+npm test                 # 单元测试（Postgres 测试库：成本/账本/队列重试/结转/支付/脱敏/账号/OAuth/2FA/管理/API Key/邮件模板/到期提醒/收据/退款，599 例）
 npm run test:e2e         # 端到端（见下）
 ```
 

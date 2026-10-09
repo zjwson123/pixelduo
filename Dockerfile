@@ -92,6 +92,23 @@ ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1
 # perf/bench/session.json (the bench's Playwright storage state) next to raw
 # measurements; it is dev tooling, not runtime input.
 #
+# The TYPESCRIPT SOURCES (pass 32) are the same class one layer up: prerender
+# source maps make the tracer keep lib/, scripts/, app/, components/ and the
+# root config files as-is, so the image shipped lib/ledger.ts (whose comments
+# name every fixed weakness and its pass), scripts/ci-local.sh and backup.sh
+# (the operator runbooks), the dev/test configs and proxy.ts — none of it read
+# at runtime and none of it named by any assertion. What actually runs is
+# compiled: server.js requires `next` + .next/server/*, and instrumentation and
+# the middleware are compiled into .next/server/instrumentation.js and
+# middleware.js. Probed by booting this exact pruned tree (`node server.js`
+# against the compose database: /api/health 200, /login 200). next.config.mjs
+# goes too: standalone server.js carries the config INLINE
+# (__NEXT_PRIVATE_STANDALONE_CONFIG), which is why the file being absent does
+# not matter — it was verified in that boot. prisma/seed.ts and tsconfig.json
+# are host/CI-only (seed runs from the checkout, tsx only runs in the WORKER
+# image, which keeps both). The worker stage is untouched: it is the image whose
+# runbook needs lib/ and scripts/.
+#
 # chown -R at the end because a bind-mount copy brings the builder stage's
 # root:root along; the app runs as `node` (see USER below).
 #
@@ -112,6 +129,12 @@ RUN --mount=type=bind,from=builder,source=/app,target=/b \
  && rm -rf \
       .env .env.* \
       docs tests e2e designs data backups public/generated perf \
+      lib scripts app components \
+      instrumentation.ts instrumentation-client.ts \
+      next.config.mjs proxy.ts \
+      sentry.server.config.ts sentry.edge.config.ts \
+      vitest.config.ts vitest.setup.ts playwright.config.ts \
+      tsconfig.json prisma/seed.ts \
       ./*.md docker-compose*.yml Caddyfile Dockerfile \
       *.db *.db-journal prisma/*.db prisma/*.db-journal \
       ./*.tsbuildinfo \

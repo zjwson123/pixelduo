@@ -136,7 +136,11 @@ jobs:
           npm run build
       - name: Assert the standalone artifact carries no dotenv files or local databases
         run: |
-          found=$(find .next/standalone -maxdepth 3 \( -name '.env*' -o -name '*.db' -o -name '*.db-journal' \) -not -path '*/node_modules/*')
+          # No -maxdepth: the prune (scripts/prune-standalone.mjs) walks the whole
+          # tree, so a depth limit here made the assertion blind to a leak the
+          # prune DOES reach — a partial-depth prune regression would have
+          # shipped with this step green (pass 32).
+          found=$(find .next/standalone \( -name '.env*' -o -name '*.db' -o -name '*.db-journal' \) -not -path '*/node_modules/*')
           if [ -n "$found" ]; then
             echo "standalone artifact carries build-host-only files:"; echo "$found"; exit 1
           fi
@@ -162,6 +166,23 @@ jobs:
   # the merged, non-nested directory shape is what the image actually contains.
   docker:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: pixelduo
+          POSTGRES_PASSWORD: pixelduo
+          POSTGRES_DB: pixelduo_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U pixelduo -d pixelduo_test"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Build the image's dependency stage
@@ -215,11 +236,62 @@ jobs:
             test ! -e /app/README.md
             test ! -e /app/tsconfig.tsbuildinfo
             test ! -e /app/Dockerfile
+            # The TypeScript sources (pass 32): the tracer keeps them for
+            # prerender source maps, so the image shipped the backend source
+            # (lib/ledger.ts names every fixed weakness and its pass), the
+            # operator scripts and the dev configs. None of it is read at
+            # runtime — the boot smoke below is what proves that.
+            test ! -e /app/lib
+            test ! -e /app/scripts
+            test ! -e /app/app
+            test ! -e /app/components
+            test ! -e /app/proxy.ts
+            test ! -e /app/instrumentation.ts
+            test ! -e /app/next.config.mjs
+            test ! -e /app/vitest.config.ts
+            test ! -e /app/playwright.config.ts
+            test ! -e /app/tsconfig.json
+            test ! -e /app/prisma/seed.ts
+            # ...while what actually RUNS is still there: the compiled chunks.
+            test -e /app/server.js
+            test -e /app/.next/server/instrumentation.js
+            test -e /app/.next/server/middleware.js
             for f in /app/.env /app/.env.local /app/.env.production; do
               if [ -e "$f" ]; then echo "dotenv in image: $f"; exit 1; fi
             done
             echo "web image shape OK"
           '
+      - name: Boot the web image against the services and require /api/health
+        # The deploy artifact had never been BOOTED by any job (pass 32): every
+        # gate asserted file shape, and the e2e job runs `next start` from the
+        # repo tree — never standalone/server.js, which is what every compose
+        # file deploys. A standalone tree that builds but cannot start (a
+        # traced dependency silently absent, a broken server.js, a query engine
+        # for the wrong platform) shipped with every job green. host.docker.internal
+        # reaches the job's service containers; the image pins its own UTC
+        # session, and PAYMENT_ALLOW_MOCK=1 is what lets a production build boot
+        # with an http origin (the same opt-in the e2e job uses).
+        run: |
+          docker run -d --name pd-ci-web-smoke -p 3109:3000 \
+            --add-host=host.docker.internal:host-gateway \
+            -e DATABASE_URL="postgresql://pixelduo:pixelduo@host.docker.internal:5432/pixelduo_test" \
+            -e REDIS_URL="redis://host.docker.internal:6379" \
+            -e NEXTAUTH_SECRET="5c1f8e2a94b7d03f6ae4c81d2795bf30e6a1c47d8b92f650" \
+            -e NEXTAUTH_URL="http://localhost:3109" \
+            -e PAYMENT_ALLOW_MOCK=1 \
+            -e STORAGE_DRIVER=local \
+            pd-ci-web
+          ok=""
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3109/api/health; then ok=1; break; fi
+            sleep 2
+          done
+          if [ -z "$ok" ]; then
+            echo "web image boot smoke FAILED — the standalone server never answered /api/health:"
+            docker logs pd-ci-web-smoke 2>&1 | tail -30
+            exit 1
+          fi
+          echo "web image boots standalone and answers /api/health"
       - name: Assert the worker image's artifact shape
         # The worker stage prunes the same material in one COPY+prune layer, and
         # nothing asserted it — while the Dockerfile itself calls this image the

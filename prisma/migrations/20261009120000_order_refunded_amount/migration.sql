@@ -1,0 +1,16 @@
+-- Track how much money the provider has returned against an order.
+--
+-- Pass 32: Paddle flags each adjustment by its own scope (`type: "partial"`),
+-- so an order refunded in two partials was never revoked — the flag stayed
+-- "partial" while the customer had all the money back, and the credits plus
+-- the paid tier (unwatermarked output) survived a fully refunded purchase.
+-- Stripe reports cumulative refunds and needs no state; the webhook route now
+-- accumulates each delivery's own amount here and promotes to a full revoke
+-- once the total reaches the order amount.
+--
+-- Existing rows default to 0, which is the correct starting value: the
+-- information about refunds already delivered was never stored anywhere
+-- aggregatable, and a fully refunded historical order is one the operator
+-- resolves by hand (the same rule the refund path already documents for a
+-- refund that cannot be attributed).
+ALTER TABLE "Order" ADD COLUMN "refundedAmountUsd" DOUBLE PRECISION NOT NULL DEFAULT 0;

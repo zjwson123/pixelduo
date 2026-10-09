@@ -15,6 +15,30 @@ export REGISTER_RATE_LIMIT="10000"
 export STORAGE_DRIVER="local"
 export LOCAL_STORAGE_DIR="data/files"
 
+# The npx wrapper's death does not reliably reach the node child (this
+# pipeline's own recorded pitfall: an aborted run's `next start` survives, the
+# next run's health check passes against ITS build, and the whole e2e stage
+# tests a stale artifact). The trap is installed HERE, before anything can
+# leak — a smoke container this script starts at step 2 outlived a step-5
+# failure in the first version, and the next run then died on "name already in
+# use". Listeners are taken down by port as well as by pid, but only for ports
+# this run actually started, so an unrelated process is never killed on an
+# early exit.
+STARTED_PORTS=()
+cleanup() {
+  kill ${APP_PID:-} ${APP2_PID:-} ${WORKER_PID:-} 2>/dev/null || true
+  for p in ${STARTED_PORTS[@]+"${STARTED_PORTS[@]}"}; do
+    pids="$(lsof -ti "tcp:$p" 2>/dev/null || true)"
+    if [ -n "$pids" ]; then kill $pids 2>/dev/null || true; fi
+  done
+  docker rm -f pd-ci-web-smoke >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+# An interrupt must still clean up: without these, a Ctrl-C leaves the smoke
+# container (and any listener) behind, and the NEXT run refuses to start on its
+# own leak — which is exactly how the first version of this smoke behaved.
+trap 'exit 130' INT TERM
+
 echo "[1/9] deployment config (compose render + env-var coverage) + runtime advisories"
 # Mirrors CI's `config` job: renders every compose file and asserts that each
 # variable documented in .env.example AND read by the code actually reaches a
@@ -95,11 +119,66 @@ docker run --rm --entrypoint sh pd-ci-web -c '
   test ! -e /app/README.md
   test ! -e /app/tsconfig.tsbuildinfo
   test ! -e /app/Dockerfile
+  # The TypeScript sources (pass 32): the tracer keeps them for prerender source
+  # maps, so the image shipped the backend source (lib/ledger.ts names every
+  # fixed weakness and its pass), the operator scripts and the dev configs.
+  # None of it is read at runtime — the boot smoke below is what proves that.
+  test ! -e /app/lib
+  test ! -e /app/scripts
+  test ! -e /app/app
+  test ! -e /app/components
+  test ! -e /app/proxy.ts
+  test ! -e /app/instrumentation.ts
+  test ! -e /app/next.config.mjs
+  test ! -e /app/vitest.config.ts
+  test ! -e /app/playwright.config.ts
+  test ! -e /app/tsconfig.json
+  test ! -e /app/prisma/seed.ts
+  # ...while what actually RUNS is still there: the compiled chunks.
+  test -e /app/server.js
+  test -e /app/.next/server/instrumentation.js
+  test -e /app/.next/server/middleware.js
   for f in /app/.env /app/.env.local /app/.env.production; do
     if [ -e "$f" ]; then echo "dotenv in image: $f"; exit 1; fi
   done
   echo "web image shape OK"
 ' || { echo "web image artifact assertion FAILED"; exit 1; }
+# The deploy artifact had never been BOOTED by any job (pass 32): the gates
+# above assert file shape only, and the e2e stage runs `next start` from the
+# repo tree — never standalone/server.js, which is what every compose file
+# deploys. A standalone tree that builds but cannot start (a traced dependency
+# silently absent, a broken server.js, a query engine for the wrong platform)
+# shipped with every job green. Boot the real image against the local database
+# and require a real /api/health. host.docker.internal because the compose
+# database is published on the host; the image pins its own UTC session.
+# rm -f first: a container this script left behind (a killed run before the
+# trap existed) must not block the name.
+docker rm -f pd-ci-web-smoke >/dev/null 2>&1 || true
+docker run -d --name pd-ci-web-smoke -p 3109:3000 \
+  --add-host=host.docker.internal:host-gateway \
+  -e DATABASE_URL="postgresql://pixelduo:pixelduo@host.docker.internal:5432/pixelduo_test" \
+  -e REDIS_URL="redis://host.docker.internal:6379" \
+  -e NEXTAUTH_SECRET="$NEXTAUTH_SECRET" \
+  -e NEXTAUTH_URL="http://localhost:3109" \
+  -e PAYMENT_ALLOW_MOCK=1 \
+  -e STORAGE_DRIVER=local \
+  pd-ci-web >/dev/null
+smoke_ok=""
+for i in $(seq 1 30); do
+  curl -fsS http://127.0.0.1:3109/api/health >/dev/null 2>&1 && { smoke_ok=1; break; }
+  sleep 2
+done
+if [ -z "$smoke_ok" ]; then
+  echo "web image boot smoke FAILED — the standalone server never answered /api/health:" >&2
+  docker logs pd-ci-web-smoke 2>&1 | tail -30 >&2
+  exit 1
+fi
+echo "web image boots standalone and answers /api/health"
+# Take it down NOW, not at exit: it published 3109, and the e2e stage's
+# leftover-listener guard five steps below refuses to start while anything
+# holds that port (a first version left the smoke up for the whole run and
+# tripped its own check).
+docker rm -f pd-ci-web-smoke >/dev/null 2>&1 || true
 # Same rule for the worker image (see ci.yml): its prune is what keeps docs/,
 # tests/ and any planted .env out of the artifact a registry push carries off
 # the host, and nothing asserted it until pass 28.
@@ -169,8 +248,10 @@ npm run build
 # The artifact that deploys must not carry the build host's secrets. `next
 # build` copies .env into .next/standalone unconditionally; the postbuild prune
 # is what removes it, and a silent failure here ships NEXTAUTH_SECRET and the
-# database URL with the artifact. Same assertion as CI's build job.
-LEAKED="$(find .next/standalone -maxdepth 3 \( -name '.env*' -o -name '*.db' -o -name '*.sqlite*' \) -not -path '*/node_modules/*' 2>/dev/null || true)"
+# database URL with the artifact. Same assertion as CI's build job, and likewise
+# no -maxdepth (pass 32): the prune walks the whole tree, so a depth limit made
+# this blind to a leak the prune DOES reach.
+LEAKED="$(find .next/standalone \( -name '.env*' -o -name '*.db' -o -name '*.sqlite*' \) -not -path '*/node_modules/*' 2>/dev/null || true)"
 if [ -n "$LEAKED" ]; then
   echo "standalone artifact carries dotenv files:" >&2
   echo "$LEAKED" >&2
@@ -220,11 +301,24 @@ rm -rf "$MAIL_DEV_DIR" && mkdir -p "$MAIL_DEV_DIR"
 docker exec pixelduo-redis redis-cli --scan --pattern 'rl:*' 2>/dev/null \
   | xargs -r -I{} docker exec pixelduo-redis redis-cli del {} >/dev/null 2>&1 || true
 npx tsx prisma/seed.ts >/dev/null
-npx next start -p 3100 >/tmp/pd-ci-app.log 2>&1 &
+# Refuse to start on top of a leftover listener (the trap above is what removes
+# this run's own listeners at exit; this is the stale-process guard).
+for port in 3100 3101 3109; do
+  if [ -n "$(lsof -ti "tcp:$port" 2>/dev/null || true)" ]; then
+    echo "port $port is already in use — a leftover server would make every check below pass against ITS build; stop it first" >&2
+    exit 1
+  fi
+done
+# -H 127.0.0.1: `next start` without it binds 0.0.0.0 (the CLI's own default),
+# i.e. this stack — auto-verifying registrations, mock payments, mock image
+# provider, no TLS, no edge, XFF-trusting per-IP limiters — was served to the
+# whole LAN for the run's duration. Same loopback pin as dev-restart.sh and the
+# compose port mappings; playwright and the health curls all use localhost.
+STARTED_PORTS+=(3100)
+npx next start -p 3100 -H 127.0.0.1 >/tmp/pd-ci-app.log 2>&1 &
 APP_PID=$!
 npx tsx scripts/worker.ts >/tmp/pd-ci-worker.log 2>&1 &
 WORKER_PID=$!
-trap 'kill $APP_PID $WORKER_PID 2>/dev/null || true' EXIT
 
 for i in $(seq 1 30); do
   curl -fsS http://localhost:3100/api/health >/dev/null 2>&1 && break
@@ -242,9 +336,9 @@ PW_CHANNEL=chrome npx playwright test
 echo "[9/9] e2e (pending-verification flow, port 3101)"
 export EMAIL_VERIFY_AUTO="0"
 export NEXTAUTH_URL="http://localhost:3101"
-npx next start -p 3101 >/tmp/pd-ci-app-verify.log 2>&1 &
+STARTED_PORTS+=(3101)
+npx next start -p 3101 -H 127.0.0.1 >/tmp/pd-ci-app-verify.log 2>&1 &
 APP2_PID=$!
-trap 'kill $APP_PID $APP2_PID $WORKER_PID 2>/dev/null || true' EXIT
 
 for i in $(seq 1 30); do
   curl -fsS http://localhost:3101/api/health >/dev/null 2>&1 && break

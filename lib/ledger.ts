@@ -686,8 +686,13 @@ export async function refundCreditsTx(
         continue;
       }
       const deadline = row?.expiresAt ?? null;
+      // The fallback (a grant that vanished with no deadline to inherit) takes
+      // the DATABASE clock, like every other money deadline (pass 26/31: the
+      // replacement's own expiry is later compared against SQL `now()` by
+      // spendCreditsTx, runExpiry and the reminders, so minting it from the
+      // app clock handed the host↔database skew to the credits' lifetime).
       const expiresAt = new Date(
-        (deadline ?? new Date()).getTime() + REFUND_REPLACEMENT_GRACE_MS,
+        (deadline ?? (await dbNow(tx))).getTime() + REFUND_REPLACEMENT_GRACE_MS,
       );
       if (row?.graceExpired) {
         // Late beyond the grace: the credits' life ended at their deadline and
@@ -733,7 +738,15 @@ export async function refundCreditsTx(
     const cap = row ? row.amount : null;
     const held = row ? (heldPerGrant.get(c.grantId) ?? row.remaining) : null;
     const restoring = restoredPerGrant.get(c.grantId) ?? 0;
-    if (cap !== null && held !== null && held + restoring + c.amount > cap) {
+    // `held` is the row's CURRENT holding — heldPerGrant already carries this
+    // call's restores — so what has to fit is held + this portion. Adding
+    // `restoring` again (pass 32) double-counted everything this call had
+    // restored so far: on a healthy row the second consumption naming the same
+    // grant read 80 + 20 + 20 > 100 and refused a refund that fit exactly,
+    // silently shrinking a failing job's refund by the consumed portion while
+    // the log blamed an invariant nothing was violating. `restoring` is still
+    // what the write-off clamp's target arithmetic needs below.
+    if (cap !== null && held !== null && held + c.amount > cap) {
       if (held > cap && cap >= restoring + c.amount) {
         // Clamp to (cap - what this call still has to restore - this portion),
         // so the increment below lands at cap - restoring and no state in

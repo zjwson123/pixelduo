@@ -31,8 +31,17 @@
 // used to pass through untouched — `token` never matched `access_token`, because
 // the character before it is `_` and not `?`/`&`. A group-bot token in a Sentry
 // project is the ability to post arbitrary messages as the bot.
+//
+// Pass 32 added the USER-CONTENT half. The rule above was only ever applied to
+// credentials, but this app's own client code puts more than tokens in query
+// strings: the workbench sends the user's search text (`/api/templates?q=…`,
+// components/workbench.tsx) and the admin console sends an email/name fragment
+// (`/api/admin/users?q=…`). Sentry ships fetch URLs in breadcrumbs and keeps
+// the full href in span attributes, so both landed in a third-party tracker —
+// user-authored text and user emails, in any deployment with a DSN. Still
+// value-shaped and still by parameter name, so the same rule covers it.
 const SENSITIVE_QUERY_PARAM =
-  /(^|[?&])((?:token|code|ticket|jti|secret|password|passwd|api_?key|access_?key|access_?token|key|signature|sig|session|state|x-amz-signature|x-amz-credential|x-amz-security-token)=)[^&#\s"'<>]*/gi;
+  /(^|[?&])((?:token|code|ticket|jti|secret|password|passwd|api_?key|access_?key|access_?token|key|signature|sig|session|state|x-amz-signature|x-amz-credential|x-amz-security-token|q|email|user_?id)=)[^&#\s"'<>]*/gi;
 
 // Path-shaped credentials, which no query-parameter rule can see: Feishu's
 // webhook token is the last path segment (`/open-apis/bot/v2/hook/<uuid>`).

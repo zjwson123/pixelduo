@@ -180,6 +180,14 @@ export class PaddleProvider implements PaymentProvider {
         // full.) When the flag is absent, expose the adjustment's own grand
         // total (data.totals.total, in cents) so the webhook route can compare
         // it against the order amount once the order row is resolved.
+        //
+        // The flag's own scope is the trap (pass 32): `type` describes THIS
+        // adjustment, so two partials that together refund the entire price are
+        // both "partial" and neither ever revoked — credits and the paid tier
+        // survived a completed refund. The route accumulates refundAmountUsd
+        // across deliveries and promotes to full when the sum reaches the order
+        // amount; this provider's number is a per-delivery delta, which is
+        // exactly what that accumulation needs.
         const totals = data.totals as { total?: string | number } | undefined;
         const totalNum = totals?.total !== undefined ? Number(totals.total) : NaN;
         return {

@@ -214,6 +214,9 @@ describe("pass 31 — one timezone for every clock comparison", () => {
       "scripts/expire.ts",
       "scripts/rollover.ts",
       "scripts/remind.ts",
+      // Pass 32: recoverStuckJobs compares `now() - heartbeatAt` in SQL and
+      // this operator script was the caller the pass-31 sweep left unguarded.
+      "scripts/recover.ts",
     ]) {
       const src = fs.readFileSync(path.join(REPO, file), "utf8");
       expect(src, `${file} must assert the UTC session at boot`).toContain("assertDatabaseSessionUtc");

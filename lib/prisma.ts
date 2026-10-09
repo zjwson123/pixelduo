@@ -88,8 +88,16 @@ export async function assertDatabaseSessionUtc(opts?: {
   if (!isProductionRuntime(env)) return;
   const tz = await databaseSessionTimezone(opts?.client);
   if (tz !== "UTC") {
+    // The remediation names the exact parameter for THIS url: pasted onto one
+    // that already carries a query string (a managed provider's
+    // ?sslmode=require, a pooler's ?pgbouncer=true), a second "?" makes Prisma
+    // reject the whole URL — the operator follows the message and gets a
+    // different startup failure (pass 32).
+    const param = (env.DATABASE_URL ?? "").includes("?")
+      ? "&options=-c%20timezone%3DUTC"
+      : "?options=-c%20timezone%3DUTC";
     throw new Error(
-      `the database session timezone is ${tz || "unknown"}, not UTC — every deadline, schedule and timestamp comparison in this app assumes UTC-naive storage (see lib/prisma.ts). Add ?options=-c%20timezone%3DUTC to DATABASE_URL, or set the database/role default (ALTER DATABASE <db> SET timezone TO 'UTC')`,
+      `the database session timezone is ${tz || "unknown"}, not UTC — every deadline, schedule and timestamp comparison in this app assumes UTC-naive storage (see lib/prisma.ts). Append ${param} to DATABASE_URL, or set the database/role default (ALTER DATABASE <db> SET timezone TO 'UTC')`,
     );
   }
 }

@@ -83,12 +83,19 @@ x-appenv: &appenv
   # server/edge/worker events are what this variable actually tags.
   SENTRY_RELEASE: ${SENTRY_RELEASE:-}
   SENTRY_ENVIRONMENT: production
-  IMAGE_MODERATION: "1"
+  # Operator-tunable like prod.yml, NOT hardcoded (pass 32): .env.example ships
+  # IMAGE_MODERATION=1 and docs/deploy.md tells operators to set 0 when their
+  # audit gateway is unavailable or too costly ("需要关闭审核就显式设置
+  # IMAGE_MODERATION=0"), but this anchor discarded the value — the name reached
+  # the container and the setting did not, so on the stack whose runbook
+  # operators actually follow, the switch was silently ignored and moderation
+  # stayed fail-closed while nothing said why.
+  IMAGE_MODERATION: ${IMAGE_MODERATION:-1}
   VISION_MODERATION_MODEL: ${VISION_MODERATION_MODEL:-gpt-5.6-luna}
   # The pair is atomic: an audit needs BOTH, and half of one must never be
   # paired with half of another source (see getVisionConfig). Left empty this
-  # used to guarantee the worker refused to boot — IMAGE_MODERATION is hardcoded
-  # to "1" above, so the moderation gate is requested and unresolvable.
+  # used to guarantee the worker refused to boot — IMAGE_MODERATION defaults to
+  # "1", so the moderation gate is requested and unresolvable.
   VISION_MODERATION_BASE_URL: ${VISION_MODERATION_BASE_URL:?set VISION_MODERATION_BASE_URL (e.g. https://api.modelverse.cn/v1)}
   VISION_MODERATION_API_KEY: ${VISION_MODERATION_API_KEY:?set VISION_MODERATION_API_KEY}
   MODELVERSE_IMAGE_API_KEY: ${MODELVERSE_IMAGE_API_KEY:?set MODELVERSE_IMAGE_API_KEY}

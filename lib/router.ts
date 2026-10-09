@@ -4,6 +4,7 @@
 import { getDeepSeekKey, getDeepSeekBaseUrl } from "./keys";
 import { getImageModels } from "./model-registry";
 import { readJsonCapped, outboundTimeoutMs } from "./store";
+import { sliceCodePoints } from "./untrusted-text";
 
 export interface RoutingResult {
   recommendedModel: string;
@@ -81,9 +82,16 @@ export async function routePrompt(prompt: string): Promise<RoutingResult> {
             // Bounded like every other provider-supplied string that reaches a
             // client (see errText in providers/index.ts): the gateway can return
             // up to the 8 MB body cap here, and an unbounded `reason` would be
-            // relayed straight to the workbench.
+            // relayed straight to the workbench. Bounded without splitting a
+            // surrogate pair (pass 32): a raw slice at this offset manufactured
+            // the ill-formed text pass 30's guard refuses, and the workbench
+            // feeds this string back into the next prompt, which /api/generate
+            // then rejects as malformed — a dead end for text the app itself
+            // handed the user.
             const reason =
-              typeof parsed.reason === "string" && parsed.reason ? parsed.reason.slice(0, 240) : "smart routing";
+              typeof parsed.reason === "string" && parsed.reason
+                ? sliceCodePoints(parsed.reason, 240)
+                : "smart routing";
             return { recommendedModel: parsed.model, reason, offline: false };
           }
         }
