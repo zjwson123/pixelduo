@@ -4,6 +4,7 @@ import { enforceRateLimit, fail, ok, parseJsonBody, readBodyCapped, zodMessage }
 import { prisma } from "@/lib/prisma";
 import { consumeToken } from "@/lib/tokens";
 import { clearLoginFailures } from "@/lib/login-guard";
+import { sendPasswordChangedEmail } from "@/lib/mail";
 
 const schema = z.object({
   token: z.string().min(20).max(200),
@@ -63,6 +64,12 @@ export async function POST(req: Request) {
         data: { consumedAt: new Date() },
       }),
     ]);
+    // The owner learns that their credential moved, in the mailbox the reset
+    // link came from — the one place a silent takeover would otherwise have no
+    // witness (pass 33; the 2FA routes mail for the same reason). Sent here,
+    // before the lockout clear below: the reset is already committed, and a
+    // Redis hiccup in the clear must not be the reason the notice is skipped.
+    await sendPasswordChangedEmail(user.email);
     // Proof of mailbox ownership is also the documented recovery path out of a
     // brute-force lockout: without this, junk passwords from a few sources
     // would keep the real owner out even after they rotated their password.

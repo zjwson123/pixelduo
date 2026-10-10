@@ -24,7 +24,7 @@ import { isProductionRuntime } from "./runtime-env";
 // must agree here — "how much may we read" and "is the target acceptable" —
 // already have one answer each in that module.
 import { hostIsPublic, isPublicPort, readBodyCapped, ssrfPinnedAgent } from "./store";
-import { quoteUntrusted } from "./untrusted-text";
+import { quoteUntrusted, singleLine } from "./untrusted-text";
 
 export type WebhookKind = "feishu" | "wecom" | "dingtalk" | "raw";
 
@@ -73,7 +73,12 @@ export function neutraliseMentions(text: string): string {
 
 export function buildWebhookText(input: NotifyInput): string {
   const who = input.userId ? `${input.email} (user ${input.userId})` : `${input.email} (not signed in)`;
-  const context = [who, input.plan ? `plan ${input.plan}` : null, input.page ? `from ${input.page}` : null, input.locale]
+  // `page` is caller-controlled and lands unquoted on the context LINE, which
+  // is joined with " · " and read as one line: a CR, NEL or U+2028 would start
+  // a new one inside the machine-generated block the operator triages from
+  // (pass 33, the same class the mail builder flattens).
+  const page = input.page ? singleLine(input.page) : null;
+  const context = [who, input.plan ? `plan ${input.plan}` : null, page ? `from ${page}` : null, input.locale]
     .filter(Boolean)
     .join(" · ");
   // Webhooks truncate around 4KB; the message is already capped at 2000 chars by

@@ -27,7 +27,18 @@ TARGET_ENDPOINT="${BACKUP_TARGET_ENDPOINT:-}"
 TARGET_ACCESS="${BACKUP_TARGET_ACCESS_KEY_ID:-}"
 TARGET_SECRET="${BACKUP_TARGET_SECRET_ACCESS_KEY:-}"
 TARGET_BUCKET="${BACKUP_TARGET_BUCKET:-}"
-KEEP="${BACKUP_KEEP:-7}"
+# BACKUP_KEEP, not BACKUP_KEEP_OBJECTS — and .env.example documents the two as
+# different knobs: BACKUP_KEEP is the DB-dump retention (the `backup` service,
+# default 14) and BACKUP_KEEP_OBJECTS is the object-snapshot retention (default
+# 7, what the `backup-objects` services pass in under the name BACKUP_KEEP
+# *inside* the container). This script read the DB name (pass 33), so an
+# operator who followed the documented flow — `set -a; source .env` then run
+# this — had their object retention silently retuned to the dump's number, and
+# a `BACKUP_KEEP_OBJECTS=30` (more snapshots wanted) was ignored: the rotation
+# below kept 14 and `rm -rf`'d snapshots 15-30, backups they had explicitly
+# asked to retain. KEEP still wins when set explicitly, so an existing runbook
+# that passes it is unchanged.
+KEEP="${KEEP:-${BACKUP_KEEP_OBJECTS:-7}}"
 
 # Pinned by digest — the client both DR scripts depend on; see the
 # note in docker-compose.yml. Override MC_IMAGE to bump it deliberately.

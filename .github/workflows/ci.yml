@@ -130,10 +130,13 @@ jobs:
       # never real secrets.
       - name: Build (with plantable leaks in the tree)
         run: |
+          set -o pipefail
           printf 'NEXTAUTH_SECRET=ci-planted-not-a-real-secret\nDATABASE_URL=postgresql://planted:planted@127.0.0.1:5432/planted\n' > .env
           mkdir -p prisma
           printf 'SQLite format 3\000ci-planted' > prisma/dev.db
-          npm run build
+          # tee, not a bare pipe: the assertion below reads the PRUNE's own
+          # report out of this log to prove the plant reached the tree (pass 33).
+          npm run build 2>&1 | tee /tmp/pd-build.log
       - name: Assert the standalone artifact carries no dotenv files or local databases
         run: |
           # No -maxdepth: the prune (scripts/prune-standalone.mjs) walks the whole
@@ -144,9 +147,29 @@ jobs:
           if [ -n "$found" ]; then
             echo "standalone artifact carries build-host-only files:"; echo "$found"; exit 1
           fi
-          # The plant must have reached the tree in the first place, or this step
-          # is the vacuous version of itself again.
-          grep -q ci-planted-not-a-real-secret .env
+          # The plant must have REACHED the standalone tree before the prune
+          # removed it, or this step is the vacuous version of itself again.
+          # `grep -q … .env` (what stood here) proved only that the plant exists
+          # in the checkout — the working directory, which nothing asserts
+          # anything about; the moment a Next version stops copying .env /
+          # prisma/*.db into .next/standalone, `found` is empty because there
+          # was never anything to find and this gate passes forever (pass 33).
+          # The prune's own log line is the evidence that the plant got that
+          # far: it names every file it deleted, so require it to name both
+          # plants. That line is also the only proof the prune ran at all.
+          prune_line=$(grep -m1 '\[prune-standalone\]' /tmp/pd-build.log || true)
+          case "$prune_line" in
+            *"removed "*)
+              ;;
+            *)
+              echo "the prune reported no removals ($prune_line) — the planted .env and prisma/dev.db never reached .next/standalone, so the assertion above proved nothing"
+              exit 1
+              ;;
+          esac
+          printf '%s' "$prune_line" | grep -q 'standalone/\.env' || {
+            echo "the prune's report does not name the planted .env — the plant never reached the standalone tree:"; echo "$prune_line"; exit 1; }
+          printf '%s' "$prune_line" | grep -q 'dev\.db' || {
+            echo "the prune's report does not name the planted prisma/dev.db — the plant never reached the standalone tree:"; echo "$prune_line"; exit 1; }
 
   # Every image build of this repository was broken for three weeks — npm ci
   # cannot install this lockfile without .npmrc, and no Dockerfile stage copied
@@ -344,14 +367,65 @@ jobs:
             test ! -e /app/.dockerignore
             # The editor state a build host may carry (pass 31): gitignored, so
             # invisible to any "is it in the repo" check, and previously named by
-            # neither .dockerignore nor this prune.
+            # neither .dockerignore nor this prune. All FIVE names the two lists
+            # carry are asserted (pass 33): only .vscode/.idea were, so dropping
+            # .claude/.cursor/*.swp from both lists shipped
+            # .claude/settings.local.json — the file class the prune's own
+            # comment describes, agent config that routinely holds tokens — in
+            # the image a registry push carries off the host, with every gate
+            # green. The glob is checked as a glob: an unmatched pattern stays
+            # literal in sh, so the -e test simply fails for it.
             test ! -e /app/.vscode
             test ! -e /app/.idea
+            test ! -e /app/.claude
+            test ! -e /app/.cursor
+            for f in /app/*.swp; do if [ -e "$f" ]; then echo "editor swap file in image: $f"; exit 1; fi; done
             for f in /app/.env /app/.env.local /app/.env.production; do
               if [ -e "$f" ]; then echo "dotenv in image: $f"; exit 1; fi
             done
             echo "worker image shape OK"
           '
+      - name: Boot the worker image against the services
+        # The worker image is the artifact the Dockerfile itself calls the one
+        # that matters most, and until pass 33 no job had ever STARTED it: every
+        # gate asserted file shape, and the e2e job's worker runs `npx tsx` from
+        # the repo tree with devDependencies installed — never the pruned image,
+        # whose entrypoint is exactly that command (Dockerfile CMD). A missing
+        # font package, a prisma engine for the wrong platform, or a prune that
+        # removed something the boot path reads ships green in the image
+        # operators are told to keep old tags of. The services and the migrated
+        # schema are already here from the web smoke above, so this costs one
+        # container start.
+        #
+        # The gate is the worker's own startup line — printed only after both
+        # production boot gates (mock-provider refusal, UTC session) pass — plus
+        # the container still being alive at that moment, so "started then died"
+        # cannot read as booted.
+        run: |
+          docker run -d --name pd-ci-worker-smoke \
+            --add-host=host.docker.internal:host-gateway \
+            -e DATABASE_URL="postgresql://pixelduo:pixelduo@host.docker.internal:5432/pixelduo_test" \
+            -e REDIS_URL="redis://host.docker.internal:6379" \
+            -e NEXTAUTH_SECRET="5c1f8e2a94b7d03f6ae4c81d2795bf30e6a1c47d8b92f650" \
+            -e STORAGE_DRIVER=local \
+            pd-ci-worker
+          ok=""
+          for i in $(seq 1 30); do
+            if docker logs pd-ci-worker-smoke 2>&1 | grep -q '\[worker\] PixelDuo media worker started'; then ok=1; break; fi
+            sleep 2
+          done
+          running="$(docker inspect -f '{{.State.Running}}' pd-ci-worker-smoke 2>/dev/null || echo false)"
+          # Captured BEFORE the container goes away — reading the logs after
+          # `docker rm` prints nothing, which is exactly the moment this gate
+          # most needs to say why it failed.
+          logs="$(docker logs pd-ci-worker-smoke 2>&1 | tail -30 || true)"
+          docker rm -f pd-ci-worker-smoke >/dev/null 2>&1 || true
+          if [ -z "$ok" ] || [ "$running" != "true" ]; then
+            echo "worker image boot smoke FAILED — the worker never reached its startup line (running=$running):" >&2
+            echo "$logs" >&2
+            exit 1
+          fi
+          echo "worker image boots against the services and reports started"
 
   e2e:
     runs-on: ubuntu-latest

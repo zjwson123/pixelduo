@@ -2,7 +2,7 @@ import nodemailer, { type Transporter } from "nodemailer";
 import fs from "fs";
 import path from "path";
 import { captureError } from "./observability";
-import { quoteUntrusted } from "./untrusted-text";
+import { quoteUntrusted, singleLine } from "./untrusted-text";
 import { isProductionRuntime, usableUrl } from "./runtime-env";
 import { rateLimit, peekRateLimit, envLimit } from "./rate-limit";
 import {
@@ -414,6 +414,42 @@ export async function sendTwoFactorStateEmail(to: string, enabled: boolean): Pro
   }
 }
 
+// The owner's notice that a COMPLETED password reset changed their credential.
+//
+// Every sibling security-state change already mails the owner (2FA on/off
+// above; lib/login-guard.ts's failed-login alert): the doctrine is that a
+// silent state change is indistinguishable from a hostile one. The reset was
+// the loudest exception and the one where silence costs the most — the reset
+// is CONSUMED from a bearer artifact (a link in a mailbox), so whoever reads
+// that link can take the account over, and the owner's only signal was that
+// their own sessions suddenly stopped working. With this mail, a takeover that
+// did not come from them puts "your password was changed" in the mailbox whose
+// link was the vector, in the same channel they already trust (pass 33).
+//
+// Same shape as sendTwoFactorStateEmail, deliberately: getMailer().send with
+// the error captured rather than thrown, so a dead SMTP relay cannot fail the
+// reset the user already completed. Sends regardless of how the reset was
+// performed (self-service or an operator script) because the route is the only
+// producer.
+export async function sendPasswordChangedEmail(to: string): Promise<void> {
+  const body = [
+    "Your PixelDuo password was changed, and every signed-in session and API key was signed out by that reset.",
+    "",
+    "If this was you, nothing further is needed — sign in with your new password.",
+    "",
+    "If this WASN'T you, someone who could read your email used a password-reset link. Use “Forgot password” to set a new password again immediately (that signs them out), and contact us if you cannot get back in.",
+  ];
+  try {
+    await getMailer().send(
+      to,
+      "Your PixelDuo password was changed",
+      body.concat(["", `https://pixelduo.ai/login`]).join("\n"),
+    );
+  } catch (e) {
+    captureError(e, { mailTo: to, mailSubject: "password-changed" });
+  }
+}
+
 // Where user feedback is delivered. The operator's address is the default so a
 // developer's local run (and the test suite) still reads as "reaches a human";
 // FEEDBACK_TO overrides it (a support alias, a ticketing inbox, a mailing list).
@@ -474,20 +510,30 @@ export interface FeedbackNotificationInput {
 // message could reproduce that block — `ref:`, and `from: <address> (user
 // <id>)` naming somebody else's account — byte for byte, above the real one.
 function buildFeedbackNotification(input: FeedbackNotificationInput) {
+  // Two of these fields are caller-controlled and land UNQUOTED in lines this
+  // function generates: `page` comes from the request body, `agent` from the
+  // User-Agent header. Nothing here can quote them line by line — they are not
+  // supposed to be multi-line — so they are flattened to one line each: a CR,
+  // a NEL or a U+2028 in either would otherwise start an unprefixed line
+  // inside the very block the operator triages from (pass 33). The route
+  // refuses such a `page` outright and sanitizes the header the same way; this
+  // is the backstop for any other caller of the builder.
+  const page = input.page ? singleLine(input.page) : null;
+  const userAgent = input.userAgent ? singleLine(input.userAgent) : null;
   const context = [
     `ref:      ${input.ref}`,
     `category: ${input.category}`,
     `from:     ${input.email}${input.userId ? ` (user ${input.userId})` : " (not signed in)"}`,
     `plan:     ${input.plan ?? "—"}`,
-    `page:     ${input.page ?? "—"}`,
+    `page:     ${page ?? "—"}`,
     `locale:   ${input.locale ?? "—"}`,
-    `agent:    ${input.userAgent ?? "—"}`,
+    `agent:    ${userAgent ?? "—"}`,
     `at:       ${new Date().toISOString()}`,
   ].join("\n");
   return {
     to: feedbackRecipient(),
     subject: `[PixelDuo] ${input.category} · ${input.email}`,
-    text: `New feedback from the PixelDuo ${input.page ?? "app"}.\n\n${quoteUntrusted(input.message)}\n\n---\n${context}\n\nReply to this mail to answer ${input.email} directly.`,
+    text: `New feedback from the PixelDuo ${page ?? "app"}.\n\n${quoteUntrusted(input.message)}\n\n---\n${context}\n\nReply to this mail to answer ${input.email} directly.`,
     replyTo: input.email,
   };
 }

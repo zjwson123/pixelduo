@@ -395,13 +395,25 @@ describe("PaddleProvider", () => {
     const chargeback = paddleEvent("adjustment.updated", { ...base, id: "adj_live_2", action: "chargeback", status: "approved" });
     expect((await asEvent(raw(chargeback)))?.type).toBe("refunded");
 
-    // The statuses that must still be ignored: a rejected approval and a
-    // contested refund that was reversed.
-    for (const status of ["rejected", "reversed"]) {
-      const ignored = paddleEvent("adjustment.updated", { ...base, id: `adj_${status}`, status });
-      const result = await raw(ignored);
-      expect(result && "ignored" in result).toBe(true);
-    }
+    // A rejection must still be ignored...
+    const rejected = await raw(paddleEvent("adjustment.updated", { ...base, id: "adj_rejected", status: "rejected" }));
+    expect(rejected && "ignored" in rejected).toBe(true);
+    // ...but a REVERSED adjustment is not ignored any more (pass 33): the money
+    // went back to the merchant, so the delivery carries the negated amount and
+    // the route's accumulation comes back down with it. Dropping it left the
+    // returned total counting money that was no longer returned, and a later
+    // ordinary partial then summed to the full price and revoked the customer's
+    // credits for nothing.
+    const reversedEvt = await asEvent(raw(paddleEvent("adjustment.updated", { ...base, id: "adj_reversed", status: "reversed" })));
+    expect(reversedEvt?.type).toBe("refunded");
+    expect(reversedEvt?.fullRefund).toBe(false);
+    expect(reversedEvt?.refundAmountUsd).toBeCloseTo(-19.99);
+    // The reversal's own adjustment (a different action) stays out, so one
+    // reversal cannot decrement twice.
+    const reverseAdjustment = await raw(
+      paddleEvent("adjustment.updated", { ...base, id: "adj_rev_2", action: "chargeback_reverse", status: "approved" }),
+    );
+    expect(reverseAdjustment && "ignored" in reverseAdjustment).toBe(true);
     // A partial approval through the updated path stays partial.
     const partial = paddleEvent("adjustment.updated", { ...base, id: "adj_live_3", status: "approved", type: "partial", totals: { subtotal: "100", tax: "0", total: "100" } });
     const partialEvt = await asEvent(raw(partial));

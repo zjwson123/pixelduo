@@ -233,14 +233,36 @@ export async function POST(req: Request) {
         // total is what decides. The increment and the promotion share this
         // transaction, so a rolled-back delivery (below) un-counts itself and
         // the provider's retry re-accumulates exactly once.
+        //
+        // The delta can be NEGATIVE (pass 33): a reversed adjustment — the
+        // money went back to the merchant — arrives as a signed delivery whose
+        // refundAmountUsd is the negated amount (lib/payments/paddle.ts), and
+        // the accumulation has to come back down with it. A plain increment
+        // would do that, but it could also leave the total BELOW zero when a
+        // reversal arrives for an adjustment whose approval this row never
+        // counted (an unmeasurable approval, an order created later), and a
+        // negative total makes a subsequent genuine full refund fail to reach
+        // the price — money returned in full, credits kept, the fraud-direction
+        // error. So negative deltas are applied with a floor at zero, in one
+        // statement, under the same row lock as everything else here.
         let fullRefund = event.fullRefund;
         if (order && event.refundAmountUsd !== undefined) {
-          const accumulated = await tx.order.update({
-            where: { id: order.id },
-            data: { refundedAmountUsd: { increment: event.refundAmountUsd } },
-            select: { refundedAmountUsd: true },
-          });
-          if (fullRefund !== true && accumulated.refundedAmountUsd >= order.amountUsd - 0.005) {
+          const accumulated =
+            event.refundAmountUsd < 0
+              ? (
+                  await tx.$queryRaw<Array<{ refundedAmountUsd: number }>>(Prisma.sql`
+                    UPDATE "Order"
+                    SET "refundedAmountUsd" = GREATEST("refundedAmountUsd" + ${event.refundAmountUsd}, 0)
+                    WHERE id = ${order.id}
+                    RETURNING "refundedAmountUsd"
+                  `)
+                )[0]
+              : await tx.order.update({
+                  where: { id: order.id },
+                  data: { refundedAmountUsd: { increment: event.refundAmountUsd } },
+                  select: { refundedAmountUsd: true },
+                });
+          if (fullRefund !== true && accumulated && accumulated.refundedAmountUsd >= order.amountUsd - 0.005) {
             fullRefund = true;
           }
         }

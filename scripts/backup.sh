@@ -17,12 +17,15 @@ DB="${2:-${PGDATABASE:-pixelduo}}"
 DB_USER="${DB_USER:-${POSTGRES_USER:-pixelduo}}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 BACKUP_DIR="${BACKUP_DIR:-backups}"
-# BACKUP_KEEP is the name .env.example and the compose `backup` service use
-# (scripts/backup-objects.sh reads it too). This script read only KEEP, so an
-# operator who sourced the documented env file and set BACKUP_KEEP=30 got 14
-# from the manual dump and 30 from the service — two retention numbers, one
-# documented, one silent (pass 32). KEEP still wins when set explicitly, so
-# existing runbooks are unchanged.
+# BACKUP_KEEP is the name .env.example and the compose `backup` service use.
+# This script read only KEEP, so an operator who sourced the documented env
+# file and set BACKUP_KEEP=30 got 14 from the manual dump and 30 from the
+# service — two retention numbers, one documented, one silent (pass 32). The
+# object script has its own documented knob (BACKUP_KEEP_OBJECTS, default 7),
+# which until pass 33 it read as THIS one — its rotation deleted snapshots the
+# operator had asked to keep. The two scripts must not share a name they do not
+# share a meaning with. KEEP still wins when set explicitly, so existing
+# runbooks are unchanged.
 KEEP="${KEEP:-${BACKUP_KEEP:-14}}"
 
 # A container named `pixelduo-db` exists only in the DEV compose (it pins

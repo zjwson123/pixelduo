@@ -32,6 +32,7 @@ cleanup() {
     if [ -n "$pids" ]; then kill $pids 2>/dev/null || true; fi
   done
   docker rm -f pd-ci-web-smoke >/dev/null 2>&1 || true
+  docker rm -f pd-ci-worker-smoke >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 # An interrupt must still clean up: without these, a Ctrl-C leaves the smoke
@@ -216,14 +217,53 @@ docker run --rm --entrypoint sh pd-ci-worker -c '
   # The editor state a build host may carry (pass 31): gitignored, so invisible
   # to every "is it in the repo" check, and previously named by neither
   # .dockerignore nor this prune — .vscode/settings.json and .idea/workspace.xml
-  # routinely hold pasted tokens and private hostnames.
+  # routinely hold pasted tokens and private hostnames. All five names are here
+  # (pass 33): the three the pass-31 gate did not assert could be dropped from
+  # both lists with every gate green.
   test ! -e /app/.vscode
   test ! -e /app/.idea
+  test ! -e /app/.claude
+  test ! -e /app/.cursor
+  for f in /app/*.swp; do if [ -e "$f" ]; then echo "editor swap file in image: $f"; exit 1; fi; done
   for f in /app/.env /app/.env.local /app/.env.production; do
     if [ -e "$f" ]; then echo "dotenv in image: $f"; exit 1; fi
   done
   echo "worker image shape OK"
 ' || { echo "worker image artifact assertion FAILED"; exit 1; }
+# Boot the worker image too (pass 33). Its shape was asserted and nothing else:
+# the e2e stage below runs `npx tsx scripts/worker.ts` from the repo tree with
+# devDependencies present, which is not the artifact operators deploy — the
+# image runs the same command from a pruned tree with production dependencies
+# only, and no job had ever started it. The schema is already migrated (the web
+# smoke above runs migrate deploy). Same gate as ci.yml: the worker's own
+# startup line, printed only after both production boot gates pass, and the
+# container still alive when it appears.
+# rm -f first, like the web smoke: a container left by a killed earlier run
+# must not block the name.
+docker rm -f pd-ci-worker-smoke >/dev/null 2>&1 || true
+docker run -d --name pd-ci-worker-smoke \
+  --add-host=host.docker.internal:host-gateway \
+  -e DATABASE_URL="postgresql://pixelduo:pixelduo@host.docker.internal:5432/pixelduo_test" \
+  -e REDIS_URL="redis://host.docker.internal:6379" \
+  -e NEXTAUTH_SECRET="$NEXTAUTH_SECRET" \
+  -e STORAGE_DRIVER=local \
+  pd-ci-worker >/dev/null
+worker_ok=""
+for i in $(seq 1 30); do
+  if docker logs pd-ci-worker-smoke 2>&1 | grep -q '\[worker\] PixelDuo media worker started'; then worker_ok=1; break; fi
+  sleep 2
+done
+worker_running="$(docker inspect -f '{{.State.Running}}' pd-ci-worker-smoke 2>/dev/null || echo false)"
+# Captured BEFORE the container goes away — reading the logs after `docker rm`
+# prints nothing, which is exactly the moment this gate most needs to say why.
+worker_logs="$(docker logs pd-ci-worker-smoke 2>&1 | tail -30 || true)"
+docker rm -f pd-ci-worker-smoke >/dev/null 2>&1 || true
+if [ -z "$worker_ok" ] || [ "$worker_running" != "true" ]; then
+  echo "worker image boot smoke FAILED — the worker never reached its startup line (running=$worker_running):" >&2
+  echo "$worker_logs" >&2
+  exit 1
+fi
+echo "worker image boots against the services and reports started"
 
 echo "[3/9] prisma generate + migrate"
 npx prisma generate >/dev/null
@@ -250,7 +290,10 @@ echo "[6/9] production build"
 # the configured one would fail on a tree CI considers green — a divergence
 # between the pipeline this script claims to replicate and the one that runs.
 export NEXTAUTH_URL="http://localhost:3100"
-npm run build
+# tee: the leak scan below reads the PRUNE's own report out of this log to
+# prove the build host's .env actually reached the standalone tree (pass 33).
+# pipefail is set at the top of this script, so a failing build still fails here.
+npm run build 2>&1 | tee /tmp/pd-ci-build.log
 
 # The artifact that deploys must not carry the build host's secrets. `next
 # build` copies .env into .next/standalone unconditionally; the postbuild prune
@@ -258,12 +301,41 @@ npm run build
 # database URL with the artifact. Same assertion as CI's build job, and likewise
 # no -maxdepth (pass 32): the prune walks the whole tree, so a depth limit made
 # this blind to a leak the prune DOES reach.
-LEAKED="$(find .next/standalone \( -name '.env*' -o -name '*.db' -o -name '*.sqlite*' \) -not -path '*/node_modules/*' 2>/dev/null || true)"
+#
+# Two ways this could be the vacuous version of itself, both refused (pass 33):
+# a missing/unreadable .next/standalone (the `|| true` turned the find's error
+# into "clean"), and a run where nothing ever entered the tree — in which case
+# an empty find proves nothing about the prune. The tree is required to exist,
+# and the prune's own log line is required to name the .env it removed, because
+# that line is the only evidence the guard ran against material.
+if [ ! -d .next/standalone ]; then
+  echo "no .next/standalone tree to scan — the build did not produce the deploy artifact" >&2
+  exit 1
+fi
+LEAKED="$(find .next/standalone \( -name '.env*' -o -name '*.db' -o -name '*.sqlite*' \) -not -path '*/node_modules/*')"
 if [ -n "$LEAKED" ]; then
   echo "standalone artifact carries dotenv files:" >&2
   echo "$LEAKED" >&2
   exit 1
 fi
+PRUNE_LINE="$(grep -m1 '\[prune-standalone\]' /tmp/pd-ci-build.log || true)"
+case "$PRUNE_LINE" in
+  *"removed "*)
+    ;;
+  *)
+    echo "the prune reported no removals ($PRUNE_LINE) — nothing the scan above looks for ever reached .next/standalone, so it proved nothing" >&2
+    exit 1
+    ;;
+esac
+case "$PRUNE_LINE" in
+  *standalone/.env*)
+    ;;
+  *)
+    echo "the prune's report does not name .next/standalone/.env — this host's .env never reached the tree:" >&2
+    echo "$PRUNE_LINE" >&2
+    exit 1
+    ;;
+esac
 
 echo "[7/9] seed + start app/worker (port 3100)"
 export EMAIL_VERIFY_AUTO="1" # e2e needs auto-verified registrations

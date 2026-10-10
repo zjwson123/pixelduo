@@ -165,10 +165,9 @@ export class PaddleProvider implements PaymentProvider {
       }
       if (parsed.event_type === "adjustment.created" || parsed.event_type === "adjustment.updated") {
         // status is the whole decision: `pending_approval` (a live refund before
-        // approval), `rejected` and `reversed` are all ignored, and the same
-        // approved adjustment delivered twice converges — the webhook route's
-        // eventId dedupe plus its paid→refunded CAS make the repeat a no-op.
-        if (data.status !== "approved") return IGNORED_WEBHOOK;
+        // approval) and `rejected` are ignored, and the same approved adjustment
+        // delivered twice converges — the webhook route's eventId dedupe plus
+        // its paid→refunded CAS make the repeat a no-op.
         if (data.action !== "refund" && data.action !== "chargeback") return IGNORED_WEBHOOK;
         // Adjustments can be partial (a $1 goodwill refund on a $49.99 pack):
         // a partial one must not wipe the whole balance or consume the "paid"
@@ -190,16 +189,46 @@ export class PaddleProvider implements PaymentProvider {
         // exactly what that accumulation needs.
         const totals = data.totals as { total?: string | number } | undefined;
         const totalNum = totals?.total !== undefined ? Number(totals.total) : NaN;
+        const amountUsd = Number.isFinite(totalNum) ? totalNum / 100 : undefined;
+        const providerOrderId =
+          typeof data.transaction_id === "string" ? data.transaction_id
+          : typeof data.transactionId === "string" ? data.transactionId
+          : undefined;
+        // A REVERSED adjustment is the negative half of that same accumulation
+        // (pass 33). Paddle sets `reversed` when a chargeback_reversal /
+        // credit_reversal adjustment is created for this one — the money went
+        // BACK to the merchant — and the delivery arrives as
+        // adjustment.updated, which this branch used to drop on the floor. The
+        // under-counted total then read as money still returned: a $25 partial
+        // followed by its reversal left refundedAmountUsd at 25, and an
+        // ordinary $24.99 partial after that summed to the full price and
+        // revoked the customer's credits and tier for money they no longer
+        // hold. Emitted as a NEGATIVE delta so the route's accumulation needs no
+        // second concept; fullRefund is explicitly false (a reversal never
+        // promotes, whatever `type` says), and an unmeasurable one carries no
+        // amount at all, so it can only be a no-op rather than a revoke. The
+        // reversal's OWN adjustment (action chargeback_reverse / credit_reverse)
+        // is not counted — the guard above refuses those actions — so a pair of
+        // deliveries for one reversal does not decrement twice.
+        if (data.status === "reversed") {
+          return {
+            provider: this.name,
+            eventId: parsed.event_id,
+            type: "refunded",
+            fullRefund: false,
+            refundAmountUsd: amountUsd === undefined ? undefined : -amountUsd,
+            providerOrderId,
+            raw: parsed,
+          };
+        }
+        if (data.status !== "approved") return IGNORED_WEBHOOK;
         return {
           provider: this.name,
           eventId: parsed.event_id,
           type: "refunded",
           fullRefund: typeof data.type === "string" ? data.type !== "partial" : undefined,
-          refundAmountUsd: Number.isFinite(totalNum) ? totalNum / 100 : undefined,
-          providerOrderId:
-            typeof data.transaction_id === "string" ? data.transaction_id
-            : typeof data.transactionId === "string" ? data.transactionId
-            : undefined,
+          refundAmountUsd: amountUsd,
+          providerOrderId,
           raw: parsed,
         };
       }

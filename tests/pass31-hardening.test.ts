@@ -605,15 +605,23 @@ describe("pass 31 — the deploy gates and scripts assert what they act on", () 
     const dockerignore = fs.readFileSync(path.join(REPO, ".dockerignore"), "utf8");
     const dockerfile = fs.readFileSync(path.join(REPO, "Dockerfile"), "utf8");
     const workerStage = dockerfile.slice(dockerfile.indexOf("AS worker"));
-    for (const name of [".vscode", ".idea"]) {
+    // All five names, not just the two that existed when this test was written
+    // (pass 33). .claude/.cursor/*.swp were in both lists but asserted NOWHERE,
+    // so the guard against them being dropped was a comment: an image built from
+    // a working tree would have shipped .claude/settings.local.json with every
+    // gate green either way.
+    for (const name of [".vscode", ".idea", ".claude", ".cursor", "*.swp"]) {
       expect(dockerignore, `.dockerignore must filter ${name}`).toContain(name);
       expect(workerStage, `the worker prune must name ${name}`).toContain(name);
     }
     const ci = fs.readFileSync(path.join(REPO, ".github", "workflows", "ci.yml"), "utf8");
     const local = fs.readFileSync(path.join(REPO, "scripts", "ci-local.sh"), "utf8");
     for (const gate of [ci, local]) {
-      expect(gate).toContain("test ! -e /app/.vscode");
-      expect(gate).toContain("test ! -e /app/.idea");
+      for (const name of [".vscode", ".idea", ".claude", ".cursor"]) {
+        expect(gate, `the image gate must assert ${name}`).toContain(`test ! -e /app/${name}`);
+      }
+      // *.swp is a pattern, so the gate checks the pattern as a pattern.
+      expect(gate).toContain('for f in /app/*.swp; do if [ -e "$f" ]');
     }
   });
 

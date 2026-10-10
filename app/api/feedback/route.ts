@@ -6,6 +6,7 @@ import { prisma } from "@/lib/prisma";
 import { sendFeedbackEmail } from "@/lib/mail";
 import { notifyFeedback } from "@/lib/notify";
 import { FEEDBACK_CATEGORY_IDS, FEEDBACK_MESSAGE_MAX, FEEDBACK_MESSAGE_MIN } from "@/lib/feedback-meta";
+import { singleLine } from "@/lib/untrusted-text";
 
 const schema = z.object({
   category: z.enum(FEEDBACK_CATEGORY_IDS),
@@ -24,10 +25,20 @@ const schema = z.object({
   // makes an anonymous report read as that account's. Control characters are
   // what the block cannot survive, so that is what is refused; every legitimate
   // pathname, referrer path or query string still passes.
+  //
+  // "Control characters" has to include the LINE SEPARATORS a "\n"-shaped
+  // refusal misses (pass 33): U+2028/U+2029 and the C1 NEL (U+0085) end a line
+  // in many renderers while being ordinary characters to /[\u0000-\u001f]/, so
+  // the same forgery went through them. The whole C1 block is refused with
+  // them — a pathname has no business carrying any of it, and U+009B is the
+  // 8-bit spelling of CSI.
   page: z
     .string()
     .max(120)
-    .refine((v) => !/[\u0000-\u001f\u007f]/.test(v), "page must be a single line")
+    .refine(
+      (v) => !/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(v),
+      "page must be a single line",
+    )
     .optional(),
   locale: z.enum(["en", "zh"]).optional(),
 });
@@ -134,6 +145,15 @@ export async function POST(req: Request) {
     const body = schema.parse(parseJsonBody(bodyRaw.raw));
     const email = user?.email ?? body.email;
     if (!email) return fail(new Error("invalid-input: an email address is required when you are not signed in"));
+    // The User-Agent is the third attacker-controlled value in the operator's
+    // context block (`agent:` in the mail, beside `page:`), and unlike `page` it
+    // cannot be refused — it is a header every client sends. It CAN carry the
+    // C1 byte 0x85 (NEL), which is a line break to many renderers, so a crafted
+    // header forges a second line in exactly the block the `page` refusal
+    // exists to keep single-line (pass 33). Sanitized once, here, so the stored
+    // row and the notification carry the same value; `singleLine` replaces
+    // every control character with a space rather than dropping the header.
+    const userAgent = singleLine((req.headers.get("user-agent") ?? "").slice(0, 300)).trim() || null;
 
     // Stored before it is sent: the row is the record an operator works from,
     // and the notification is best-effort (sendFeedbackEmail reports its own
@@ -149,7 +169,7 @@ export async function POST(req: Request) {
         plan: user?.plan ?? null,
         // Recon value for the reporter, not for us: it only makes "the button
         // did nothing" actionable. Truncated because the header is unbounded.
-        userAgent: req.headers.get("user-agent")?.slice(0, 300) ?? null,
+        userAgent,
       },
       select: { id: true, createdAt: true },
     });
@@ -169,7 +189,7 @@ export async function POST(req: Request) {
       plan: user?.plan ?? null,
       page: body.page ?? null,
       locale: body.locale ?? null,
-      userAgent: req.headers.get("user-agent")?.slice(0, 300) ?? null,
+      userAgent,
     });
     // Second channel, for deployments where mail is not an option (a Feishu/
     // WeCom/DingTalk group bot is a URL, not an account with a verified domain).

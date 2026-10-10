@@ -39,8 +39,21 @@ const OAUTH_CALLBACK_RATE_LIMIT_DEFAULT = 30;
 // /api/auth/callback/<provider>. The credentials provider is excluded: that POST
 // is the password login, already bounded per account by lib/login-guard.ts, and
 // capping it here would spend an account-creation budget on ordinary logins.
+//
+// The path is matched by SHAPE, not by equality (pass 33): the anchored
+// `…/([^/]+)$` this replaced returned false for `/api/auth/callback/google/x`
+// and `/api/auth/callback/google/`, but next-auth dispatches on
+// `pathname.split("/").slice(3)` and reads only [0] and [1]
+// (node_modules/next-auth/core/index.js), so every extra segment was ignored
+// and the callback executed normally — the account-minting request ran at the
+// coarse 300/min cap instead of this one, and the redirect_uri comes from the
+// configured origin, not the request path, so the exchange still succeeded. A
+// farming run's cheapest evasion was one trailing character. Trailing segments
+// now charge this bucket; only the provider segment decides the credentials
+// exclusion, so `/api/auth/callback/credentials/…` (which next-auth also
+// dispatches as credentials) stays out of it.
 function isOAuthCallback(pathname: string): boolean {
-  const m = /^\/api\/auth\/callback\/([^/]+)$/.exec(pathname);
+  const m = /^\/api\/auth\/callback\/([^/]+)(?:\/.*)?$/.exec(pathname);
   return m !== null && m[1] !== "credentials";
 }
 
