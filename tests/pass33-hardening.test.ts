@@ -456,6 +456,37 @@ describe("pass 33 — the worker image is booted by both gates", () => {
 });
 
 // ---------------------------------------------------------------------------
+// 7b. The single-quoted image assertions cannot be ended early by an apostrophe
+// ---------------------------------------------------------------------------
+describe("pass 33 — the quoted docker-assertion scripts stay quotable", () => {
+  it("no inner script carries an apostrophe, and each parses under sh -n", () => {
+    // This one is a CONTROL (it passes against the pre-fix tree too): the
+    // class it guards was introduced by THIS pass and caught by this pass's own
+    // first remote CI run — a comment reading "the prune's own" inside
+    // `sh -c '…'` ended the single-quoted string early, and the job died with
+    // "unexpected EOF while looking for matching `'`" naming nothing. The gate
+    // is mechanical because the rule is: a single-quoted shell string cannot
+    // contain a single quote, and these blocks are worth a parse check.
+    for (const file of [".github/workflows/ci.yml", "scripts/ci-local.sh"]) {
+      const src = read(file).replace(/\r\n/g, "\n");
+      // `-c '` then the body, ending at the first line-initial quote — which is
+      // the closing one because the check below proves no line inside carries a
+      // quote of its own.
+      const blocks = [...src.matchAll(/-c '\n([\s\S]*?)\n[ \t]*'/g)];
+      expect(blocks.length, `${file} must carry at least one sh -c block`).toBeGreaterThan(0);
+      for (const [i, m] of blocks.entries()) {
+        const body = m[1];
+        const bad = body.split("\n").filter((l) => l.includes("'"));
+        expect(bad, `${file} sh -c block #${i + 1} carries an apostrophe: ${bad.join(" | ")}`).toEqual([]);
+        // The general proof, not just the apostrophe scan: the extracted
+        // script must be syntactically complete on its own.
+        execFileSync("sh", ["-n", "-c", body], { encoding: "utf8", stdio: "pipe" });
+      }
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 8. A reversal brings the accumulated refund total back down
 // ---------------------------------------------------------------------------
 describe("pass 33 — a reversed adjustment cannot promote a later partial to full", () => {

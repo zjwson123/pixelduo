@@ -370,11 +370,14 @@ jobs:
             # neither .dockerignore nor this prune. All FIVE names the two lists
             # carry are asserted (pass 33): only .vscode/.idea were, so dropping
             # .claude/.cursor/*.swp from both lists shipped
-            # .claude/settings.local.json — the file class the prune's own
+            # .claude/settings.local.json — the file class the Dockerfile prune
             # comment describes, agent config that routinely holds tokens — in
             # the image a registry push carries off the host, with every gate
             # green. The glob is checked as a glob: an unmatched pattern stays
-            # literal in sh, so the -e test simply fails for it.
+            # literal in sh, so the -e test simply fails for it. (No apostrophes
+            # anywhere in this quoted script — the pass-33 test enforces it: one
+            # apostrophe in a comment ends the enclosing single-quoted string
+            # early, and the job then dies with an EOF error naming nothing.)
             test ! -e /app/.vscode
             test ! -e /app/.idea
             test ! -e /app/.claude
