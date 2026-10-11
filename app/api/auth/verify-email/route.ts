@@ -1,6 +1,6 @@
 import bcrypt from "bcryptjs";
 import { z } from "zod";
-import { ApiError, enforceRateLimit, fail, ok, parseJsonBody, readBodyCapped } from "@/lib/api";
+import { ApiError, enforceRateLimit, fail, ok, parseJsonBody, readBodyCapped, tooLarge } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { hasUsablePassword } from "@/lib/auth";
 import { signupBonus } from "@/lib/ledger";
@@ -17,7 +17,7 @@ export async function POST(req: Request) {
     const limited = await enforceRateLimit(req, "verify", 10, 60_000);
     if (limited) return limited;
     const bodyRaw = await readBodyCapped(req, 8 * 1024);
-    if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
+    if ("tooLarge" in bodyRaw) return tooLarge();
     const body = schema.parse(parseJsonBody(bodyRaw.raw));
     // Preview first, so a mistyped password does not burn the single use.
     const preview = await previewToken("verify-email", body.token);

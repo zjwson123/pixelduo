@@ -509,7 +509,7 @@ describe("orphaned artifacts (pass 16)", () => {
     expect(leaseMs!).toBeLessThanOrEqual(POLL_LEASE_MS);
     // An attempt that only polls and finds the task still pending shortens it
     // back to the cadence.
-    await schedulePoll(job.id);
+    await schedulePoll(job.id, "p16-worker");
     const after = await prisma.job.findUniqueOrThrow({ where: { id: job.id } });
     expect(after.nextAttemptAt!.getTime() - Date.now()).toBeLessThanOrEqual(POLL_INTERVAL_MS + 2000);
     await prisma.job.update({ where: { id: job.id }, data: { status: "failed" } });

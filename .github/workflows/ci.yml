@@ -282,6 +282,16 @@ jobs:
             test ! -e /app/playwright.config.ts
             test ! -e /app/tsconfig.json
             test ! -e /app/prisma/seed.ts
+            # Pass 34: the two glob expansions the prune list carries and no
+            # assertion named. PRODUCT_OUTLINE.md is 33 KB of internal
+            # monetisation notes and is traced into .next/standalone (probed);
+            # only ./*.md removes it. .env.example is the one dotenv name the
+            # build context DOES carry (.dockerignore re-includes it), so unlike
+            # the three names below it can actually fail if the prune list loses
+            # .env .env.* — the other three are already excluded from the context
+            # and their test !s are true no matter what.
+            test ! -e /app/PRODUCT_OUTLINE.md
+            test ! -e /app/.env.example
             # ...while what actually RUNS is still there: the compiled chunks.
             test -e /app/server.js
             test -e /app/.next/server/instrumentation.js
@@ -365,6 +375,14 @@ jobs:
             test ! -e /app/.npmrc
             test ! -e /app/.gitignore
             test ! -e /app/.dockerignore
+            # Pass 34: the two compose files the web gate already asserts and
+            # this one did not, plus TODO the same two glob members as the web
+            # gate. This is the registry-pushed image; dropping a name from its
+            # prune list shipped the file with every gate green.
+            test ! -e /app/docker-compose.single.yml
+            test ! -e /app/docker-compose.prod.yml
+            test ! -e /app/PRODUCT_OUTLINE.md
+            test ! -e /app/.env.example
             # The editor state a build host may carry (pass 31): gitignored, so
             # invisible to any "is it in the repo" check, and previously named by
             # neither .dockerignore nor this prune. All FIVE names the two lists
@@ -461,6 +479,7 @@ jobs:
       EMAIL_VERIFY_AUTO: "1"
       MIDDLEWARE_AUTH_LIMIT: "1000"
       MIDDLEWARE_API_LIMIT: "10000"
+      MIDDLEWARE_PAGE_LIMIT: "10000"
       REGISTER_RATE_LIMIT: "10000"
       # Email links are built from NEXTAUTH_URL; the specs run against the port
       # below. MAIL_DEV_DIR makes the log-only mailer write each message to disk

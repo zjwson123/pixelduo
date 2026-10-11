@@ -5,7 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { signupBonus } from "@/lib/ledger";
 import { createToken } from "@/lib/tokens";
 import { sendVerificationEmail, reserveAuthMailSend } from "@/lib/mail";
-import { enforceRateLimit, fail, ok, parseJsonBody, readBodyCapped, zodMessage } from "@/lib/api";
+import { enforceRateLimit, fail, ok, parseJsonBody, readBodyCapped, zodMessage, tooLarge } from "@/lib/api";
 import { envLimit } from "@/lib/rate-limit";
 
 const schema = z.object({
@@ -23,7 +23,7 @@ export async function POST(req: Request) {
     const limited = await enforceRateLimit(req, "register", registerLimit, 3_600_000);
     if (limited) return limited;
     const bodyRaw = await readBodyCapped(req, 8 * 1024);
-    if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
+    if ("tooLarge" in bodyRaw) return tooLarge();
     const body = schema.parse(parseJsonBody(bodyRaw.raw));
     const email = body.email.toLowerCase().trim();
     const existing = await prisma.user.findUnique({ where: { email } });

@@ -276,13 +276,17 @@ export async function claimNextJob(worker: string) {
   return null;
 }
 
-export async function heartbeat(jobId: string) {
+// Conditioned on the worker that holds the row (pass 34), like
+// extendPollLease below: a zombie that stalled past its lease must not keep a
+// peer's job looking alive (the reap decision reads heartbeatAt), and the
+// re-arm path (schedulePoll) must not shorten that peer's lease either.
+export async function heartbeat(jobId: string, worker: string) {
   // Database clock: recoverStuckJobs compares heartbeatAt against SQL now()
   // (see claimNextJob) — a heartbeat stamped by this process's clock would
   // reintroduce the peer-skew reap this conversion removes.
   await prisma.$executeRaw(Prisma.sql`
     UPDATE "Job" SET "heartbeatAt" = now()
-     WHERE id = ${jobId} AND status IN ('running', 'polling')`);
+     WHERE id = ${jobId} AND worker = ${worker} AND status IN ('running', 'polling')`);
 }
 
 // Push a poll lease forward, from the points where phase 2 does its longest
@@ -731,14 +735,25 @@ export async function setJobPolling(jobId: string, providerTaskId: string): Prom
 
 // Keep polling: task still pending/running upstream. Re-arms nextAttemptAt
 // and refreshes the heartbeat so recoverStuckJobs doesn't reap an active task.
-export async function schedulePoll(jobId: string, delayMs = POLL_INTERVAL_MS) {
+//
+// Conditional on the worker that holds the row (pass 34), for the same reason
+// extendPollLease is: pass 31 made the EXTENSION conditional so a zombie could
+// not pull a live peer's lease out from under it, but this writer of the same
+// column stayed worker-blind — a worker that stalled past its 6-minute poll
+// lease, had the row claimed by a peer (fresh 360s lease), then woke and
+// finished one more poll, rewound nextAttemptAt to +10s and let a THIRD worker
+// claim the row inside the peer's lease: two workers running phase 2 (provider
+// download + ffmpeg) for one job. The worker's own id is required rather than
+// optional — an omitted argument silently restoring the race is exactly the
+// shape this file's pass-25/31 comments keep warning about.
+export async function schedulePoll(jobId: string, worker: string, delayMs = POLL_INTERVAL_MS) {
   // Database clock, same as every other nextAttemptAt (see setJobPolling): a
   // peer's claimNextJob compares it against SQL now().
   await prisma.$executeRaw(Prisma.sql`
     UPDATE "Job"
        SET status = 'polling', "heartbeatAt" = now(),
            "nextAttemptAt" = now() + make_interval(secs => ${delayMs / 1000})
-     WHERE id = ${jobId} AND status IN ('running', 'polling', 'queued')`);
+     WHERE id = ${jobId} AND worker = ${worker} AND status IN ('running', 'polling', 'queued')`);
 }
 
 export async function getJobForUser(userId: string, jobId: string) {

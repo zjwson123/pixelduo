@@ -134,7 +134,19 @@ export async function proxy(req: NextRequest) {
     (process.env.TRUST_X_REAL_IP === "1" ? req.headers.get("x-real-ip") : null) ??
     "unknown";
   const path = req.nextUrl.pathname;
-  const isAuth = path.startsWith("/api/auth");
+  const isApi = path.startsWith("/api");
+  const isAuth = isApi && path.startsWith("/api/auth");
+  // The authenticated SHELLS (pass 34). Until now the matcher covered /api/*
+  // only, so these pages were the one place a request could do the full unit of
+  // work — JWT decrypt, a sessionVersion read (plus role, for /admin), a React
+  // SSR pass — with no bucket charged anywhere: an account capped at 300/min
+  // through /api/* could drive /studio 400 times a minute (probed: 400×200,
+  // zero 429s), and an anonymous caller's 307 flood was unbounded too. The
+  // per-route account limiters in lib/api.ts are the binding ceiling for API
+  // traffic; page routes are not route handlers, so nothing else can charge
+  // them — this layer is the only one in front.
+  const isPage =
+    !isApi && (path.startsWith("/studio") || path.startsWith("/account") || path.startsWith("/admin"));
   // Auth is a coarse first line; per-account lockout (login-guard) is the
   // authoritative brute-force protection. 40/min leaves room for multi-step
   // 2FA logins (csrf + callback per step).
@@ -160,6 +172,10 @@ export async function proxy(req: NextRequest) {
   // key too.
   const authLimit = envLimit(process.env.MIDDLEWARE_AUTH_LIMIT, 40);
   const apiLimit = envLimit(process.env.MIDDLEWARE_API_LIMIT, 300);
+  // Its own knob and its own bucket suffix, so an SSR page flood cannot spend
+  // the API budget of the same session (and vice versa) — the page bucket is a
+  // ceiling on work, not a toll on the account's own calls.
+  const pageLimit = envLimit(process.env.MIDDLEWARE_PAGE_LIMIT, 120);
   const bucket = await bucketFor(req, ip);
   // Auth paths: the credential's own bucket AND the source address's (see the
   // rotation note above). The address key is the SAME one an anonymous caller
@@ -167,11 +183,12 @@ export async function proxy(req: NextRequest) {
   // way off the shared one. Everywhere else: the credential's bucket alone —
   // an address key there would restore the CGNAT denial this file exists to
   // avoid, and the per-route account limiters are the binding ceiling anyway.
+  // Pages take the same "credential's bucket alone" rule as /api/*.
   const keys =
     isAuth && !bucket.startsWith("ip:")
       ? [`${bucket}:auth`, `ip:${ip}:auth`]
-      : [`${bucket}:${isAuth ? "auth" : "api"}`];
-  const retry = hitAll(keys, isAuth ? authLimit : apiLimit, 60_000);
+      : [`${bucket}:${isAuth ? "auth" : isPage ? "page" : "api"}`];
+  const retry = hitAll(keys, isAuth ? authLimit : isPage ? pageLimit : apiLimit, 60_000);
   if (retry !== null) {
     return NextResponse.json(
       { ok: false, error: "rate-limited" },
@@ -185,5 +202,9 @@ export async function proxy(req: NextRequest) {
 }
 
 export const config = {
-  matcher: "/api/:path*",
+  // /api/* was the original matcher (the file's whole history is about API
+  // buckets). The authenticated shells are listed too since pass 34 — they
+  // render on every request and nothing else caps them; the matcher's own
+  // _next/data arm covers the client-side navigations into them as well.
+  matcher: ["/api/:path*", "/studio/:path*", "/account/:path*", "/admin/:path*"],
 };

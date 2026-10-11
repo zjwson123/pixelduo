@@ -60,7 +60,7 @@ export async function processImageJob(job: {
   refImageKey: string | null;
   images: string | null;
 }, workerId: string): Promise<boolean> {
-  const hb = setInterval(() => heartbeat(job.id).catch(() => undefined), 20_000);
+  const hb = setInterval(() => heartbeat(job.id, workerId).catch(() => undefined), 20_000);
   // Objects this attempt stores, so an attempt that discovers the job has left
   // the queue can take its own outputs back out of storage.
   const storedThisAttempt: string[] = [];
@@ -313,7 +313,7 @@ export async function processVideoJob(job: {
     return true;
   }
 
-  const hb = setInterval(() => heartbeat(job.id).catch(() => undefined), 20_000);
+  const hb = setInterval(() => heartbeat(job.id, workerId).catch(() => undefined), 20_000);
   // The object this attempt most recently stored. Between the storage put and
   // the checkpoint write it is named by nothing, so an attempt that discovers
   // the job has left the queue must take it back out itself.
@@ -510,7 +510,7 @@ export async function processVideoJob(job: {
       console.error(`[worker ${workerId}] job ${job.id} video failed: ${status.error}`);
     } else {
       // Still pending/running (or a transient poll error) — re-arm the next poll.
-      await schedulePoll(job.id);
+      await schedulePoll(job.id, workerId);
       console.log(`[worker ${workerId}] job ${job.id}: video task ${status.status}, will retry next tick`);
     }
     return true;

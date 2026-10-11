@@ -1,9 +1,14 @@
 import { z } from "zod";
-import { enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, requireVerifiedUser, zodMessage } from "@/lib/api";
+import { enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, requireVerifiedUser, zodMessage, tooLarge } from "@/lib/api";
 import { routePrompt } from "@/lib/router";
 
 const schema = z.object({
-  prompt: z.string().min(3).max(2000),
+  // trim before the floor: min(3) counts UNTRIMMED characters, so "   " passed
+  // validation and was forwarded verbatim — a billed DeepSeek completion for
+  // zero user content, at the 30 calls/min this route allows. Every sibling
+  // prompt schema trims (generate/edit/video/assistant); this one and the v1
+  // route were the two that missed it (pass 34).
+  prompt: z.string().trim().min(3).max(2000),
 });
 
 export async function POST(req: Request) {
@@ -15,7 +20,7 @@ export async function POST(req: Request) {
     const userLimited = await enforceUserRateLimit(userId, "route", 30, 60_000);
     if (userLimited) return fail(userLimited);
     const bodyRaw = await readBodyCapped(req, 64 * 1024);
-    if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
+    if ("tooLarge" in bodyRaw) return tooLarge();
     const body = schema.parse(parseJsonBody(bodyRaw.raw));
     const result = await routePrompt(body.prompt);
     return ok(result);

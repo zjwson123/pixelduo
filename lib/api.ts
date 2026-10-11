@@ -167,6 +167,17 @@ export function errorResponse(body: Record<string, unknown>, init: ResponseInit)
   return NextResponse.json(body, { ...init, headers });
 }
 
+// The oversized-body refusal, in one place (pass 34). 24 routes hand-rolled
+// `new Response("payload too large", { status: 413 })` — no Cache-Control and a
+// text/plain body, which is exactly the shape errorResponse's own comment names
+// as its reason to exist ("a hand-rolled NextResponse missed both this header
+// and the JSON content type"). Every other /api/* response honours the
+// contract, so a client calling res.json() on this one path threw and showed a
+// generic error instead of the real cause.
+export function tooLarge() {
+  return errorResponse({ ok: false, error: "payload-too-large" }, { status: 413 });
+}
+
 export function fail(error: unknown) {
   if (error instanceof ApiError) {
     // A 429 that carries no Retry-After is one a client can only guess at, and

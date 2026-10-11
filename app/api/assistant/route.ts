@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, requireVerifiedUser, zodMessage } from "@/lib/api";
+import { enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, requireVerifiedUser, zodMessage, tooLarge } from "@/lib/api";
 import { improvePrompt } from "@/lib/assistant";
 
 const schema = z.object({
@@ -20,7 +20,7 @@ export async function POST(req: Request) {
     if (userLimited) return fail(userLimited);
     // Text-only body — anything beyond a few KB is abuse.
     const bodyRaw = await readBodyCapped(req, 64 * 1024);
-    if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
+    if ("tooLarge" in bodyRaw) return tooLarge();
     const body = schema.parse(parseJsonBody(bodyRaw.raw));
     const result = await improvePrompt(body.prompt, body.mode);
     return ok(result);

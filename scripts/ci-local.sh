@@ -11,6 +11,7 @@ export REDIS_URL="redis://localhost:6379"
 export MOCK_IMAGE_PROVIDER="1"
 export MIDDLEWARE_AUTH_LIMIT="1000"
 export MIDDLEWARE_API_LIMIT="10000"
+export MIDDLEWARE_PAGE_LIMIT="10000"
 export REGISTER_RATE_LIMIT="10000"
 export STORAGE_DRIVER="local"
 export LOCAL_STORAGE_DIR="data/files"
@@ -26,6 +27,10 @@ export LOCAL_STORAGE_DIR="data/files"
 # early exit.
 STARTED_PORTS=()
 cleanup() {
+  # The build-host plant below must not survive this script, however it exits
+  # (pass 34): CI removes it in a separate step after the assertion, and a
+  # failure or Ctrl-C here would otherwise leave a fake .env in the checkout.
+  if [ -n "${PLANTED_ENV:-}" ]; then rm -f .env prisma/dev.db; fi
   kill ${APP_PID:-} ${APP2_PID:-} ${WORKER_PID:-} 2>/dev/null || true
   for p in ${STARTED_PORTS[@]+"${STARTED_PORTS[@]}"}; do
     pids="$(lsof -ti "tcp:$p" 2>/dev/null || true)"
@@ -135,6 +140,15 @@ docker run --rm --entrypoint sh pd-ci-web -c '
   test ! -e /app/playwright.config.ts
   test ! -e /app/tsconfig.json
   test ! -e /app/prisma/seed.ts
+  # Pass 34: the two glob expansions the prune list carries and no assertion
+  # named. PRODUCT_OUTLINE.md is 33 KB of internal monetisation notes and is
+  # traced into .next/standalone (probed); only ./*.md removes it. .env.example
+  # is the one dotenv name the build context DOES carry (.dockerignore
+  # re-includes it), so unlike the three dotenv names below it can actually
+  # fail if the prune list loses .env .env.* — the other three are already
+  # excluded from the context and their test !s are true no matter what.
+  test ! -e /app/PRODUCT_OUTLINE.md
+  test ! -e /app/.env.example
   # ...while what actually RUNS is still there: the compiled chunks.
   test -e /app/server.js
   test -e /app/.next/server/instrumentation.js
@@ -214,6 +228,14 @@ docker run --rm --entrypoint sh pd-ci-worker -c '
   test ! -e /app/.npmrc
   test ! -e /app/.gitignore
   test ! -e /app/.dockerignore
+  # Pass 34: the two compose files the web gate already asserts and this one
+  # did not, plus the same md/dotenv glob members as the web gate. This is the
+  # registry-pushed image; dropping a name from its prune list shipped the file
+  # with every gate green.
+  test ! -e /app/docker-compose.single.yml
+  test ! -e /app/docker-compose.prod.yml
+  test ! -e /app/PRODUCT_OUTLINE.md
+  test ! -e /app/.env.example
   # The editor state a build host may carry (pass 31): gitignored, so invisible
   # to every "is it in the repo" check, and previously named by neither
   # .dockerignore nor this prune — .vscode/settings.json and .idea/workspace.xml
@@ -293,6 +315,19 @@ export NEXTAUTH_URL="http://localhost:3100"
 # tee: the leak scan below reads the PRUNE's own report out of this log to
 # prove the build host's .env actually reached the standalone tree (pass 33).
 # pipefail is set at the top of this script, so a failing build still fails here.
+#
+# Plant the same two leaks CI plants (pass 34). The prune's own report is only
+# evidence if material REACHED the tree, and on a fresh clone or a container
+# that has only ever run this script there is no .env (it exports everything
+# itself) and no prisma/dev.db — so the prune correctly reported nothing and
+# the gate below exited 1 blaming a healthy artifact. A real .env in the tree
+# is real material and must never be overwritten, so plant only when the
+# developer has neither; the trap removes the plant on every exit path.
+if [ ! -e .env ] && [ ! -e prisma/dev.db ]; then
+  printf 'NEXTAUTH_SECRET=ci-planted-not-a-real-secret\nDATABASE_URL=postgresql://planted:planted@127.0.0.1:5432/planted\n' > .env
+  printf 'SQLite format 3\000ci-planted' > prisma/dev.db
+  PLANTED_ENV=1
+fi
 npm run build 2>&1 | tee /tmp/pd-ci-build.log
 
 # The artifact that deploys must not carry the build host's secrets. `next

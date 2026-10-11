@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, refuseNul, zodMessage } from "@/lib/api";
+import { enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, refuseNul, zodMessage, tooLarge } from "@/lib/api";
 import { requireAdmin } from "@/lib/admin";
 import { prisma } from "@/lib/prisma";
 
@@ -18,7 +18,7 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     const limited = await enforceUserRateLimit(adminId, "admin-feedback-write", 60, 60_000);
     if (limited) return fail(limited);
     const bodyRaw = await readBodyCapped(req, 4 * 1024);
-    if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
+    if ("tooLarge" in bodyRaw) return tooLarge();
     const body = schema.parse(parseJsonBody(bodyRaw.raw));
     // updateMany with the id in the predicate: a P2025 on an unknown id would
     // otherwise surface as a 500 instead of a 404.

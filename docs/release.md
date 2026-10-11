@@ -22,7 +22,11 @@
 | `SENTRY_DSN` | 错误告警 | 待配置 |
 | `GOOGLE/GITHUB_CLIENT_*` | OAuth（可选） | 待配置 |
 
-首次启动后执行：`npx tsx scripts/promote-admin.ts <你的邮箱>` 提权管理员。
+首次启动后执行（**必须在容器里**，见 [server-setup.md](server-setup.md) 第 5 节：生产宿主机只装了 Docker，没有 node_modules，`db` 主机名也只在 compose 网络内可解析；单机用 `-f docker-compose.single.yml run --rm worker`）：
+
+```bash
+docker compose -f docker-compose.single.yml run --rm worker npx tsx scripts/promote-admin.ts <你的邮箱>
+```
 
 ## 2. 部署
 

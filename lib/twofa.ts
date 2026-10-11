@@ -255,12 +255,29 @@ export async function isTwoFactorLocked(userId: string): Promise<boolean> {
   return (await twoFactorLockStatus(userId)).locked;
 }
 
+// Check-and-increment in ONE round trip (pass 34). This was the one counter in
+// the codebase that did `INCR` then a separate `EXPIRE` (lib/rate-limit.ts and
+// lib/login-guard.ts both use a Lua script for exactly this reason): if the
+// EXPIRE never landed — a refused/error reply, a dropped socket between the two
+// awaits (enableOfflineQueue:false + maxRetriesPerRequest:0 make the second
+// command fail immediately), a process kill in between — the INCR had already
+// committed and NOTHING ever repaired the TTL. The key then only grows, is
+// shared by every instance and survives redeploys, so after 20 failures spread
+// over any span the account is locked out of 2FA forever while
+// twoFactorLockStatus reports `Math.max(1, ttl)` with ttl = -1, i.e. "retry in
+// 1 second" — the 24-hour window advertised as a moment. The script is the same
+// shape as HIT_SCRIPT: increment, and expire only the increment that created
+// the key.
+const FAIL_BUMP_SCRIPT = `
+local c = redis.call('INCR', KEYS[1])
+if c == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end
+return c
+`;
+
 export async function recordTwoFactorFailure(userId: string): Promise<void> {
   const r = await withRedis(async (c) => {
     const key = `2fa:fail:${userId}`;
-    const n = await c.incr(key);
-    if (n === 1) await c.expire(key, TWOFA_FAIL_WINDOW_SEC);
-    return n;
+    return (await c.eval(FAIL_BUMP_SCRIPT, 1, key, TWOFA_FAIL_WINDOW_SEC)) as number;
   });
   if (r.state !== "ok") localFailBump(userId);
 }

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, requireUserId, zodMessage } from "@/lib/api";
+import { enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, requireUserId, zodMessage, tooLarge } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { serveUserUrl } from "@/lib/store";
 import { getStorage } from "@/lib/storage";
@@ -58,7 +58,7 @@ export async function DELETE(req: Request) {
     const limited = await enforceUserRateLimit(userId, "gallery-delete", 10, 60_000);
     if (limited) return fail(limited);
     const bodyRaw = await readBodyCapped(req, 16 * 1024);
-    if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
+    if ("tooLarge" in bodyRaw) return tooLarge();
     const { ids } = deleteSchema.parse(parseJsonBody(bodyRaw.raw));
 
     // Ownership lives in the where-clause itself: ids belonging to another

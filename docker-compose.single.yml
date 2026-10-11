@@ -139,6 +139,7 @@ x-appenv: &appenv
   MAIL_DEV_MODE: ${MAIL_DEV_MODE:-0}
   MIDDLEWARE_AUTH_LIMIT: ${MIDDLEWARE_AUTH_LIMIT:-}
   MIDDLEWARE_API_LIMIT: ${MIDDLEWARE_API_LIMIT:-}
+  MIDDLEWARE_PAGE_LIMIT: ${MIDDLEWARE_PAGE_LIMIT:-}
   REGISTER_RATE_LIMIT: ${REGISTER_RATE_LIMIT:-}
   OAUTH_CALLBACK_RATE_LIMIT: ${OAUTH_CALLBACK_RATE_LIMIT:-}
   OUTBOUND_TIMEOUT_MS: ${OUTBOUND_TIMEOUT_MS:-}
@@ -324,6 +325,15 @@ services:
     # needs write access to /backups, so nothing about it requires uid 0.
     # Docker Desktop hides this on macOS (files come out host-owned); on the
     # documented Ubuntu VPS target it is exactly the failure above.
+    #
+    # The OTHER half of that failure is the bind mount itself (pass 34):
+    # backups/ is gitignored, so a fresh clone has no such directory and Docker
+    # creates it OWNED BY ROOT on the host - uid 1000 then has r-x, pg_dump
+    # cannot open its output file, and the chmod below (which fails for the same
+    # reason) had its stderr discarded, so the only signal was one FAILED line
+    # per day in a log nobody reads while both services stayed Up. The loops now
+    # test writability first and say the reason and the remedy. docs/server-setup
+    # step 4 creates and chowns the directory; this is the belt to that.
     user: "${BACKUP_UID:-1000}:${BACKUP_GID:-1000}"
     image: postgres:16-alpine
     environment:
@@ -338,6 +348,7 @@ services:
     command: >
       sh -c 'while true; do
         umask 077;
+        if [ ! -w /backups ]; then echo "[backup] /backups is NOT writable by uid $$(id -u): the bind-mounted ./backups is missing or owned by another user, so no dump will ever be written. On the host: mkdir -p backups && chown $$(id -u):$$(id -g) backups" >&2; fi;
         chmod 700 /backups 2>/dev/null || true;
         STAMP=$$(date +%Y%m%d-%H%M%S);
         TMP=/backups/.pixelduo-$${STAMP}.partial;
@@ -385,6 +396,7 @@ services:
     command: >
       'while true; do
         umask 077;
+        if [ ! -w /backups ]; then echo "[backup-objects] /backups is NOT writable by uid $$(id -u): the bind-mounted ./backups is missing or owned by another user, so no snapshot will ever be written. On the host: mkdir -p backups && chown $$(id -u):$$(id -g) backups" >&2; fi;
         mkdir -p /backups/objects;
         chmod 700 /backups/objects 2>/dev/null || true;
         rm -rf /backups/objects/.*.partial;

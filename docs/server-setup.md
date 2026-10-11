@@ -43,6 +43,14 @@ cp .env.example .env.production
 #     init-storage 供应 + 两个新变量，见 docker-compose.single.yml 里
 #     S3_ACCESS_KEY_ID 处的说明——对外提供此栈之前应补上）
 set -a; source .env.production; set +a
+
+# 备份目录必须先建好并属于当前用户（pass 34）：backups/ 不在 git 里，全新 clone
+# 没有这个目录；compose 的 bind mount 会让 Docker 以 root 身份把它建出来，而备份
+# 容器以 (BACKUP_UID, BACKUP_GID) 运行（默认 1000:1000），对 root 拥有的 0755 目录
+# 只有 r-x —— pg_dump / mc mirror 每天失败一次，两个服务却都显示 Up，只有
+# `docker compose logs backup` 里一行 FAILED 作为信号。备份循环现在会显式打印
+# "not writable" 和这条命令；先跑一次就不会遇到：
+mkdir -p backups && chown "$(id -u):$(id -g)" backups
 ```
 
 ## 4. 启动
@@ -84,7 +92,7 @@ docker compose -f docker-compose.single.yml run --rm worker npx tsx scripts/rese
 
 - 升级：`git pull && docker compose -f docker-compose.single.yml up -d --build --scale worker=3`（注意：每次 `up` 都要带 `--scale worker=3`，不带会缩回 1 个 worker）
 - 扩缩 worker：`docker compose -f docker-compose.single.yml up -d --scale worker=3`（改数字即可，服务不中断）
-- 备份：DB 每天进 `./backups/`（保留 14 份），图片镜像进 `./backups/objects/`（保留 7 份）；建议把 `./backups/` 挂到对象存储或异地拷贝
+- 备份：DB 每天进 `./backups/`（保留 14 份），图片镜像进 `./backups/objects/`（保留 7 份）；建议把 `./backups/` 挂到对象存储或异地拷贝。目录必须由运行备份的 uid 可写（见第 3 步的 `mkdir -p backups && chown ...`），否则日志里会反复出现 `[backup] /backups is NOT writable`，而 `docker compose ps` 一切正常
 - 监控：Sentry DSN 生效后，异常自动上报
 - 回滚：升级前把当前镜像存成 prev —— `docker tag image-gen-web:latest image-gen-web:prev && docker tag image-gen-worker:latest image-gen-worker:prev`；
   出问题先 `docker tag image-gen-web:prev image-gen-web:latest && docker tag image-gen-worker:prev image-gen-worker:latest`，

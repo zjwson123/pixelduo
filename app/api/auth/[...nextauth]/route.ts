@@ -1,7 +1,7 @@
 import NextAuth from "next-auth";
 import { NextRequest } from "next/server";
 import { authOptions } from "@/lib/auth";
-import { ApiError, enforceRateLimit, errorResponse, readBodyCapped } from "@/lib/api";
+import { ApiError, enforceRateLimit, errorResponse, readBodyCapped, tooLarge } from "@/lib/api";
 import { envLimit } from "@/lib/rate-limit";
 
 const handler = NextAuth(authOptions);
@@ -103,7 +103,7 @@ async function limited(req: NextRequest, ctx: Parameters<typeof handler>[1]) {
     throw e;
   });
   if ("refused" in bodyRaw) return bodyRaw.refused;
-  if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
+  if ("tooLarge" in bodyRaw) return tooLarge();
   // The body has been consumed, so the handler gets a fresh request carrying the
   // same url/headers (next-auth reads nextUrl.searchParams, the cookie header and
   // the content type) plus the body as a string. content-length and

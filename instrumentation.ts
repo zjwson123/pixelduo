@@ -59,7 +59,17 @@ export function assertProductionConfig(env: NodeJS.ProcessEnv = process.env): vo
   // against the placeholder list above: CI and ci-local.sh legitimately use it
   // to boot a production build, so it may only be rejected where it would be a
   // real deployment's signing key.
-  if (secret === PUBLISHED_CI_SECRET && !testDeployment) {
+  //
+  // Normalised (pass 34): the placeholder check beside it already lowercases
+  // and substring-matches, so it survives case and stray characters — this one
+  // compared the raw bytes, and the way a value travels out of a YAML/env file
+  // (copy with the line's trailing space or newline, all-caps in transit) put it
+  // back on the accepted side: a key that IS the public value modulo whitespace
+  // and case let anyone reading this repository forge a session — admin
+  // included — for the price of trying a handful of spellings. Trim and fold
+  // case before comparing; the constant is lowercase hex, so nothing legitimate
+  // is caught by this.
+  if (secret.trim().toLowerCase() === PUBLISHED_CI_SECRET && !testDeployment) {
     throw new Error(
       "NEXTAUTH_SECRET is the value published in .github/workflows/ci.yml and scripts/ci-local.sh — it is public knowledge, so anyone could forge a session for any account. Generate a fresh one with `openssl rand -base64 32`",
     );

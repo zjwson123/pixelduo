@@ -1,4 +1,4 @@
-import { ok, fail, enforceRateLimit, readBodyCapped } from "@/lib/api";
+import { ok, fail, enforceRateLimit, readBodyCapped, tooLarge } from "@/lib/api";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { rateLimit } from "@/lib/rate-limit";
@@ -69,7 +69,7 @@ export async function POST(req: Request) {
     // can't slip ~3x past the cap. Every other body-reading route already
     // goes through this helper.
     const bodyRaw = await readBodyCapped(req, WEBHOOK_MAX_BYTES);
-    if ("tooLarge" in bodyRaw) return new NextResponse("payload too large", { status: 413 });
+    if ("tooLarge" in bodyRaw) return tooLarge();
     const raw = bodyRaw.raw;
     // The signature's timestamp window is judged on the DATABASE's clock — the
     // one every other money decision uses (pass 26). On the app clock, a host
@@ -322,6 +322,37 @@ export async function POST(req: Request) {
               amountUsd: order.amountUsd,
             };
           }
+        }
+      }
+      // A reversal that can only subtract (pass 34). Paddle emits `reversed`
+      // when a chargeback_reversal / credit_reversal puts the funds BACK in the
+      // merchant's account, and pass 33 made that delivery a NEGATIVE
+      // accumulator delta so a later genuine full refund still measures
+      // correctly. What nothing surfaced was the delivery's OTHER outcome: when
+      // the original refund already promoted the order, both CAS arms above
+      // match nothing and the delivery ends as a silent no-op — the money is
+      // the merchant's again while the customer keeps nothing, because the
+      // credits and tier were revoked when the refund landed. Nothing
+      // un-revokes automatically (the same deliberate policy as the Stripe
+      // dispute-won path), so the one correct action is an operator re-grant —
+      // and until now nothing asked for one: the event is persisted and ACKed,
+      // so no retry ever looks at it again and no admin view reads
+      // PaymentEvent. Reported on the delivery itself, like the paid-event
+      // sibling above. A negative delta cannot have caused a revocation (from a
+      // below-price accumulator it can only subtract), so a `refunded` order
+      // here means this delivery changed nothing.
+      if (order && event.refundAmountUsd !== undefined && event.refundAmountUsd < 0) {
+        const current = await tx.order.findUnique({ where: { id: order.id }, select: { status: true } });
+        if (current?.status === "refunded") {
+          const msg =
+            "refund-reversed: funds returned to the merchant on an order whose credits/tier were already revoked — the customer holds nothing for money the merchant kept; a manual re-grant is the remedy";
+          console.error(`[webhook] ${msg}`, { orderId: order.id, eventId: event.eventId });
+          captureError(new Error(msg), {
+            scope: "payment",
+            orderId: order.id,
+            eventId: event.eventId,
+            providerOrderId: event.providerOrderId,
+          });
         }
       }
       return null;

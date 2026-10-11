@@ -150,7 +150,19 @@ export class PaddleProvider implements PaymentProvider {
         // 20%-VAT €9 purchase read as "at least $9 collected" and mask a
         // genuinely underpaid order. Subtotal is the line-item amount we set
         // at checkout, in cents.
-        const totals = data.totals as { subtotal?: string | number } | undefined;
+        //
+        // NESTED under `details` (pass 34). A Paddle TRANSACTION carries its
+        // totals at data.details.totals — the Adjustment entity 30 lines below
+        // is the one that puts them at the top level, and that shape was
+        // copied here. Every real transaction.completed therefore parsed NaN,
+        // paidAmountUsd came out undefined, and assertPaymentMatchesOrder's
+        // amount leg is the only one that binds on that field: a signed $1
+        // transaction whose custom_data named the $49.99 order fulfilled it in
+        // full (probed end-to-end against the real route — the $1 was taken
+        // and 6000 credits granted). The top-level read is kept as a fallback
+        // for any relay that flattens the payload; it costs nothing.
+        const details = data.details as { totals?: { subtotal?: string | number } } | undefined;
+        const totals = (details?.totals ?? data.totals) as { subtotal?: string | number } | undefined;
         const subtotalNum = totals?.subtotal !== undefined ? Number(totals.subtotal) : NaN;
         return {
           provider: this.name,

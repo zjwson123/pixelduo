@@ -38,7 +38,15 @@ x-appenv: &appenv
   S3_BUCKET: ${S3_BUCKET:?set S3_BUCKET}
   S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?set S3_ACCESS_KEY_ID}
   S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?set S3_SECRET_ACCESS_KEY}
-  S3_FORCE_PATH_STYLE: "false"
+  # Forwarded, not pinned (pass 34). .env.example documents this knob as
+  # true-for-MinIO / false-for-R2-AWS, and lib/storage.ts reads it - but this
+  # anchor hardcoded "false", so the one setting a path-style-only endpoint
+  # needs could not be set at all: every storage call built
+  # https://<bucket>.<endpoint>/..., /api/health reported storage down, and
+  # generation failed closed with no knob to fix it. Same shape as the
+  # IMAGE_MODERATION discard pass 32 fixed in single.yml. Default false, the
+  # R2/AWS-safe value, so an unset variable behaves exactly as before.
+  S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-false}
   SENTRY_DSN: ${SENTRY_DSN:-}
   SENTRY_ENVIRONMENT: production
   IMAGE_MODERATION: ${IMAGE_MODERATION:-1}
@@ -91,6 +99,7 @@ x-appenv: &appenv
   # direction an operator needs after an incident.
   MIDDLEWARE_AUTH_LIMIT: ${MIDDLEWARE_AUTH_LIMIT:-}
   MIDDLEWARE_API_LIMIT: ${MIDDLEWARE_API_LIMIT:-}
+  MIDDLEWARE_PAGE_LIMIT: ${MIDDLEWARE_PAGE_LIMIT:-}
   REGISTER_RATE_LIMIT: ${REGISTER_RATE_LIMIT:-}
   OAUTH_CALLBACK_RATE_LIMIT: ${OAUTH_CALLBACK_RATE_LIMIT:-}
   OUTBOUND_TIMEOUT_MS: ${OUTBOUND_TIMEOUT_MS:-}

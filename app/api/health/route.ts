@@ -100,6 +100,12 @@ export async function GET(req: Request) {
       headers: { "Cache-Control": "no-store" },
     });
   } catch (e) {
-    return NextResponse.json({ ok: false, db: "down", error: "health-check-failed" }, { status: 503 });
+    // Same no-store as the path above (pass 34): lib/api.ts states the rule
+    // ("kept in one place so every error path inherits it") and this handler
+    // was the one place that built its own error response without it.
+    return NextResponse.json(
+      { ok: false, db: "down", error: "health-check-failed" },
+      { status: 503, headers: { "Cache-Control": "no-store" } },
+    );
   }
 }

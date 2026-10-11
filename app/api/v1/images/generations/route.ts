@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { enforceRateLimit, errorResponse, fail, ok, parseJsonBody, readBodyCapped, zodMessage } from "@/lib/api";
+import { enforceRateLimit, errorResponse, fail, ok, parseJsonBody, readBodyCapped, zodMessage, tooLarge } from "@/lib/api";
 import { rateLimit } from "@/lib/rate-limit";
 import { authenticateApiKey } from "@/lib/apikey";
 import { checkPrompt } from "@/lib/safety";
@@ -14,7 +14,11 @@ const VIDEO_DURATION_MAX = getVideoModels().reduce(
 );
 
 const schema = z.object({
-  prompt: z.string().min(3).max(2000),
+  // trim before the floor (pass 34): min(3) counts untrimmed characters, so
+  // "   " passed validation, cleared checkPrompt, and created a real
+  // generation/video job that bills the provider for empty content. Same rule
+  // as /api/route's sibling schema and the four routes that always had it.
+  prompt: z.string().trim().min(3).max(2000),
   model: z.enum(modelEnum([...enabledImageModelIds(), "both", ...enabledVideoModelIds()])).default("gpt"),
   quality: z.enum(["low", "medium", "high"]).default("medium"),
   n: z.number().int().min(1).max(4).default(1),
@@ -58,7 +62,7 @@ export async function POST(req: Request) {
       );
     }
     const bodyRaw = await readBodyCapped(req, 64 * 1024);
-    if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
+    if ("tooLarge" in bodyRaw) return tooLarge();
     const body = schema.parse(parseJsonBody(bodyRaw.raw));
     const safety = checkPrompt(body.prompt);
     if (!safety.ok) {

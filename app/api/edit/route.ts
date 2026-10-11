@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { enforceRateLimit, enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, requireVerifiedUser, zodMessage } from "@/lib/api";
+import { enforceRateLimit, enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, requireVerifiedUser, zodMessage, tooLarge } from "@/lib/api";
 import { checkPrompt } from "@/lib/safety";
 import { createMediaJob } from "@/lib/queue";
 import { getStorage } from "@/lib/storage";
@@ -44,7 +44,7 @@ export async function POST(req: Request) {
     const limited = await enforceUserRateLimit(userId, "edit", 15, 60_000);
     if (limited) return fail(limited);
     const bodyRaw = await readBodyCapped(req, EDIT_MAX_BYTES);
-    if ("tooLarge" in bodyRaw) return new Response("payload too large", { status: 413 });
+    if ("tooLarge" in bodyRaw) return tooLarge();
     const body = schema.parse(parseJsonBody(bodyRaw.raw));
     const safety = checkPrompt(body.prompt);
     if (!safety.ok) return fail(new Error(`blocked:${safety.reason}`));

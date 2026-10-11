@@ -22,15 +22,37 @@ const BLOCKED: Array<{ re: RegExp; reason: string }> = [
 // bump a space defeats is not a speed bump — `"n u d e woman"` and `"n.u.d.e"`
 // both walked past `\bnude\b`, and the next obvious spellings (`nudity`,
 // `sexy`) were never on the list at all.
+//
+// Unicode FORMAT characters (pass 34) are the same evasion one character class
+// over. The collapse's separator class is `[\s._*-]` (whitespace plus four
+// punctuation marks) and JS's `\s` does NOT include Cf: U+200B ZERO WIDTH
+// SPACE, U+200D ZWJ, U+2060 WORD JOINER — and the raw rules never see the word
+// either, because `nudi\u200bty` is not `\bnudity\b`. So a strip pass runs
+// before anything else, on a class chosen to be lossless: every character here
+// is invisible (or, for the soft hyphen, invisible-unless-broken), the provider
+// renders the stripped form anyway, and no rule can depend on one.
+const FORMAT_CONTROLS = /[\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u2064\u206a-\u206f\ufeff]/g;
+
+export function stripFormatControls(text: string): string {
+  return text.replace(FORMAT_CONTROLS, "");
+}
+
 export function collapseLetterSpacing(text: string): string {
   // A RUN of single letters joined by separators collapses to one word:
   // "n u d e" -> "nude", "n.u.d.e" -> "nude". The two boundary lookarounds are
   // what keep prose intact: every letter of the run must itself be a one-letter
   // word, so "a big cat" matches nothing (after "a b" comes "i", a letter),
   // while a spaced-out evasion is exactly the shape that does match.
-  return text.replace(
-    /(?<![\p{L}\p{N}])\p{L}(?:[\s._*\-]+\p{L})+(?![\p{L}\p{N}])/gu,
-    (run) => run.replace(/[\s._*\-]+/gu, ""),
+  //
+  // The separator class is "any non-alphanumeric" rather than a fixed list of
+  // five (pass 34): the five-character list left `n,u,d,e`, `n/u/d/e` and
+  // `n~u~d~e` uncollapsed, and the lookaround rule above (a run of one-letter
+  // words only) is what keeps prose safe, not the list. A run like "a, b, c
+  // and d" does collapse to "abc" — and matches no rule — while an evasion
+  // does.
+  return stripFormatControls(text).replace(
+    /(?<![\p{L}\p{N}])\p{L}(?:[^\p{L}\p{N}]+\p{L})+(?![\p{L}\p{N}])/gu,
+    (run) => run.replace(/[^\p{L}\p{N}]+/gu, ""),
   );
 }
 
@@ -42,10 +64,13 @@ export interface SafetyResult {
 export function checkPrompt(prompt: string): SafetyResult {
   // Both forms are tested: a rule may match either (the collapse can join words
   // a Chinese-language rule expects apart, and the raw form is what a future
-  // rule with its own punctuation handling will want).
-  const collapsed = collapseLetterSpacing(prompt);
+  // rule with its own punctuation handling will want). The RAW form is the
+  // format-control-stripped one — `nudi\u200bty` only matches `\bnudity\b`
+  // after the strip (pass 34).
+  const stripped = stripFormatControls(prompt);
+  const collapsed = collapseLetterSpacing(stripped);
   for (const rule of BLOCKED) {
-    if (rule.re.test(prompt) || rule.re.test(collapsed)) {
+    if (rule.re.test(stripped) || rule.re.test(collapsed)) {
       return { ok: false, reason: rule.reason };
     }
   }

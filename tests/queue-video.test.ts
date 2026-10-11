@@ -125,7 +125,7 @@ describe("video job state machine", () => {
     expect(pollClaim?.providerTaskId).toBe("task-1");
 
     // Task still running upstream → re-arm, keep polling
-    await schedulePoll(job.id);
+    await schedulePoll(job.id, "w1");
     row = await prisma.job.findUniqueOrThrow({ where: { id: job.id } });
     expect(row.status).toBe("polling");
     expect(row.heartbeatAt!.getTime()).toBeGreaterThan(Date.now() - 60_000);
@@ -192,11 +192,13 @@ describe("video job state machine", () => {
 
   it("schedulePoll re-arms nextAttemptAt by the poll interval", async () => {
     const job = await createBackdatedVideoJob("interval");
-    await prisma.job.update({ where: { id: job.id }, data: { status: "running" } });
+    // worker: the re-arm is conditioned on the row's holder (pass 34), and a
+    // claimed job always carries one — set it here as a claim would.
+    await prisma.job.update({ where: { id: job.id }, data: { status: "running", worker: "w1" } });
     await setJobPolling(job.id, "task-4");
     const before = await prisma.job.findUniqueOrThrow({ where: { id: job.id } });
     await new Promise((r) => setTimeout(r, 25));
-    await schedulePoll(job.id);
+    await schedulePoll(job.id, "w1");
     const after = await prisma.job.findUniqueOrThrow({ where: { id: job.id } });
     expect(after.status).toBe("polling");
     expect(after.nextAttemptAt!.getTime()).toBeGreaterThan(before.nextAttemptAt!.getTime());
