@@ -159,6 +159,32 @@ end
 return {1, -1}
 `;
 
+// The same increment-and-expire pair, for the caller that already decided
+// (recordLoginFailure). That path was the last counter in the codebase still
+// doing `INCR` and then a separate `EXPIRE` — the reservation above is one
+// script for exactly this reason, and pass 34 converted the 2FA counter
+// (lib/twofa.ts) for it. Two round trips means the second one can be lost on
+// its own: a refused/error reply, or a dropped socket between the two awaits
+// (enableOfflineQueue:false + maxRetriesPerRequest:0 make it fail immediately),
+// or a process kill in the gap. The INCR has already committed by then and
+// NOTHING ever repairs the missing TTL, so the key only grows, is shared by
+// every instance and survives redeploys: past MAX_EMAIL_HARD_FAILURES the
+// address is refused for good, while the refusal reports a full window —
+// "try again in 15 minutes" that never arrives. ARGV[2] carries the same hasIp
+// flag as the reservation, because without a source address the caller passes
+// the EMAIL key as KEYS[2] and the flag is what keeps one attempt from counting
+// twice (see the header comment above the reservation).
+const RECORD_SCRIPT = `
+local hasIp = ARGV[2] == '1'
+local e = redis.call('INCR', KEYS[1])
+if e == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end
+if hasIp then
+  local i = redis.call('INCR', KEYS[2])
+  if i == 1 then redis.call('EXPIRE', KEYS[2], ARGV[1]) end
+end
+return {1, -1}
+`;
+
 export interface LoginAttempt {
   allowed: boolean;
   retryAfterSec?: number;
@@ -220,13 +246,11 @@ export async function recordLoginFailure(email: string, ip?: string): Promise<vo
     async () => {
       const windowSec = Math.ceil(LOGIN_WINDOW_MS / 1000);
       const ek = emailKey(email);
-      const n = await client!.incr(ek);
-      if (n === 1) await client!.expire(ek, windowSec);
-      if (ip) {
-        const pk = pairKey(email, ip);
-        const m = await client!.incr(pk);
-        if (m === 1) await client!.expire(pk, windowSec);
-      }
+      const hasIp = Boolean(ip);
+      // KEYS[2] is never read or written when the flag is "0" (see the script),
+      // so aliasing it to KEYS[1] cannot double-count.
+      const pk = hasIp ? pairKey(email, ip as string) : ek;
+      await client!.eval(RECORD_SCRIPT, 2, ek, pk, windowSec, hasIp ? "1" : "0");
     },
     () => {
       localBump(emailKey(email));

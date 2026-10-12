@@ -848,8 +848,22 @@ export function checkinDateKey(now = new Date()): string {
 }
 
 export async function dailyCheckin(userId: string): Promise<CheckinResult> {
-  const date = checkinDateKey();
   return prisma.$transaction(async (tx) => {
+    // The day key is a MONEY boundary — "one grant per local day" is what makes
+    // the check-in worth 2 credits a day instead of 2 credits per request — and
+    // its only enforcement is @@unique(userId, date) over this string. It came
+    // from the APP clock (`checkinDateKey()` -> `new Date()`), which is not an
+    // authority anywhere else in this file: a host 15m25s off the database (the
+    // skew vitest.setup.ts exists to refuse) writes tomorrow's key tonight, and
+    // two instances either side of local midnight write two DIFFERENT keys for
+    // ONE database day. The unique index cannot see that — the rows disagree —
+    // so the account collects the grant twice. The same conversion as
+    // fulfillOrder / cycleUsageTx / revokePlanEntitlementTx (pass 26) and the
+    // worker's isFreeTier (pass 34); this was the last one (pass 35).
+    // checkinDateKey still renders the key in CHECKIN_TIMEZONE, so the day
+    // boundary stays the user's local midnight — what is the database's now is
+    // the INSTANT, not the timezone.
+    const date = checkinDateKey(await dbNow(tx));
     const existing = await tx.checkin.findUnique({
       where: { userId_date: { userId, date } },
     });
