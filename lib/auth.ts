@@ -295,10 +295,59 @@ export const authOptions: NextAuthOptions = {
           token.sv = sv;
           token.totpPending = (user as AuthUser).totpPending ?? false;
         }
+        return token;
+      }
+      // READ PATH (no `user`): a session read — getServerSession in every
+      // guard, and next-auth's own GET /api/auth/session. next-auth re-encodes
+      // whatever this returns with a FRESH 30-day expiry on every call to that
+      // route, so a cookie whose sessionVersion was bumped stayed a
+      // self-renewing credential: its holder re-dated it forever, and the
+      // endpoint answered it with the account's identity while every guarded
+      // route 401'd (probed: after revoke-sessions, /api/me → 401 but
+      // /api/auth/session → 200 plus a new cookie whose iat/exp moved on each
+      // call with sv stale in every one). Revocation has to be decided where
+      // the credential is READ, not only where its data is used, so the
+      // version is re-asked here and a token that cannot prove it is live is
+      // returned with its identity stripped — the session callback below then
+      // reports no user, and the guards refuse it on their own check as well.
+      //
+      // This is one indexed primary-key read per authenticated request, the
+      // same read requireUserId already makes; unauthenticated requests
+      // (no cookie) never reach it. A token with an id but no numeric sv is
+      // stripped too: it cannot be revocation-checked at all, which is the
+      // case sessionUser() refuses one layer down. `sub` is the fallback id —
+      // next-auth v4 sets it to our own user id, so a token minted before the
+      // `uid` claim existed is still checked (and, having no sv, stripped)
+      // rather than left echoing an identity next-auth would re-encode.
+      const id =
+        typeof token.uid === "string" ? token.uid : typeof token.sub === "string" ? token.sub : null;
+      const sv = typeof token.sv === "number" ? token.sv : null;
+      if (id) {
+        const db = await prisma.user.findUnique({ where: { id }, select: { sessionVersion: true } });
+        if (!db || db.sessionVersion !== sv) {
+          delete token.uid;
+          delete token.sv;
+          delete token.totpPending;
+          // Identity next-auth's own session route reads straight off the
+          // decoded token, bypassing our session callback's fields: leaving
+          // them in kept echoing the account's name, email and picture to the
+          // holder of a revoked cookie on every re-date.
+          delete token.sub;
+          delete token.email;
+          delete token.name;
+          delete token.picture;
+        }
       }
       return token;
     },
     async session({ session, token }) {
+      if (typeof token.uid !== "string") {
+        // No identity on the token (see the read path above): report an empty
+        // session so the route cannot re-hand the account's identity to a
+        // cookie the DB has already refused.
+        (session as { user?: unknown }).user = undefined;
+        return session;
+      }
       if (session.user) {
         (session.user as { id?: string }).id = token.uid as string;
         (session.user as { sv?: number }).sv = token.sv as number;

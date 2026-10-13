@@ -105,7 +105,7 @@ describe("video job state machine", () => {
     expect(claimed?.status).toBe("running");
 
     // Worker creates the provider task and arms the first poll
-    await setJobPolling(job.id, "task-1");
+    await setJobPolling(job.id, "task-1", "w1");
     let row = await prisma.job.findUniqueOrThrow({ where: { id: job.id } });
     expect(row.status).toBe("polling");
     expect(row.providerTaskId).toBe("task-1");
@@ -148,7 +148,7 @@ describe("video job state machine", () => {
     try {
       const first = await claimNextJob("w-a");
       expect(first?.id).toBe(job.id);
-      await setJobPolling(job.id, "task-2");
+      await setJobPolling(job.id, "task-2", "w-a");
 
       // Not due yet → the second worker cannot get this job
       const second = await claimNextJob("w-b");
@@ -169,7 +169,7 @@ describe("video job state machine", () => {
     let parked = await parkOthers(job.id);
     await claimNextJob("w1");
     await unpark(parked);
-    await setJobPolling(job.id, "task-3");
+    await setJobPolling(job.id, "task-3", "w1");
 
     // Simulate recoverStuckJobs: polling → requeued (due immediately)
     await prisma.job.update({
@@ -195,7 +195,7 @@ describe("video job state machine", () => {
     // worker: the re-arm is conditioned on the row's holder (pass 34), and a
     // claimed job always carries one — set it here as a claim would.
     await prisma.job.update({ where: { id: job.id }, data: { status: "running", worker: "w1" } });
-    await setJobPolling(job.id, "task-4");
+    await setJobPolling(job.id, "task-4", "w1");
     const before = await prisma.job.findUniqueOrThrow({ where: { id: job.id } });
     await new Promise((r) => setTimeout(r, 25));
     await schedulePoll(job.id, "w1");
@@ -215,8 +215,10 @@ describe("video job state machine", () => {
   // (billed, unpollable) task instead of dropping its id silently.
   it("records the provider task on a reaped job, and reports a job that is gone", async () => {
     const job = await createBackdatedVideoJob("reaped");
-    await prisma.job.update({ where: { id: job.id }, data: { status: "queued" } });
-    expect(await setJobPolling(job.id, "task-reaped")).toBe(true);
+    // A requeued job keeps the worker column from the claim that had it (see
+    // failJob's retry branch): the late write is fenced on exactly that.
+    await prisma.job.update({ where: { id: job.id }, data: { status: "queued", worker: "w1" } });
+    expect(await setJobPolling(job.id, "task-reaped", "w1")).toBe(true);
     const row = await prisma.job.findUniqueOrThrow({ where: { id: job.id } });
     expect(row.status).toBe("polling");
     expect(row.providerTaskId).toBe("task-reaped");
@@ -225,7 +227,7 @@ describe("video job state machine", () => {
       { url: "videos/reaped.mp4", model: "seedance", quality: "standard", credits: 42, prompt: "reaped" },
     ]);
     // The job is done: a task created after that point can never be polled.
-    expect(await setJobPolling(job.id, "task-late")).toBe(false);
+    expect(await setJobPolling(job.id, "task-late", "w1")).toBe(false);
     const after = await prisma.job.findUniqueOrThrow({ where: { id: job.id } });
     expect(after.providerTaskId).toBe("task-reaped"); // the live id is not clobbered
   });

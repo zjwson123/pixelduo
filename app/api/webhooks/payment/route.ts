@@ -245,10 +245,39 @@ export async function POST(req: Request) {
         // the price — money returned in full, credits kept, the fraud-direction
         // error. So negative deltas are applied with a floor at zero, in one
         // statement, under the same row lock as everything else here.
+        //
+        // Each (adjustment, direction) pair is counted ONCE (pass 36). The
+        // PaymentEvent.eventId dedupe above cannot promise that: eventId is the
+        // NOTIFICATION id, and a provider re-sending the same adjustment under
+        // a new one (at-least-once delivery, a payout update re-emitting an
+        // approved adjustment) was counted again — two signed deliveries of one
+        // $25 partial summed to $50 against a $49.99 order and promoted a
+        // partial refund to a FULL revoke, credits and paid tier gone for
+        // money the customer still held (probed end to end through this route).
+        // The marker array is the compare-and-append: a delivery whose marker
+        // is already present matches no row, accumulates nothing and cannot
+        // promote. The direction is in the marker because Paddle reports an
+        // adjustment's REVERSAL as a second delivery under the same adjustment
+        // id, and that one must still apply exactly once. Deliveries with no
+        // adjustment id (Stripe — cumulative, no delta; a relay that strips the
+        // field) keep the old unconditional behavior.
         let fullRefund = event.fullRefund;
         if (order && event.refundAmountUsd !== undefined) {
-          const accumulated =
-            event.refundAmountUsd < 0
+          const marker =
+            event.refundAdjustmentId === undefined
+              ? null
+              : `${event.refundAdjustmentId}:${event.refundAmountUsd < 0 ? "reversed" : "approved"}`;
+          const accumulated = marker
+            ? (
+                await tx.$queryRaw<Array<{ refundedAmountUsd: number }>>(Prisma.sql`
+                  UPDATE "Order"
+                  SET "refundedAmountUsd" = GREATEST("refundedAmountUsd" + ${event.refundAmountUsd}, 0),
+                      "refundedAdjustments" = array_append("refundedAdjustments", ${marker})
+                  WHERE id = ${order.id} AND NOT (${marker} = ANY("refundedAdjustments"))
+                  RETURNING "refundedAmountUsd"
+                `)
+              )[0]
+            : event.refundAmountUsd < 0
               ? (
                   await tx.$queryRaw<Array<{ refundedAmountUsd: number }>>(Prisma.sql`
                     UPDATE "Order"

@@ -1,4 +1,6 @@
 import { checkpointJobArtifact, checkpointJobProgress, checkpointKeys, claimNextJob, completeJob, extendPollLease, failJob, heartbeat, reclaimStoredArtifact, recoverStuckJobs, setJobPolling, schedulePoll } from "../lib/queue";
+import { hostname } from "node:os";
+import { randomUUID } from "node:crypto";
 import { generateImages, laneCountFor, createVideoTask, pollVideoTask, saveRemoteVideo, mockImageProviderEnabled, type ProviderImage } from "../lib/providers";
 import { modelCost, videoCost } from "../lib/cost";
 import { analyzeAllImagesSequentially, moderationRequested } from "../lib/safety";
@@ -233,7 +235,7 @@ export async function processImageJob(job: {
     const audits = await analyzeAllImagesSequentially(rows.map((r) => r.url));
     if (audits.some((a) => a.flagged)) {
       const msg = "image-flagged: moderation rejected the generated image";
-      await failJob(job.id, msg, { terminal: true });
+      await failJob(job.id, msg, { terminal: true, worker: workerId });
       await Promise.all(rows.map((r) => getStorage().delete(r.url).catch(() => undefined)));
       console.warn(`[worker ${workerId}] job ${job.id}: ${msg}`);
       captureError(new Error(msg), { jobId: job.id, model: job.model });
@@ -251,7 +253,7 @@ export async function processImageJob(job: {
       // say so explicitly — unset IMAGE_MODERATION / IMAGE_NSFW_ENDPOINT.
       const msg =
         "safety-audit-unavailable: moderation could not run, so the output was not delivered (check IMAGE_MODERATION / IMAGE_NSFW_ENDPOINT and the vision gateway)";
-      await failJob(job.id, msg, { terminal: true });
+      await failJob(job.id, msg, { terminal: true, worker: workerId });
       await Promise.all(rows.map((r) => getStorage().delete(r.url).catch(() => undefined)));
       console.error(`[worker ${workerId}] job ${job.id}: ${msg}`);
       captureError(new Error(msg), { jobId: job.id, model: job.model });
@@ -276,7 +278,7 @@ export async function processImageJob(job: {
     // refunded) and a retry reap that requeued it (the normal retry transition is
     // the right one; forcing terminal here would refund a job that was about to
     // be retried).
-    await failJob(job.id, msg, { terminal: isPermanentProviderError(msg) });
+    await failJob(job.id, msg, { terminal: isPermanentProviderError(msg), worker: workerId });
     // Whatever this attempt stored that the job no longer names comes back out,
     // whether the checkpoint write was refused (lib/queue.ts's JOB_ABANDONED) or
     // a competing attempt delivered its own batch and overwrote the column. See
@@ -309,7 +311,7 @@ export async function processVideoJob(job: {
 }, workerId: string): Promise<boolean> {
   const modelInfo = getModel(job.model);
   if (!modelInfo) {
-    await failJob(job.id, `unknown-model:${job.model}`, { terminal: true });
+    await failJob(job.id, `unknown-model:${job.model}`, { terminal: true, worker: workerId });
     return true;
   }
 
@@ -353,7 +355,7 @@ export async function processVideoJob(job: {
     const budgetNow = (await dbNow(prisma)).getTime();
     if (budgetNow - new Date(budgetFrom).getTime() > VIDEO_HARD_TIMEOUT_MS) {
       const msg = "video-timeout: task exceeded 30 minutes";
-      await failJob(job.id, msg, { terminal: true });
+      await failJob(job.id, msg, { terminal: true, worker: workerId });
       console.error(
         `[worker ${workerId}] job ${job.id}: ${msg} (${job.providerTaskId ? "task" : "queue wait"} clock)`,
       );
@@ -389,7 +391,7 @@ export async function processVideoJob(job: {
         imageBase64,
         extendVideoUrl,
       });
-      const recorded = await setJobPolling(job.id, result.taskId);
+      const recorded = await setJobPolling(job.id, result.taskId, workerId);
       if (!recorded) {
         // The job was no longer claimable while we were creating the upstream
         // task, so nothing will ever poll it: the provider was billed for work
@@ -504,9 +506,9 @@ export async function processVideoJob(job: {
       console.log(`[worker ${workerId}] job ${job.id} done (video: ${videoKey})`);
     } else if (status.status === "succeeded") {
       // Succeeded but no URL — nothing to deliver; refund rather than poll forever.
-      await failJob(job.id, "video generation succeeded without a video URL", { terminal: true });
+      await failJob(job.id, "video generation succeeded without a video URL", { terminal: true, worker: workerId });
     } else if (status.status === "failed") {
-      await failJob(job.id, `video generation failed: ${status.error ?? "unknown"}`, { terminal: true });
+      await failJob(job.id, `video generation failed: ${status.error ?? "unknown"}`, { terminal: true, worker: workerId });
       console.error(`[worker ${workerId}] job ${job.id} video failed: ${status.error}`);
     } else {
       // Still pending/running (or a transient poll error) — re-arm the next poll.
@@ -520,7 +522,7 @@ export async function processVideoJob(job: {
     // (failJob then early-returns — it is already failed and refunded) and a
     // retry reap that requeued it (the normal retry transition is the right one;
     // forcing terminal here would refund a job that was about to be retried).
-    await failJob(job.id, msg, { terminal: isPermanentProviderError(msg) });
+    await failJob(job.id, msg, { terminal: isPermanentProviderError(msg), worker: workerId });
     if (storedKey) {
       // The object this attempt stored is removed only if the job does not name
       // it: a refused checkpoint, and equally a competing attempt that delivered
@@ -546,7 +548,7 @@ async function tick(workerId: string): Promise<boolean> {
   // fail terminally + refund instead of burning a provider call.
   const modelInfo = getModel(job.model);
   if (modelInfo && !modelInfo.enabled) {
-    await failJob(job.id, `model-disabled:${job.model}`, { terminal: true });
+    await failJob(job.id, `model-disabled:${job.model}`, { terminal: true, worker: workerId });
     console.warn(`[worker ${workerId}] job ${job.id}: model ${job.model} is disabled — refunded`);
     return true;
   }
@@ -558,7 +560,20 @@ async function tick(workerId: string): Promise<boolean> {
 }
 
 async function main() {
-  const workerId = `worker-${process.pid}`;
+  // Unique per BOOT, not per process-tree slot. `worker-${process.pid}` looked
+  // unique and is not: every replica in `--scale worker=3` (the documented
+  // deployment, docs/server-setup.md) gets its own pid NAMESPACE, so the node
+  // process lands on the same pid in all three and the ids collide — probed
+  // with the shipped worker image, 12 boots produced only worker-29 (×4) and
+  // worker-30 (×8). Pigeonhole: three replicas always share at least two ids.
+  // The id is the ONLY thing the pass-31/34 fencing compares (heartbeat,
+  // extendPollLease, schedulePoll, failJob, setJobPolling), so for the pair
+  // that collides the fencing is void — a stalled replica's zombie writes were
+  // accepted against its peer's fresh claim. Pid reuse on a long-lived host has
+  // the same effect. Hostname disambiguates replicas (it is the container id
+  // under compose/k8s) and the random suffix rules out a recycled pid re-using
+  // a dead worker's id; the prefix keeps the log lines readable.
+  const workerId = `worker-${hostname()}-${process.pid}-${randomUUID().slice(0, 8)}`;
   // Fail closed at BOOT, not per job: when an audit is requested but cannot be
   // configured at all (IMAGE_MODERATION set and no vision config resolvable),
   // every image job would be generated, billed to the provider, then thrown

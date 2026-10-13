@@ -62,6 +62,9 @@ export async function addCreditsTx(
   refType?: string | null,
   refId?: string | null,
   note?: string | null,
+  // Who caused the movement when that is not the row's user (see
+  // LedgerEntry.actorId): the operator behind an ADJUST grant or clawback.
+  actorId?: string | null,
 ) {
   // Atomic DB-side increment. A read-modify-write here loses updates whenever
   // a grant (checkin/webhook/refund) races a concurrent spend that doesn't
@@ -83,7 +86,7 @@ export async function addCreditsTx(
   const balanceAfter = user.credits;
   if (balanceAfter < 0) throw new Error("insufficient-credits");
   return tx.ledgerEntry.create({
-    data: { userId, type, creditsDelta: delta, balanceAfter, refType, refId, note },
+    data: { userId, type, creditsDelta: delta, balanceAfter, refType, refId, note, actorId },
   });
 }
 
@@ -333,6 +336,15 @@ export async function cycleUsageTx(
   // read the swept remainder as untouched, unspent quota: the next purchase
   // paid out 30% carryover on a cycle the merchant was never paid for, every
   // cycle. Read the funding order's status instead, which is the durable fact.
+  //
+  // Pass 36 added the other taker to this scan: an operator's clawback of the
+  // cycle's quota (adminClawbackTx) writes its own row with the credited
+  // order's refType/refId, so it is counted here like a refund revocation —
+  // before that, clawed-back quota was invisible to the measurement and its
+  // 30% was re-granted at the next renewal (probed). The refType and
+  // negative-delta legs keep this scoped to takes: a positive ADMIN grant can
+  // never be subtracted from the cycle's quota, and free/admin grants have no
+  // order ref at all.
   let revoked = 0;
   const fundingOrder = funding?.refId
     ? await tx.order.findUnique({ where: { id: funding.refId }, select: { status: true } })
@@ -341,7 +353,13 @@ export async function cycleUsageTx(
     revoked = granted;
   } else if (cycleOrderIds.size) {
     const revokedRows = await tx.ledgerEntry.findMany({
-      where: { userId, type: "REVOKE", refId: { in: [...cycleOrderIds] } },
+      where: {
+        userId,
+        type: { in: ["REVOKE", "ADMIN"] },
+        refType: "order",
+        creditsDelta: { lt: 0 },
+        refId: { in: [...cycleOrderIds] },
+      },
       select: { creditsDelta: true },
     });
     for (const e of revokedRows) revoked += Math.abs(e.creditsDelta);
@@ -1008,33 +1026,48 @@ export async function fulfillOrder(
         // measure the same cycle again and pay its 30% twice — each time for a
         // real payment, so it is a bounded over-delivery rather than a mint,
         // but the carryover is a property of the cycle, not of the purchase.
-        // The witness is the ROLLOVER grant already stamped with that cycle's
-        // funding order: the same provenance the refund clawback depends on.
         //
-        // Two witness keys, because the refId one cannot see a LEGACY grant.
-        // The migration that added refType/refId (20260811080000) backfilled
-        // nothing, so an account whose newest ended SUBSCRIPTION row predates
-        // it has fundingRefId === null here — the old `if (usage.fundingRefId)`
-        // guard skipped the witness entirely and every further renewal before a
-        // later cycle ended paid the same cycle's 30% again (probed: 600 + 600
-        // from one 2000-credit cycle, each stamped with its own incoming order,
-        // so neither is reachable by the other's refund clawback). The second
-        // key is the cycle itself: a carryover for cycle C can only be minted
-        // at or after C's end (the gate above requires it), and a LATER cycle's
-        // carryover can never have been minted before that later cycle ended —
-        // so `createdAt >= C.expiresAt` names exactly "a carryover already paid
-        // for C". createdAt is the DB default now(), compared against the
-        // DB-stored expiry: both sides of this comparison are the database's.
-        if (rollover > 0 && (usage.fundingRefId || usage.fundingExpiresAt)) {
+        // WHICH key names the measured cycle depends on which clock ended it
+        // (pass 36), and using the wrong one is what made the witness delete a
+        // cycle's carryover instead of protecting it. The keys:
+        //
+        //  - Grant clock (`fundingExpiresAt <= now`, the ordinary path): the
+        //    cycle's identity IS the time bound — a carryover for cycle C can
+        //    only be minted at or after C's end (the gate above requires it),
+        //    and a LATER cycle's carryover can never have been minted before
+        //    that later cycle ended, so `createdAt >= C.expiresAt` names
+        //    exactly "a carryover already paid for C". Both sides of the
+        //    comparison are the database's: createdAt is the column default
+        //    now(), the expiry is the stored grant deadline.
+        //
+        //    The refId key must NOT be OR'd in here. It names the cycle's
+        //    funding ORDER, and the rollover stamp can point at an order that
+        //    did not fund the measured cycle: a LEGACY grant (the
+        //    20260811080000 migration backfilled nothing, so refId is null)
+        //    stamps its carryover with the INCOMING order — the one funding
+        //    the cycle AFTER it — so the next renewal measured cycle 1, found
+        //    its own incoming order on cycle L's carryover, and read that as
+        //    "cycle 1 was already paid for", silently deleting cycle 1's 30%
+        //    (probed: legacy cycle → 600 minted for the legacy month, then
+        //    ZERO for the first funded month; the following cycle pays again).
+        //    The time bound cannot make that mistake: cycle L's carryover was
+        //    minted AT L's end, strictly before cycle 1's end.
+        //
+        //  - Plan clock only (the fallback: an operator correction, or a test
+        //    rewinding planRenewsAt, with the grant still unexpired): there is
+        //    no ended-by-expiry cycle to time-bound, so the refId key is used
+        //    as before. This is the shape the previous version relied on for
+        //    its legacy coverage; it is kept only where it is the ONLY
+        //    available identity.
+        const cycleEndedByGrantClock = usage.fundingExpiresAt !== null && usage.fundingExpiresAt <= now;
+        const witness = cycleEndedByGrantClock
+          ? [{ createdAt: { gte: usage.fundingExpiresAt as Date } }]
+          : usage.fundingRefId
+            ? [{ refId: usage.fundingRefId }]
+            : [];
+        if (rollover > 0 && witness.length) {
           const alreadyPaid = await client.creditGrant.count({
-            where: {
-              userId,
-              source: "ROLLOVER",
-              OR: [
-                ...(usage.fundingRefId ? [{ refId: usage.fundingRefId }] : []),
-                ...(usage.fundingExpiresAt ? [{ createdAt: { gte: usage.fundingExpiresAt } }] : []),
-              ],
-            },
+            where: { userId, source: "ROLLOVER", OR: witness },
           });
           if (alreadyPaid > 0) rollover = 0;
         }
@@ -1260,9 +1293,18 @@ export async function adminClawbackTx(
   // nothing; the test moves into the loop, where it only decides whether there
   // is anything to take.
   const rows = await tx.$queryRaw<
-    Array<{ id: string; remaining: number; amount: number; source: string; expiresAt: Date | null; createdAt: Date }>
+    Array<{
+      id: string;
+      remaining: number;
+      amount: number;
+      source: string;
+      expiresAt: Date | null;
+      createdAt: Date;
+      refType: string | null;
+      refId: string | null;
+    }>
   >(
-    Prisma.sql`SELECT id, remaining, amount, source, "expiresAt", "createdAt" FROM "CreditGrant"
+    Prisma.sql`SELECT id, remaining, amount, source, "expiresAt", "createdAt", "refType", "refId" FROM "CreditGrant"
       WHERE "userId" = ${userId}
       ${GRANT_LOCK_ORDER}
       FOR UPDATE`,
@@ -1277,6 +1319,17 @@ export async function adminClawbackTx(
     return a.createdAt.getTime() - b.createdAt.getTime();
   });
   let needed = amount;
+  // Which order's credits the clawback took, so the ledger row can say it
+  // (pass 36). Before this, every clawback wrote ONE anonymous row — refType
+  // "admin", refId the operator — and cycleUsageTx's revoked scan (REVOKE rows
+  // naming the cycle's funding order) could not see it: the plan quota was gone
+  // from the account but the measurement still counted it as UNUSED, so the
+  // next renewal paid 30% carryover on credits an operator had already taken
+  // back (probed: identical 600 carryover with and without a full clawback of
+  // the cycle's quota). The operator's own attribution moves to
+  // LedgerEntry.actorId, which is the only slot that can hold both facts.
+  const byOrder = new Map<string, number>();
+  let unattributed = 0;
   for (const r of takeOrder) {
     if (needed <= 0) break;
     // Same legacy-row repair as spendCreditsTx: a row above its own amount
@@ -1299,8 +1352,25 @@ export async function adminClawbackTx(
       where: { id: r.id },
       data: { remaining: { decrement: take } },
     });
+    if (take > 0) {
+      if (r.refType === "order" && r.refId) byOrder.set(r.refId, (byOrder.get(r.refId) ?? 0) + take);
+      else unattributed += take;
+    }
     needed -= take;
   }
   if (needed > 0) throw new Error("insufficient-credits");
-  await addCreditsTx(tx, userId, "ADMIN", -amount, "admin", adminId, note);
+  // One row per attribution group: the credited order for what came out of
+  // order-backed grants, and the anonymous operator row for free/admin grants
+  // (the FIRST class taken, so a compensating grant or signup bonus is
+  // consumed before any purchased credit). The deltas sum to -amount, so the
+  // invariant and the balance walk are unchanged; what changes is that
+  // cycleUsageTx can now see a clawback of the plan quota. Note the ≤ 2 rows
+  // are deliberate: an operator's action stays ONE ledger story (same note,
+  // same actorId), not one row per grant.
+  for (const [orderRef, taken] of byOrder) {
+    await addCreditsTx(tx, userId, "ADMIN", -taken, "order", orderRef, note, adminId);
+  }
+  if (unattributed > 0) {
+    await addCreditsTx(tx, userId, "ADMIN", -unattributed, "admin", adminId, note, adminId);
+  }
 }

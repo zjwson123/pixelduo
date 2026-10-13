@@ -43,7 +43,8 @@ function sweep(now: number) {
 }
 
 // The bucket a request is charged to. A VERIFIED session is keyed by its
-// account id AND the session's own cookie; everything else by source IP.
+// account id AND the session's revocation version; everything else by source
+// IP.
 //
 // The IP alone made this limiter a denial-of-service tool against itself: the
 // bucket is spent before any credential is looked at, so a credential-less
@@ -56,53 +57,46 @@ function sweep(now: number) {
 //
 // The COOKIE half is pass 31's correction. Keying on the account id alone made
 // one stale cookie a permanent, IP-independent denial of the owner's own
-// traffic: this layer cannot see sessionVersion (it is a database concept; the
-// token's signature is all it can check), so a cookie the owner already revoked
-// — by resetting the password or revoking sessions, the very remediation the
-// product recommends — kept being charged to `u:<victim>:api`, 300/min from any
-// address, and the refusal happens BEFORE any route runs. The owner's live
-// browser shares that key, so their own workbench, gallery and 2FA login all
-// answered 429 while the attacker kept spending. Hashing the raw cookie into
-// the key bounds each cookie to its own budget: a flood can no longer spend the
-// budget of a session it does not hold.
+// traffic: a cookie the owner already revoked — by resetting the password or
+// revoking sessions, the very remediation the product recommends — kept being
+// charged to `u:<victim>:api`, 300/min from any address, and the refusal
+// happens BEFORE any route runs. The owner's live browser shares that key, so
+// their own workbench, gallery and 2FA login all answered 429 while the
+// attacker kept spending. Separating the stale cookie from the live one restores
+// the owner's budget.
 //
-// A cookie-keyed bucket alone, though, is only as stable as the cookie — and
-// the cookie is renewable for free (pass 32): `/api/auth/session` re-encodes
-// whatever token it decoded (next-auth v4's session route runs jwt.encode on
-// every call, and this app's session callback returns the session it is asked
-// about), so a session holder can mint a fresh cookie value, and with it a
-// fresh bucket, at the cost of ONE request per window — the throttle becomes
-// 40 requests plus one rotation instead of 40. For /api/* the damage is
-// bounded: every authenticated route carries its own account-keyed Redis
-// limiter (topping out at 600/min), which binds long before a rotated bucket
-// could do harm, and what is lost is this backstop's margin, not the only cap.
-// The bcrypt brake in front of /api/auth/* had no such second line, so AUTH
-// PATHS ALWAYS CHARGE THE SOURCE-ADDRESS BUCKET TOO — and anonymous callers
-// already did (with no cookie, the address IS their bucket), so this changes
-// nothing for them and revokes the rotation escape for everyone else. The
-// price is the residual spelled out below, now extended to cookie holders.
+// That separation used to be the hash of the raw cookie — and a cookie-keyed
+// bucket is only as stable as the cookie, while the cookie is renewable for
+// free: `/api/auth/session` re-encodes whatever token it decoded (next-auth
+// v4's session route runs jwt.encode on every call), so one rotation request
+// minted a fresh bucket. Pass 32 judged that bounded "for /api/*" because
+// every authenticated route carries its own account-keyed Redis limiter — but
+// the page shells have no route limiter (this layer is their ONLY ceiling) and
+// a credential the guards REFUSE never reaches a route limiter either, so one
+// rotation every 1.5s turned the page ceiling into 40×120/min per IP and left
+// revoked/2FA-pending cookies costing a JWT decrypt plus a sessionVersion read
+// with no account-keyed bound at all (probed).
+//
+// The fix is the key pass 31 could not use and did not need to invent: the
+// token ALREADY carries the revocation version (`sv`, stamped by lib/auth.ts
+// at mint time), and it is exactly what distinguishes a stale cookie from the
+// live one — so keying on `u:<id>:<sv>` needs no database here, survives
+// next-auth's re-encode (both claims are inside the payload and are preserved
+// verbatim), and cannot be rotated away. Ownership of the live bucket is
+// unchanged from pass 31: only a request holding a cookie that VERIFIES with
+// the current sv can spend `u:<id>:<current sv>`.
 //
 // Keying by account is safe here because the id is only used when the JWT
-// VERIFIES (an unverified cookie is attacker-chosen, so hashing it as given
-// would hand out a fresh bucket per request), and the hash is of the VERIFIED
-// cookie — so this can only GIVE protection to requests that carry a real one;
-// it never takes it away from anonymous callers.
+// VERIFIES — an unverified cookie is attacker-chosen, and falls back to the
+// address bucket — so this can only GIVE protection to requests that carry a
+// real credential; it never takes it away from anonymous callers.
 //
 // What it does not fix: the pre-login routes run on the IP bucket, and they
 // have to (there is no credential yet to key on), so a hostile egress can still
-// deny the LOGIN flow — and now the /api/auth/* reads a signed-in neighbour
+// deny the LOGIN flow — and the /api/auth/* reads a signed-in neighbour
 // makes — for the whole IP. Bounding that would mean removing the limiter in
 // front of password verification, which is the bcrypt-amplification brake — a
 // worse trade. Residual, documented.
-async function sessionTag(raw: string): Promise<string> {
-  // Web Crypto, not node:crypto: this module is the edge middleware. 8 bytes is
-  // plenty — the tag only has to separate one cookie from another.
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(raw));
-  let tag = "";
-  for (const b of new Uint8Array(digest).subarray(0, 8)) tag += b.toString(16).padStart(2, "0");
-  return tag;
-}
-
 async function bucketFor(req: NextRequest, ip: string): Promise<string> {
   const secret = process.env.NEXTAUTH_SECRET;
   if (!secret) return `ip:${ip}`;
@@ -118,7 +112,11 @@ async function bucketFor(req: NextRequest, ip: string): Promise<string> {
     // (salt ""), and it returns null on a token that does not verify.
     const payload = await decode({ token: raw, secret });
     const id = payload?.uid ?? payload?.sub;
-    return typeof id === "string" && id ? `u:${id}:${await sessionTag(raw)}` : `ip:${ip}`;
+    if (typeof id !== "string" || !id) return `ip:${ip}`;
+    // A token whose sv is not a number is one no current version mints; "na"
+    // keeps it in a bucket of its own rather than the live session's.
+    const sv = typeof payload?.sv === "number" ? String(payload.sv) : "na";
+    return `u:${id}:${sv}`;
   } catch {
     return `ip:${ip}`;
   }
@@ -160,16 +158,15 @@ export async function proxy(req: NextRequest) {
   // raise MIDDLEWARE_API_LIMIT if a real workload needs the headroom rather
   // than assuming a route's own number binds.
   //
-  // Since pass 32 the per-cookie half of that key is only as stable as the
-  // cookie, and a cookie can be re-minted for free (see the rotation note
-  // above) — so for /api/* the value this layer adds is shape and anonymity,
-  // while the BINDING ceiling for an authenticated session is the per-route
-  // account-keyed limiter in lib/api.ts. That is accepted rather than fixed
-  // with an account-keyed bucket here, because this layer cannot see
-  // sessionVersion: an account key is exactly what let one revoked cookie deny
-  // its owner (pass 31). Auth paths take the other trade — there the brake
-  // matters more than a neighbour's session reads, so they carry the address
-  // key too.
+  // Since pass 36 the credential half of that key is `u:<id>:<sv>` (see
+  // bucketFor): stable across the free re-mints of /api/auth/session, and
+  // split from a revoked cookie's bucket by the version itself — so for a
+  // verified session this IS an account-keyed ceiling, the same one pass 31's
+  // victim-denial objected to only because a STALE cookie could spend it. The
+  // per-route account limiters in lib/api.ts remain the route-level ones; this
+  // layer is the only one in front of the page shells. Auth paths take the
+  // other trade — there the brake matters more than a neighbour's session
+  // reads, so they carry the address key too.
   const authLimit = envLimit(process.env.MIDDLEWARE_AUTH_LIMIT, 40);
   const apiLimit = envLimit(process.env.MIDDLEWARE_API_LIMIT, 300);
   // Its own knob and its own bucket suffix, so an SSR page flood cannot spend

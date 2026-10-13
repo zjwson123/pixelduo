@@ -109,6 +109,15 @@ model LedgerEntry {
   refType      String? // job | order | none
   refId        String?
   note         String?
+  // Who caused this row, when that is not the row's user (an operator's
+  // clawback). Null for every user-initiated movement. It exists
+  // because the clawback needs BOTH attributions at once (pass 36): the row's
+  // refType/refId must name the ORDER the taken credits came from, so
+  // cycleUsageTx's revoked scan can tell a clawed-back plan quota from a
+  // clawed-back credit pack, while the operator who took them is a separate
+  // fact the ledger is the only record of. Before this column one of the two
+  // had to be dropped.
+  actorId      String?
   createdAt    DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -246,6 +255,20 @@ model Order {
   // own amount here and promotes to a full revoke once the total reaches
   // amountUsd. Existing rows read 0, the correct starting value.
   refundedAmountUsd Float    @default(0)
+  // Which provider adjustments have already been counted, as
+  // `<adjustmentId>:approved` / `<adjustmentId>:reversed` markers (pass 36).
+  // The accumulation above is per DELIVERY, and the only dedupe was
+  // PaymentEvent.eventId — which a provider can change while re-sending the
+  // same adjustment (at-least-once delivery, a payout update re-emitting an
+  // approved adjustment): two signed deliveries of ONE $25 partial then summed
+  // to $50 against a $49.99 order and promoted a partial refund to a full
+  // revoke (probed end to end through the route). Markers are kind-suffixed
+  // because Paddle delivers the reversal of an adjustment as a SECOND
+  // delivery for the same adjustment id (status `reversed`, a negative delta —
+  // pass 33), which must still apply exactly once. Stripe needs none of this:
+  // it reports `amount_refunded` cumulatively on the charge, so its deliveries
+  // carry no per-delivery delta and never touch the accumulator.
+  refundedAdjustments String[] @default([])
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 

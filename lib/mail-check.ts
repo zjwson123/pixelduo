@@ -41,11 +41,25 @@ export interface DeliveryCheck {
 // Deliberately no "first N characters" prefix — 2-4 characters of a credential
 // is still credential material.
 
-// What a bot token looks like in a path: Feishu's is a 36-character uuid, and
-// nothing shorter than this is a credential on any provider this app supports.
-// The colon is in the class for Telegram, whose path segment is
-// `bot<bot-id>:<secret>` — one segment, two credential halves.
-const PATH_TOKEN = /^[A-Za-z0-9._~:-]{16,}$/;
+// Which path segments may be echoed: the endpoint WORDS an operator reads to
+// spot a misconfiguration ("…/hook" vs "…/send" vs "…/sendMessage"), never
+// anything that could be the credential itself. This is an allowlist because
+// the shape test that used to stand here failed OPEN (pass 36): it masked a
+// segment only when the DECODED form matched `/^[A-Za-z0-9._~:-]{16,}$/`, and
+// every credential with a character outside that class slipped through
+// unmasked — `…/hook/6d5f2c1a%zz9e3b4c7d8f10aa11bb22cc33` (decodeURIComponent
+// throws, the raw segment contains `%`) and `…/hook/abc%2Fdef0123456789abcdef0`
+// (decodes to a `/`) both printed the live Feishu/Telegram token in full, into
+// exactly the terminal/CI log/ticket the masking exists for (probed). An
+// unknown segment now masks instead of echoing, so a provider this list does
+// not know costs a length hint, not a credential.
+const SAFE_SEGMENTS = new Set([
+  "hook", "hooks", "webhook", "webhooks", "open-apis",
+  "send", "sendmessage", "messages", "message",
+  "incoming", "services", "robot", "notify", "notification", "cgi-bin",
+  "callback", "callbacks", "events", "event", "push", "api", "v1", "v2", "v3",
+  "bot", "smtp", "mail",
+]);
 
 export function maskSecretUrl(url: string | null | undefined): string {
   if (!url) return "(unset)";
@@ -71,16 +85,18 @@ export function maskSecretUrl(url: string | null | undefined): string {
     ? `${secret(decoded(parsed.username) + (parsed.password ? `:${decoded(parsed.password)}` : ""))}@`
     : "";
   const segments = parsed.pathname.split("/");
-  // EVERY token-shaped segment, not just the last one. Feishu's bot URL ends in
-  // a 36-character uuid, but a trailing slash — the standard copy-paste artefact,
-  // and invisible when you paste a URL — left that last segment EMPTY, so the
-  // real token one segment earlier was echoed in full by
-  // scripts/verify-webhook.ts into a terminal, a CI log or a ticket. A token in
-  // a non-final position (a Telegram-style /bot<token>/sendMessage) was never
-  // considered at all. "…/hook" and "…/send" are not token-shaped, so the
-  // endpoint shape an operator uses to spot a misconfiguration survives.
+  // EVERY segment but the allowlisted endpoint words, not just the last one.
+  // Feishu's bot URL ends in a 36-character uuid, but a trailing slash — the
+  // standard copy-paste artefact, and invisible when you paste a URL — left
+  // that last segment EMPTY, so the real token one segment earlier was echoed
+  // in full by scripts/verify-webhook.ts into a terminal, a CI log or a ticket;
+  // a token in a non-final position (a Telegram-style
+  // /bot<token>/sendMessage) was not considered at all. Both stay masked now,
+  // and so does anything else this list does not positively recognize.
   for (let i = 1; i < segments.length; i++) {
-    if (PATH_TOKEN.test(decoded(segments[i]))) segments[i] = secret(decoded(segments[i]));
+    const segment = segments[i];
+    if (!segment) continue; // trailing/duplicate slashes stay visible
+    if (!SAFE_SEGMENTS.has(segment.toLowerCase())) segments[i] = secret(decoded(segment));
   }
   const query = [...new Set(parsed.searchParams.keys())]
     .map((key) => `${key}=${secret(decoded(parsed.searchParams.get(key) ?? ""))}`)

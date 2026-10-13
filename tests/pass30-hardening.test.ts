@@ -292,7 +292,34 @@ describe("pass 30 — recoverStuckJobs carries its observation into the CAS", ()
     // What a concurrent sweep READ, before the peer's pass committed.
     const observed = { status: job.status, heartbeatAt: job.heartbeatAt, startedAt: job.startedAt };
 
-    expect(await recoverStuckJobs(1, 1)).toBeGreaterThanOrEqual(1);
+    // The sweep's batch is GLOBAL (ORDER BY id LIMIT 20) and the other suites
+    // run in parallel against this database, holding their own running/polling
+    // rows — with cutoffs of 1ms they all qualify, and enough of them push this
+    // test's row past the LIMIT (observed: the sweep reaped other files' rows
+    // and left this one untouched, so `attempts` stayed 1). Park them, as
+    // tests/queue-video.test.ts does, and restore them after.
+    const parked = await prisma.job.findMany({
+      where: { status: { in: ["running", "polling"] }, id: { not: job.id } },
+      select: { id: true, heartbeatAt: true, startedAt: true },
+    });
+    const future = new Date(Date.now() + 3_600_000);
+    if (parked.length) {
+      await prisma.job.updateMany({
+        where: { id: { in: parked.map((p) => p.id) } },
+        data: { heartbeatAt: future, startedAt: future },
+      });
+    }
+    let swept = 0;
+    try {
+      swept = await recoverStuckJobs(1, 1);
+    } finally {
+      for (const p of parked) {
+        await prisma.job
+          .updateMany({ where: { id: p.id }, data: { heartbeatAt: p.heartbeatAt, startedAt: p.startedAt } })
+          .catch(() => undefined);
+      }
+    }
+    expect(swept).toBeGreaterThanOrEqual(1);
     const afterSweep = await prisma.job.findUniqueOrThrow({ where: { id: job.id } });
     expect(afterSweep.status).toBe("queued");
     expect(afterSweep.attempts).toBe(2);

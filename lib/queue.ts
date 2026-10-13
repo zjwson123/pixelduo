@@ -343,12 +343,45 @@ function sameInstant(a: Date | null, b: Date | null): boolean {
   return a.getTime() === b.getTime();
 }
 
+// `worker` is the failing worker's own id, and it fences the TWO compare-and-
+// sets below exactly like heartbeat/extendPollLease/schedulePoll (passes 31/34)
+// already fence theirs. The status CAS alone is not enough for a
+// worker-initiated failure: a worker that stalled past its lease, whose row was
+// legitimately re-claimed by a peer, that then wakes and fails the attempt it
+// was running, still matched the fresh status and requeued a job it does not
+// hold — the peer's lease survived but the row flipped to `queued`, so the
+// peer's next extendPollLease (polling-only) silently stopped moving it and a
+// THIRD worker claimed the job inside the lease: the duplicate download/ffmpeg
+// class passes 31/34 exist to prevent, plus a burned attempt and — on the last
+// attempt — a refund for a job the holder was about to deliver (probed). The
+// recovery sweep passes no worker id on purpose: it OBSERVES the row (`expect`)
+// rather than holding it, and its shape is the sweep's alone.
 export async function failJob(
   jobId: string,
   error: string,
-  opts?: { terminal?: boolean; expect?: JobObservation },
+  opts?: { terminal?: boolean; expect?: JobObservation; worker?: string },
 ) {
-  return prisma.$transaction(async (tx) => {
+  // Objects a terminal transition orphans are reclaimed AFTER the transaction
+  // commits, never inside it.
+  //
+  // The deletes used to run inside the interactive transaction, between the
+  // status flip and the commit: the S3 driver gives every request up to 30s,
+  // there can be five objects to reclaim (a ref upload plus four checkpointed
+  // images), and Prisma's interactive-transaction budget is 5000 ms. A merely
+  // SLOW bucket — a throttled MinIO, a busy endpoint — aborted the
+  // transaction (P2028) and rolled back the whole terminal transition with it:
+  // the job stayed `running`, the pre-auth stayed held at remaining = 0, the
+  // inflight slot stayed occupied, and the recovery sweep that found the row
+  // again on its next tick reproduced the identical rollback for as long as
+  // the bucket stayed degraded (probed: 3s/delete → 6.0s > 5000 ms →
+  // status=running, balance unchanged). The refund is the money and the status
+  // flip is its atomic witness; the deletes are best-effort cleanup of objects
+  // nothing can name anymore (they already ran with `.catch()`). Neither may
+  // be able to veto the other, so the transaction keeps the money and the
+  // cleanup follows it. A crash between the two leaks objects, which is the
+  // state the pre-pass-14 code was in permanently.
+  const reclaim: string[] = [];
+  await prisma.$transaction(async (tx) => {
     const job = await tx.job.findUnique({ where: { id: jobId } });
     if (!job || job.status === "failed" || job.status === "done") return;
     if (opts?.expect) {
@@ -383,7 +416,7 @@ export async function failJob(
       // for what an app-clock backoff does under skew.
       const nowMs = (await dbNow(tx)).getTime();
       await tx.job.updateMany({
-        where: { id: jobId, status: job.status },
+        where: { id: jobId, status: job.status, ...(opts?.worker ? { worker: opts.worker } : {}) },
         data: {
           status: "queued",
           attempts: nextAttempts,
@@ -399,7 +432,7 @@ export async function failJob(
     // status: two concurrent recovery sweeps (or a sweep racing a completion)
     // must not both pass — the refund would run twice, or run after delivery.
     const claim = await tx.job.updateMany({
-      where: { id: jobId, status: job.status },
+      where: { id: jobId, status: job.status, ...(opts?.worker ? { worker: opts.worker } : {}) },
       data: {
         status: "failed",
         attempts: nextAttempts,
@@ -422,9 +455,7 @@ export async function failJob(
       // The ref image outlived its job — retries are over, so nothing can
       // read it anymore. Without this, terminally-failed edit jobs leak the
       // upload permanently (credit-neutral loops could fill storage).
-      if (job.refImageKey) {
-        await getStorage().delete(job.refImageKey).catch(() => undefined);
-      }
+      if (job.refImageKey) reclaim.push(job.refImageKey);
       // Same for the images the attempt already persisted and checkpointed in
       // Job.images. A job that stored 3 of 4 images and then failed for good is
       // refunded in full, and those objects used to stay in the bucket forever,
@@ -432,11 +463,11 @@ export async function failJob(
       // and completeJob — the only other writer of Job.images — never runs.
       // The retry branch above deliberately keeps the checkpoint so the next
       // attempt can resume instead of re-billing the whole batch.
-      for (const key of checkpointKeys(job.images)) {
-        await getStorage().delete(key).catch(() => undefined);
-      }
+      reclaim.push(...checkpointKeys(job.images));
     }
   });
+  // After commit, so a slow bucket cannot roll the transition back (see above).
+  for (const key of reclaim) await getStorage().delete(key).catch(() => undefined);
 }
 
 // Storage keys in a Job.images checkpoint. While a job is in flight the column
@@ -625,9 +656,23 @@ export async function recoverStuckJobs(maxAgeMs = 180_000, pollMaxAgeMs = 600_00
      ORDER BY id
      LIMIT 20`);
   for (const job of stuck) {
-    await failJob(job.id, "stuck-timeout: worker heartbeat expired", {
-      expect: { status: job.status, heartbeatAt: job.heartbeatAt, startedAt: job.startedAt },
-    });
+    // One row must not be able to abort the sweep, and the batch is
+    // re-selected `ORDER BY id` on every tick — so a row whose failJob throws
+    // (a database error, a lock timeout, a transaction budget blown by a slow
+    // dependency) was retried FIRST forever while every later stuck job was
+    // never reaped: those customers kept both their held pre-auth and an
+    // inflight slot, and the accounts at the 5-job cap kept 500ing. This is
+    // the same per-item shape runExpiry got in passes 19/20 (per-user catch +
+    // keyset pagination), and the reclaim pass 36 moved out of failJob's
+    // transaction removes the most likely thrower — but the guard is what
+    // makes the sweep a sweep. The failure is reported, not swallowed.
+    try {
+      await failJob(job.id, "stuck-timeout: worker heartbeat expired", {
+        expect: { status: job.status, heartbeatAt: job.heartbeatAt, startedAt: job.startedAt },
+      });
+    } catch (e) {
+      captureError(e, { scope: "recover-stuck", jobId: job.id, status: job.status });
+    }
   }
   return stuck.length;
 }
@@ -715,7 +760,17 @@ export async function completeJob(jobId: string, images: JobImage[]) {
 // silently. (Note a reaped job is NOT this case: recoverStuckJobs re-queues it,
 // which the CAS below still matches, so its task id is recorded normally and
 // the next claim polls the existing task instead of creating a second one.)
-export async function setJobPolling(jobId: string, providerTaskId: string): Promise<boolean> {
+//
+// Fenced on the holder like schedulePoll/extendPollLease (pass 36). A zombie
+// that stalled in phase 1, whose row a peer legitimately re-claimed, used to
+// match this CAS while the row was still 'running' — and the write it makes is
+// not bookkeeping: it plants ITS providerTaskId, resets the budget clock
+// (taskCreatedAt) and rewinds the lease. The peer's own setJobPolling then
+// answered false (status is 'polling'), so the row named the zombie's orphan
+// task forever: two upstream video tasks were created and billed for one job,
+// and the peer's was uncollectable (probed: W1's late write accepted with
+// worker=W2 on the row, W2's write rejected).
+export async function setJobPolling(jobId: string, providerTaskId: string, worker: string): Promise<boolean> {
   // All three timestamps on the DATABASE's clock, which is also where
   // scripts/worker.ts's 30-minute budget reads them (dbNow in the video lane):
   // the polling lane has no worker affinity — claimNextJob's lane 2 is claimed
@@ -729,7 +784,7 @@ export async function setJobPolling(jobId: string, providerTaskId: string): Prom
        SET status = 'polling', "providerTaskId" = ${providerTaskId},
            "taskCreatedAt" = now(), "heartbeatAt" = now(),
            "nextAttemptAt" = now() + make_interval(secs => ${POLL_INTERVAL_MS / 1000})
-     WHERE id = ${jobId} AND status IN ('running', 'queued')`);
+     WHERE id = ${jobId} AND worker = ${worker} AND status IN ('running', 'queued')`);
   return claim === 1;
 }
 

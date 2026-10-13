@@ -205,9 +205,12 @@ describe("the video cap cannot be spent on an upstream task that is never polled
       prompt: "a slow pan over a lake",
       durationSec: 5,
     });
+    // worker too: failJob is fenced on the holder (pass 36), and a claimed row
+    // always carries one — the test's own "p19-worker" is what processVideoJob
+    // is handed below.
     await prisma.job.update({
       where: { id: job.id },
-      data: { createdAt: new Date(Date.now() - ageMinutes * 60_000), status: "running" },
+      data: { createdAt: new Date(Date.now() - ageMinutes * 60_000), status: "running", worker: "p19-worker" },
     });
     return job.id;
   }

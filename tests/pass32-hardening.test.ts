@@ -131,35 +131,57 @@ describe("pass 32 — rotating the cookie no longer refreshes the auth brake", (
   it("a fresh cookie value on a spent address is refused, and the refusal charges nothing", async () => {
     const { proxy } = await import("../proxy");
     const user = await makeUser("proxy");
+    // A live session at version 1 and a revoked one at 0: a fresh account's
+    // sessionVersion is 0, so `sv - 1` would have been the SAME version and the
+    // "revoked" cookie would have shared the live bucket.
+    const liveSv = (
+      await prisma.user.update({
+        where: { id: user.id },
+        data: { sessionVersion: { increment: 1 } },
+        select: { sessionVersion: true },
+      })
+    ).sessionVersion;
     // Three encodings of the same account's token — the SDK re-mints the value
     // (fresh IV, iat, jti, exp) on every /api/auth/session call, which is the
     // rotation the old bucket key could not survive.
-    const c1 = await encode({ token: { uid: user.id, sv: user.sessionVersion }, secret: SECRET });
-    const c2 = await encode({ token: { uid: user.id, sv: user.sessionVersion }, secret: SECRET });
-    const c3 = await encode({ token: { uid: user.id, sv: user.sessionVersion }, secret: SECRET });
+    const c1 = await encode({ token: { uid: user.id, sv: liveSv }, secret: SECRET });
+    const c2 = await encode({ token: { uid: user.id, sv: liveSv }, secret: SECRET });
+    const c3 = await encode({ token: { uid: user.id, sv: liveSv }, secret: SECRET });
+    // A REVOKED cookie: same account, older sessionVersion. It must not spend
+    // the live version's bucket (pass 31), and the live bucket's exhaustion
+    // must not touch it — the shape "the refusal charges nothing" still has
+    // after pass 36's key change.
+    const cRevoked = await encode({ token: { uid: user.id, sv: liveSv - 1 }, secret: SECRET });
     const ipX = "203.0.113.201";
     const ipY = "203.0.113.202";
     const auth1 = `next-auth.session-token=${c1}`;
     const auth2 = `next-auth.session-token=${c2}`;
     const auth3 = `next-auth.session-token=${c3}`;
+    const authRevoked = `next-auth.session-token=${cRevoked}`;
 
     expect((await proxy(reqFor("/api/auth/session", ipX, auth1))).status).toBe(200);
     expect((await proxy(reqFor("/api/auth/session", ipX, auth1))).status).toBe(200);
     expect((await proxy(reqFor("/api/auth/session", ipX, auth1))).status).toBe(429);
-    // Pre-fix this was 200: c2's own hash was a fresh bucket, so the holder
-    // rotated out of the brake at one request per window. Now the address leg
-    // binds — /api/auth/* is always charged to the source address, exactly as
-    // it already was for callers with no cookie.
+    // Pre-pass-36 this was 200: c2's own ciphertext hash was a fresh bucket and
+    // only the address leg bound. The key is `u:<id>:<sv>` now, which the SDK's
+    // free re-mint does not change, so rotation no longer buys anything on the
+    // credential leg either.
     expect((await proxy(reqFor("/api/auth/session", ipX, auth2))).status).toBe(429);
-    // ...and the refusal above charged nothing: c2's own bucket is untouched,
-    // so the same credential from another address still works. (If refused
-    // requests incremented the other bucket, an exhausted credential would be
-    // a way to exhaust a neighbour's budget.)
-    expect((await proxy(reqFor("/api/auth/session", ipY, auth2))).status).toBe(200);
-    expect((await proxy(reqFor("/api/auth/session", ipY, auth2))).status).toBe(200);
+    // It binds ACROSS addresses too: for a verified session the auth bucket is
+    // an account-keyed ceiling, not a per-address one (same account, same
+    // version, another source → still refused).
     expect((await proxy(reqFor("/api/auth/session", ipY, auth2))).status).toBe(429);
-    // Control: /api/* is unchanged — a spent address bucket does not touch the
-    // per-cookie ceiling on ordinary API traffic (pass 31's property).
+    // ...and none of those refusals charged the REVOKED version's bucket (its
+    // key is `u:<id>:<sv-1>`): it gets its own full allowance from ipY. If a
+    // refused request incremented the other bucket, an exhausted credential
+    // would be a way to exhaust a neighbour's — or its own predecessor's —
+    // budget.
+    expect((await proxy(reqFor("/api/auth/session", ipY, authRevoked))).status).toBe(200);
+    expect((await proxy(reqFor("/api/auth/session", ipY, authRevoked))).status).toBe(200);
+    expect((await proxy(reqFor("/api/auth/session", ipY, authRevoked))).status).toBe(429);
+    // Control: /api/* keeps its own bucket (pass 31's property — the live
+    // cookie's ceiling is charged, and a stale one cannot spend it), and an
+    // ordinary API request is not charged to the auth bucket.
     expect((await proxy(reqFor("/api/me", ipX, auth3))).status).toBe(200);
     expect((await proxy(reqFor("/api/me", ipX, auth3))).status).toBe(200);
   }, 30_000);

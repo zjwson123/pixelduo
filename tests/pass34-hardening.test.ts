@@ -405,7 +405,7 @@ describe("pass 34 — schedulePoll and heartbeat are conditioned on the holding 
     // past its lease, and W2 claims the POLL slot (lane 2 needs 'polling';
     // nextAttemptAt forced into the past stands in for the expiry).
     const { setJobPolling } = await import("../lib/queue");
-    await setJobPolling(job.id, "task-p34-lease");
+    await setJobPolling(job.id, "task-p34-lease", "w1");
     await prisma.job.update({ where: { id: job.id }, data: { nextAttemptAt: new Date(Date.now() - 1000) } });
     parked = await parkOthers(job.id);
     const second = await claimNextJob("w2");

@@ -177,9 +177,13 @@ export class PaddleProvider implements PaymentProvider {
       }
       if (parsed.event_type === "adjustment.created" || parsed.event_type === "adjustment.updated") {
         // status is the whole decision: `pending_approval` (a live refund before
-        // approval) and `rejected` are ignored, and the same approved adjustment
-        // delivered twice converges — the webhook route's eventId dedupe plus
-        // its paid→refunded CAS make the repeat a no-op.
+        // approval) and `rejected` are ignored. The same approved adjustment
+        // delivered twice must converge, and the PaymentEvent.eventId dedupe
+        // alone does NOT guarantee that — eventId is a notification id, and a
+        // re-notification of the same adjustment carries a new one (pass 36).
+        // The route keys the accumulator on the adjustment id below instead
+        // (adjustmentId + direction), which is what makes a repeat a real no-op
+        // rather than a second counted refund.
         if (data.action !== "refund" && data.action !== "chargeback") return IGNORED_WEBHOOK;
         // Adjustments can be partial (a $1 goodwill refund on a $49.99 pack):
         // a partial one must not wipe the whole balance or consume the "paid"
@@ -202,6 +206,14 @@ export class PaddleProvider implements PaymentProvider {
         const totals = data.totals as { total?: string | number } | undefined;
         const totalNum = totals?.total !== undefined ? Number(totals.total) : NaN;
         const amountUsd = Number.isFinite(totalNum) ? totalNum / 100 : undefined;
+        // The adjustment's own id: the webhook route's dedupe key for a
+        // re-delivered approval or reversal (pass 36) — eventId is a
+        // NOTIFICATION id and a provider may change it while re-sending the
+        // same adjustment, which made the per-delivery accumulator count one
+        // $25 partial twice (probed: $50 against a $49.99 order, promoted to a
+        // full revoke). Undefined when the payload carries none: the route then
+        // falls back to counting the delivery once, as before.
+        const adjustmentId = typeof data.id === "string" ? data.id : undefined;
         const providerOrderId =
           typeof data.transaction_id === "string" ? data.transaction_id
           : typeof data.transactionId === "string" ? data.transactionId
@@ -229,6 +241,10 @@ export class PaddleProvider implements PaymentProvider {
             type: "refunded",
             fullRefund: false,
             refundAmountUsd: amountUsd === undefined ? undefined : -amountUsd,
+            // The same adjustment id whose approval this reverses: the
+            // direction is part of the route's dedupe key, so the reversal
+            // still applies exactly once (pass 36).
+            refundAdjustmentId: adjustmentId,
             providerOrderId,
             raw: parsed,
           };
@@ -240,6 +256,7 @@ export class PaddleProvider implements PaymentProvider {
           type: "refunded",
           fullRefund: typeof data.type === "string" ? data.type !== "partial" : undefined,
           refundAmountUsd: amountUsd,
+          refundAdjustmentId: adjustmentId,
           providerOrderId,
           raw: parsed,
         };

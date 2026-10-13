@@ -495,11 +495,37 @@ describe("orphaned artifacts (pass 16)", () => {
     });
     // Claim until a POLLING job comes back (a queued leftover from another file
     // would otherwise be claimed first), then read the lease the claim wrote.
+    //
+    // "Another file" is the problem this loop kept losing to: claimNextJob is
+    // global, the shared test database accumulates the other suites' queued
+    // rows AND leftovers from earlier runs, and each call returns ONE of them —
+    // once six were in the way the loop was exhausted before reaching this
+    // test's own job (observed: six claims, all `running`, none of them this
+    // row). Park them first and restore them after, exactly as
+    // tests/queue-video.test.ts does.
+    const parked = await prisma.job.findMany({
+      where: { status: { in: ["queued", "polling"] }, id: { not: job.id } },
+      select: { id: true, nextAttemptAt: true },
+    });
+    if (parked.length) {
+      await prisma.job.updateMany({
+        where: { id: { in: parked.map((o) => o.id) } },
+        data: { nextAttemptAt: new Date(Date.now() + 3600_000) },
+      });
+    }
     let leaseMs: number | null = null;
-    for (let i = 0; i < 6 && leaseMs === null; i++) {
-      const claimed = await claimNextJob("p16-worker");
-      if (!claimed) break;
-      if (claimed.status === "polling") leaseMs = claimed.nextAttemptAt!.getTime() - Date.now();
+    try {
+      for (let i = 0; i < 6 && leaseMs === null; i++) {
+        const claimed = await claimNextJob("p16-worker");
+        if (!claimed) break;
+        if (claimed.status === "polling") leaseMs = claimed.nextAttemptAt!.getTime() - Date.now();
+      }
+    } finally {
+      for (const o of parked) {
+        await prisma.job
+          .updateMany({ where: { id: o.id }, data: { nextAttemptAt: o.nextAttemptAt } })
+          .catch(() => undefined);
+      }
     }
     expect(leaseMs).not.toBeNull();
     // Phase 2 (100MB download under a 120s deadline, then a 180s ffmpeg concat)

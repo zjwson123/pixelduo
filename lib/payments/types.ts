@@ -32,6 +32,16 @@ export interface PaymentWebhookEvent {
   // scopes its full/partial flag to each adjustment, so two partials that
   // return the whole price both read `partial`).
   refundAmountUsd?: number;
+  // For "refunded": the provider's id for the adjustment/refund this delivery
+  // describes, when it has one (Paddle's adjustment `data.id`). Two deliveries
+  // of the SAME adjustment can carry different notification ids — that is
+  // at-least-once delivery, not a duplicate PaymentEvent — so the route counts
+  // each (adjustment, direction) pair once instead of trusting eventId alone
+  // (pass 36: two signed deliveries of one $25 partial summed to $50 against a
+  // $49.99 order and promoted a partial refund to a full revoke, probed). The
+  // direction matters because Paddle reports an adjustment's REVERSAL as a
+  // second delivery under the same adjustment id.
+  refundAdjustmentId?: string;
   // For "paid": what the provider actually collected, and in which currency.
   // The route refuses fulfillment when this is BELOW the named order's price.
   // A signature proves the event is really from the provider, not that it is

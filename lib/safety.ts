@@ -2,7 +2,7 @@ import sharp from "sharp";
 import { getStorage } from "./storage";
 import { getVisionConfig } from "./keys";
 import { MAX_INPUT_PIXELS, isRasterImage } from "./watermark";
-import { sniffContentType } from "./media-type";
+import { sniffContentType, type MediaKind } from "./media-type";
 import { hostIsPublic, isPublicPort, readJsonCapped, ssrfPinnedAgent, outboundTimeoutMs } from "./store";
 import { fetch as pinnedFetch } from "undici";
 
@@ -31,7 +31,20 @@ const BLOCKED: Array<{ re: RegExp; reason: string }> = [
 // before anything else, on a class chosen to be lossless: every character here
 // is invisible (or, for the soft hyphen, invisible-unless-broken), the provider
 // renders the stripped form anyway, and no rule can depend on one.
-const FORMAT_CONTROLS = /[\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u2064\u206a-\u206f\ufeff]/g;
+//
+// Pass 34 wrote that class as an ENUMERATION of the characters it had thought
+// of, and the enumeration was the bug one pass later: U+061C ARABIC LETTER
+// MARK, U+180E MONGOLIAN VOWEL SEPARATOR, U+E0001/U+E0020–E007F TAGS,
+// U+FFF9–FFFB INTERLINEAR ANNOTATION and friends are all Cf (or invisible
+// Mn/Mn-adjacent) and all walked `nud\u180ee` past `\bnude\b` with the rules
+// unchanged (probed). The class is now the PROPERTY (`\p{Cf}`, all of it) plus
+// the invisible non-Cf ranges: variation selectors (U+FE00–FE0F and the
+// U+E0100–E01EF supplement), the interlinear annotations, and the tag
+// characters' two spellings. Everything visible stays: NNBSP, ideographic
+// space, combining marks (U+0301) and non-Latin scripts are NOT stripped —
+// pinned by a test — because the class only has to remove what nothing can
+// legitimately depend on and no reader can see.
+const FORMAT_CONTROLS = /[\p{Cf}\u{FE00}-\u{FE0F}\u{E0100}-\u{E01EF}\u{FFF9}-\u{FFFB}]/gu;
 
 export function stripFormatControls(text: string): string {
   return text.replace(FORMAT_CONTROLS, "");
@@ -222,6 +235,20 @@ const MODERATION_MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const MODERATION_DOWNSCALE_ABOVE_BYTES = 1024 * 1024;
 const MODERATION_EDGE = 1024;
 
+// The subtype the audit announces for `sniffed` bytes — null when the sniffer
+// did not recognize them as one of the three raster formats this pipeline can
+// legitimately receive. It is a separate function because the previous inline
+// fallback (`sniffed === jpeg ? "jpeg" : sniffed === webp ? "webp" : "png")
+// declared `image/png` for EVERYTHING else, including null: an SVG or HTML
+// payload handed to the moderator as a PNG (pass 36). A null here means
+// "unauditable", never "png".
+export function auditPayloadExt(sniffed: MediaKind | null): "jpeg" | "webp" | "png" | null {
+  if (sniffed === "image/jpeg") return "jpeg";
+  if (sniffed === "image/webp") return "webp";
+  if (sniffed === "image/png") return "png";
+  return null;
+}
+
 // Shrink an oversized output so it can still be audited. Skipping anything past
 // the audit budget was a DETERMINISTIC moderation bypass: the encoded size is
 // chosen by the provider, not by us, so a fine-detail prompt at
@@ -231,8 +258,7 @@ const MODERATION_EDGE = 1024;
 // Exported so a test can pin the refusal directly (the end-to-end audit path
 // fails closed for several independent reasons, which makes it a poor witness
 // for this one).
-export async function shrinkForAudit(buf: Buffer): Promise<Buffer> {
-  // Raster-only, and for the same reason lib/watermark.ts's bake refuses SVG:
+export async function shrinkForAudit(buf: Buffer): Promise<Buffer> {  // Raster-only, and for the same reason lib/watermark.ts's bake refuses SVG:
   // `limitInputPixels` bounds DECODED pixels, not the XML parser that an SVG
   // payload reaches first. The bytes are provider-controlled (this is the
   // audit path for generated output), and the bake path has enforced this
@@ -362,7 +388,21 @@ export async function analyzeImage(url: string): Promise<ImageAudit> {
       // undeliverable for no reason. Sniff instead: the bytes are already here,
       // and lib/media-type.ts is the module that owns this question.
       const sniffed = sniffContentType(payload);
-      let ext = sniffed === "image/jpeg" ? "jpeg" : sniffed === "image/webp" ? "webp" : "png";
+      // The raster-only guard runs HERE, before the size branch (pass 36). It
+      // used to live only inside shrinkForAudit, i.e. only above the 1 MiB
+      // downscale threshold, and the `ext` fallback declared `image/png` for
+      // ANYTHING the sniffer did not recognize — an SVG, an HTML page, a GIF, a
+      // small `video/mp4`: the bytes reached the moderation gateway under a
+      // MIME type the comment above says must describe the bytes actually sent,
+      // from a source (the provider) this pipeline exists to distrust, and the
+      // refusal the watermark bake has enforced since it was written did not
+      // apply below 1 MiB (probed: 160-byte SVG → isRasterImage false, declared
+      // type `image/png`). Same failure direction as an unauditable object:
+      // refuse the delivery rather than audit a fiction. The decision itself is
+      // auditPayloadExt, so the boundary is unit-testable without a gateway.
+      const ext = auditPayloadExt(sniffed);
+      if (ext === null || !isRasterImage(payload)) return { checked: false, unavailable: true };
+      let sendExt = ext;
       if (buf.length > MODERATION_DOWNSCALE_ABOVE_BYTES) {
         // Downscale rather than skip — see shrinkForAudit. If even that fails
         // (corrupt or unsupported object) we have nothing auditable, and an
@@ -370,13 +410,13 @@ export async function analyzeImage(url: string): Promise<ImageAudit> {
         // a refunded failure.
         try {
           payload = await shrinkForAudit(buf);
-          ext = "jpeg";
+          sendExt = "jpeg";
         } catch {
           return { checked: false, unavailable: true };
         }
       }
       if (payload.length > MODERATION_MAX_IMAGE_BYTES) return { checked: false, unavailable: true };
-      const dataUrl = `data:image/${ext};base64,${payload.toString("base64")}`;
+      const dataUrl = `data:image/${sendExt};base64,${payload.toString("base64")}`;
       return moderateWithVision(dataUrl);
     } catch {
       return { checked: false, unavailable: true };
