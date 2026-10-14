@@ -28,6 +28,26 @@ BACKUP_DIR="${BACKUP_DIR:-backups}"
 # runbooks are unchanged.
 KEEP="${KEEP:-${BACKUP_KEEP:-14}}"
 
+# A rotation must never delete the snapshot it just wrote, and `tail -n +N` with
+# N = KEEP + 1 = 1 prints EVERY line: KEEP=0 — the natural spelling of "no
+# retention", and what a whitespace-only value also collapses to — removed the
+# just-renamed dump together with the older ones and then printed the success
+# line, so the deployment kept ZERO backups while every log affirmed one
+# (probed in pass 37 through this rotation verbatim: 4 files in, 0 out, the
+# newest among the deletions). "Keep none" is not a meaningful policy for a
+# backup service, so a numeric 0 is clamped to 1 and the newest always
+# survives. A non-numeric value is refused rather than clamped: `$((KEEP + 1))`
+# already dies on a typo, and silently retuning a typo'd `BACKUP_KEEP=1O` to 1
+# would delete the thirteen dumps the operator meant to keep — the same class
+# pass 33 fixed in the other direction.
+case "$KEEP" in
+  ''|*[!0-9]*)
+    echo "KEEP/BACKUP_KEEP must be a non-negative integer (got '$KEEP')" >&2
+    exit 1
+    ;;
+esac
+[ "$KEEP" -ge 1 ] || KEEP=1
+
 # A container named `pixelduo-db` exists only in the DEV compose (it pins
 # container_name); the single-VPS stack leaves Compose to name it
 # `<project>-db-1`, so the manual dump the README and docs/deploy.md document

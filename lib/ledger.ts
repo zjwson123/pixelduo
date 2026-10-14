@@ -855,7 +855,13 @@ export interface CheckinResult {
 // UTC+8 users — which allowed two check-ins in one local day). en-CA yields
 // YYYY-MM-DD.
 const fmtCache = new Map<string, Intl.DateTimeFormat>();
-export function checkinDateKey(now = new Date()): string {
+// The instant is REQUIRED (pass 37): the default used to be `new Date()`, the
+// app clock, and it is the whole reason pass 35 exists — dailyCheckin now
+// passes the database's now(), and a future caller that drops the argument
+// would silently reintroduce "tomorrow's key tonight" (two keys for one
+// database day, so the unique index cannot see the double grant). The type
+// checker names every caller instead.
+export function checkinDateKey(now: Date): string {
   const tz = process.env.CHECKIN_TIMEZONE || "Asia/Shanghai";
   let fmt = fmtCache.get(tz);
   if (!fmt) {
@@ -950,6 +956,15 @@ export async function fulfillOrder(
         Prisma.sql`SELECT id FROM "Order" WHERE "userId" = ${userId} AND kind = 'plan' ORDER BY id FOR UPDATE`,
       );
     }
+    // The fulfillment's own instant, on the DATABASE's clock, taken once and
+    // reused below. `now()` is the transaction's start time and is stable
+    // inside it, so hoisting the read changes no comparison — while `paidAt`
+    // was the last app-clock write in this function (pass 37): a host skewed
+    // from the database stamped the order's payment earlier or later than the
+    // CreditGrant rows the same transaction created, so an operator
+    // reconciling "paid at" against the grant's createdAt could read a grant
+    // that predates its own payment — the visible shape of a mis-grant.
+    const fulfilledAt = await dbNow(client);
     // Atomic claim: only the first fulfillment of a pending order wins, so two
     // distinct signed events for the same order (or a retry racing the
     // original) can never both pass the status check and grant credits twice.
@@ -957,7 +972,7 @@ export async function fulfillOrder(
     // refund flips the order to "refunded".
     const claim = await client.order.updateMany({
       where: { id: orderId, status: "pending" },
-      data: { status: "paid", paidAt: new Date() },
+      data: { status: "paid", paidAt: fulfilledAt },
     });
     if (claim.count === 0) {
       const order = await client.order.findUnique({ where: { id: orderId }, select: { id: true } });
@@ -979,7 +994,8 @@ export async function fulfillOrder(
       // an early renewal EXTENDS the paid cycle or restarts it, when the carryover
       // gate opens, and the deadline of the grant this transaction is about to
       // mint — which spendCreditsTx and the sweep later compare against now().
-      const now = await dbNow(client);
+      // Already read above (paidAt); inside one transaction now() is one value.
+      const now = fulfilledAt;
       // Renewal extends from the current cycle end when bought early, otherwise
       // starts a fresh cycle from now.
       const base = user.planRenewsAt && user.planRenewsAt > now ? user.planRenewsAt : now;
@@ -1092,8 +1108,8 @@ export async function fulfillOrder(
       // was the last grant deadline still derived from the APP clock, so a
       // host-vs-database skew moved the whole validity window by the skew
       // (probed: 2h skew → 2h-shifted expiry). The plan branch above already
-      // derives `renew` from dbNow; this is its sibling.
-      const now = await dbNow(client);
+      // derives `renew` from dbNow; this is its sibling (same value: see above).
+      const now = fulfilledAt;
       const expiresAt = new Date(now.getTime() + PACK_VALIDITY_MS);
       await grantCreditsTx(client, userId, "PURCHASE", credits, expiresAt, "order", orderId, "credit pack");
     }

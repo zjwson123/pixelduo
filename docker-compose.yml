@@ -390,8 +390,15 @@ services:
         TMP=/backups/.pixelduo-$${STAMP}.partial;
         if pg_dump -Fc -d "$$PGDATABASE" -f $$TMP; then
           mv $$TMP /backups/pixelduo-$${STAMP}.dump.gz;
-          ls -1t /backups/pixelduo-*.dump.gz | tail -n +$$((BACKUP_KEEP + 1)) | xargs -r rm -f;
-          echo "[backup] $$STAMP written, keeping $${BACKUP_KEEP}";
+          # `BACKUP_KEEP > 0 ? … + 1 : 2` rather than the bare `+ 1` (pass 37):
+          # tail -n +1 prints EVERY line, so BACKUP_KEEP=0 — the natural spelling
+          # of "no retention", and what a whitespace-only value collapses to —
+          # deleted the dump renamed into place one line earlier and then printed
+          # "written, keeping 0": zero backups, every log affirming one (probed).
+          # A numeric 0 keeps the newest; a non-numeric value dies in the
+          # arithmetic, loudly, before anything is removed.
+          ls -1t /backups/pixelduo-*.dump.gz | tail -n +$$((BACKUP_KEEP > 0 ? BACKUP_KEEP + 1 : 2)) | xargs -r rm -f;
+          echo "[backup] $$STAMP written, keeping $$((BACKUP_KEEP > 0 ? BACKUP_KEEP : 1))";
         else
           rm -f $$TMP;
           echo "[backup] FAILED at $$STAMP — no dump written, rotation skipped (the previous dumps are untouched)" >&2;
@@ -450,8 +457,10 @@ services:
         STAMP=$$(date +%Y%m%d-%H%M%S);
         if mc alias set src $${BACKUP_S3_ENDPOINT} $${BACKUP_S3_ACCESS_KEY_ID} $${BACKUP_S3_SECRET_ACCESS_KEY} >/dev/null 2>&1 && mc mirror --overwrite --remove src/$${BACKUP_S3_BUCKET} /backups/objects/.$${STAMP}.partial; then
           mv /backups/objects/.$${STAMP}.partial /backups/objects/$${STAMP};
-          ls -1t /backups/objects/ | tail -n +$$((BACKUP_KEEP + 1)) | while read -r f; do rm -rf /backups/objects/$$f; done;
-          echo "[backup-objects] $${STAMP} mirrored (keep $${BACKUP_KEEP})";
+          # Same clamp as the dump rotation above (pass 37): KEEP=0 must not
+          # delete the snapshot this run just renamed into place.
+          ls -1t /backups/objects/ | tail -n +$$((BACKUP_KEEP > 0 ? BACKUP_KEEP + 1 : 2)) | while read -r f; do rm -rf /backups/objects/$$f; done;
+          echo "[backup-objects] $${STAMP} mirrored (keep $$((BACKUP_KEEP > 0 ? BACKUP_KEEP : 1)))";
         else
           rm -rf /backups/objects/.$${STAMP}.partial;
           echo "[backup-objects] FAILED at $${STAMP} — no snapshot written, rotation skipped (the previous snapshots are untouched)" >&2;

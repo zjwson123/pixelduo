@@ -167,15 +167,17 @@ describe("a checkpoint write is a status CAS (pass 14)", () => {
       maxAttempts: 1,
     });
 
-    await prisma.job.update({ where: { id: job.id }, data: { status: "running" } });
-    await checkpointJobProgress(job.id, [{ key: "img/a.png", model: "gpt" }]);
+    // worker: both writers are fenced on the holder since pass 37 (the row a
+    // claim leaves behind carries the claimant's id).
+    await prisma.job.update({ where: { id: job.id }, data: { status: "running", worker: "p14-w1" } });
+    await checkpointJobProgress(job.id, [{ key: "img/a.png", model: "gpt" }], "p14-w1");
     const written = await prisma.job.findUniqueOrThrow({ where: { id: job.id } });
     expect(written.images).toContain("img/a.png");
 
     // Another worker's sweep terminally fails (and refunds) the job.
     await failJob(job.id, "stuck-timeout: worker heartbeat expired", { terminal: true });
     await expect(
-      checkpointJobProgress(job.id, [{ key: "img/late.png", model: "gpt" }]),
+      checkpointJobProgress(job.id, [{ key: "img/late.png", model: "gpt" }], "p14-w1"),
     ).rejects.toThrow(JOB_ABANDONED);
 
     const after = await prisma.job.findUniqueOrThrow({ where: { id: job.id } });
@@ -198,14 +200,14 @@ describe("a checkpoint write is a status CAS (pass 14)", () => {
       durationSec: 5,
       maxAttempts: 3,
     });
-    await prisma.job.update({ where: { id: job.id }, data: { status: "polling" } });
+    await prisma.job.update({ where: { id: job.id }, data: { status: "polling", worker: "p14-w2" } });
 
     // The shape the worker now writes as soon as the provider file is stored —
     // before it, a failed or retried delivery left the object in the bucket with
     // no Image row, no reference and no erasure path that could ever name it.
     const segmentKey = `img/p14-seg-${Date.now()}.mp4`;
     await storage.put(segmentKey, Buffer.from("not-really-mp4"));
-    await checkpointJobArtifact(job.id, null, segmentKey);
+    await checkpointJobArtifact(job.id, null, segmentKey, "p14-w2");
     expect((await prisma.job.findUniqueOrThrow({ where: { id: job.id } })).images).toContain(segmentKey);
 
     // Non-terminal failure → the checkpoint survives so the retry resumes from it.
@@ -231,14 +233,14 @@ describe("a checkpoint write is a status CAS (pass 14)", () => {
       prompt: "supersede",
       durationSec: 5,
     });
-    await prisma.job.update({ where: { id: job.id }, data: { status: "polling" } });
+    await prisma.job.update({ where: { id: job.id }, data: { status: "polling", worker: "p14-w3" } });
 
     const first = `img/p14-first-${Date.now()}.mp4`;
     const second = `img/p14-second-${Date.now()}.mp4`;
     await storage.put(first, Buffer.from("one"));
     await storage.put(second, Buffer.from("two"));
-    await checkpointJobArtifact(job.id, null, first);
-    await checkpointJobArtifact(job.id, first, second);
+    await checkpointJobArtifact(job.id, null, first, "p14-w3");
+    await checkpointJobArtifact(job.id, first, second, "p14-w3");
 
     expect(await storage.get(first)).toBeNull();
     expect(await storage.get(second)).not.toBeNull();

@@ -384,6 +384,25 @@ export async function failJob(
   await prisma.$transaction(async (tx) => {
     const job = await tx.job.findUnique({ where: { id: jobId } });
     if (!job || job.status === "failed" || job.status === "done") return;
+    // A holder failing its OWN attempt can only be holding a row that is
+    // running or polling — those are the two statuses a claim leaves behind.
+    // A row parked back to 'queued' is the recovery sweep's requeue, and the
+    // sweep's requeue KEEPS the holder's id (deliberately: pass 36 relies on a
+    // waking phase-1 zombie still being able to record the task it already had
+    // billed, via setJobPolling's 'queued' arm), so the `worker` fence below
+    // matches the zombie and this call would book the same physical attempt a
+    // second time: attempts 1 → 2 with a 60s backoff the sweep had just
+    // granted, and at the boundary nextAttempts >= maxAttempts routes the whole
+    // thing to the TERMINAL branch — the job failed and refunded while the
+    // retry the sweep minted never ran (probed: attempts=2 for one attempt, and
+    // the terminal variant refunded a job a retry would have delivered).
+    //
+    // Standing down is the honest answer: the row has already moved past this
+    // attempt, exactly like the `expect` observation and the worker fence, and
+    // the sweep — not the zombie — owns the retry decision. Callers that pass
+    // no worker (the sweep itself) are unaffected: observing a row rather than
+    // holding it is the sweep's own shape.
+    if (opts?.worker && job.status !== "running" && job.status !== "polling") return;
     if (opts?.expect) {
       const seen = opts.expect;
       const unchanged =
@@ -572,10 +591,22 @@ const IN_FLIGHT_STATUSES = ["running", "polling", "queued"] as const;
 // so the window is at least observable; failing the attempt instead would
 // trade this crash-window residue for aborting generation on any transient
 // statement error.
-export async function checkpointJobProgress(jobId: string, payload: unknown): Promise<void> {
+export async function checkpointJobProgress(jobId: string, payload: unknown, worker: string): Promise<void> {
+  // Same runtime requirement as completeJob: an omitted argument would be
+  // dropped from the `where` by Prisma and quietly un-fence this write.
+  if (!worker) throw new Error("checkpoint-without-holder: the writing worker's id is required");
   const res = await prisma.job
     .updateMany({
-      where: { id: jobId, status: { in: [...IN_FLIGHT_STATUSES] } },
+      // The holder is part of the CAS (pass 37), for the reason completeJob
+      // documents: a stalled attempt whose row a peer legitimately took over
+      // must not keep writing this column. Without it the zombie's write lands
+      // on the peer's attempt — it can put ITS superseded key back at the head
+      // of the checkpoint (the peer's file is then named by nothing on a
+      // terminal failure) or, worse, publish a key the peer has already
+      // reclaimed as an orphan. Same fence as heartbeat/extendPollLease/
+      // schedulePoll/setJobPolling/failJob/completeJob; a takeover always
+      // rewrites `worker`.
+      where: { id: jobId, status: { in: [...IN_FLIGHT_STATUSES] }, worker },
       data: { images: JSON.stringify(payload) },
     })
     .catch((e) => {
@@ -605,6 +636,7 @@ export async function checkpointJobArtifact(
   jobId: string,
   previous: string | null,
   key: string,
+  worker: string,
 ): Promise<void> {
   // Order matters, and it is the opposite of what this did: write the
   // checkpoint FIRST, retire the superseded object after. Deleting first meant
@@ -623,7 +655,12 @@ export async function checkpointJobArtifact(
   // reclaimStoredArtifact rather than delete() because "is this key still named
   // by anything?" is the durable question — a key that a committed Image row
   // points at must not be retired as superseded.
-  await checkpointJobProgress(jobId, [{ key }]);
+  //
+  // `worker` is the caller's own id and it reaches the guarded write (pass 37):
+  // an attempt whose row a peer has taken over must not checkpoint at all, so
+  // the loser cannot supersede the winner's artifact — the deletion below is the
+  // step that made a paid delivery unrecoverable before the fence existed.
+  await checkpointJobProgress(jobId, [{ key }], worker);
   if (previous && previous !== key) await reclaimStoredArtifact(jobId, previous);
 }
 
@@ -677,7 +714,13 @@ export async function recoverStuckJobs(maxAgeMs = 180_000, pollMaxAgeMs = 600_00
   return stuck.length;
 }
 
-export async function completeJob(jobId: string, images: JobImage[]) {
+export async function completeJob(jobId: string, images: JobImage[], worker: string) {
+  // Runtime guard, not just the type signature: Prisma DROPS an `undefined`
+  // field from a `where`, so a caller that omits this (tsx scripts, any future
+  // JavaScript) would silently get the unfenced CAS back — the exact shape the
+  // comment below refuses. Empty is refused too: `worker = ''` would match only
+  // a row that a claim never stamped.
+  if (!worker) throw new Error("complete-job-without-holder: the delivering worker's id is required");
   return prisma.$transaction(async (tx) => {
     const job = await tx.job.findUnique({ where: { id: jobId } });
     if (!job || (job.status !== "running" && job.status !== "polling")) throw new Error("job-not-runnable");
@@ -728,8 +771,34 @@ export async function completeJob(jobId: string, images: JobImage[]) {
     // CAS to "done" from the observed status: a concurrent failJob (e.g. a
     // recovery sweep reaping the same job) must not end up overwritten after
     // it already refunded — exactly one terminal transition delivers images.
+    //
+    // Fenced on the HOLDER (pass 37), like every other writer of this row. The
+    // status CAS alone was the last unfenced one, and the window it left is the
+    // exact harm checkpointJobArtifact's ordering comment was written to
+    // prevent — reached through the ordering that fix does not cover:
+    //
+    //   W1 holds the poll lease, downloads its clip to K1, checkpoints it, then
+    //   stalls (>6 min: a paused container, SIGSTOP, a stopped VM). Its 20s
+    //   heartbeat only refreshes heartbeatAt, never nextAttemptAt, so W2 claims
+    //   the poll as soon as the lease lapses and becomes the row's worker. W2
+    //   stores K2 and checkpointJobArtifact(K1 → K2) deletes K1 — the reclaim's
+    //   only ownership witness is an Image row, and none can exist yet for a
+    //   delivery that has not committed. W1 then wakes and completeJob accepts
+    //   (status is still 'running'/'polling', the CAS never looked at who held
+    //   it): the job is `done`, credits settled, and the delivered key has just
+    //   been deleted from storage. W2's own delivery is then refused, so
+    //   nothing retries and nothing repairs it (probed end to end: status=done,
+    //   images=["…K1"], the delivered object gone, the pre-auth settled).
+    //
+    // A takeover always rewrites `worker` (lane 1's claim, lane 2's poll claim),
+    // so matching it is what distinguishes "I still hold this attempt" from "I
+    // stalled and someone else does" — the same fence as heartbeat,
+    // extendPollLease, schedulePoll, setJobPolling and failJob. Required rather
+    // than optional on purpose: an omitted argument silently restoring this race
+    // is the shape this file's pass-25/31/34/36 comments keep warning about, and
+    // the type checker now names every call site instead.
     const claim = await tx.job.updateMany({
-      where: { id: jobId, status: job.status },
+      where: { id: jobId, status: job.status, worker },
       data: { status: "done", images: JSON.stringify(images.map((i) => i.url)), error: null, finishedAt: new Date() },
     });
     if (claim.count !== 1) throw new Error("job-not-runnable");

@@ -44,9 +44,19 @@ async function addGrant(source: string, remaining: number, expiresAt: Date) {
 }
 
 describe("credit expiry reminders", () => {
+  // Fixtures sit an hour INSIDE their bucket, not on its boundary (pass 37).
+  // They used to be "now + 2d" / "now + 7d" on the HOST clock while the sweep
+  // judges daysLeft against the DATABASE's now(), and daysLeft is Math.ceil'd:
+  // a database clock a few hundred ms behind the host (a legal state —
+  // vitest.setup.ts refuses only past 1000ms) promoted "7 days" to 8, and
+  // BUCKETS = [1,3,7] has no 8, so the mail was silently skipped and this file
+  // failed naming nothing (probed: same grant at +7d+200ms → mailed=0). An hour
+  // of margin makes the bucket what the test means, whatever the skew.
+  const inDays = (days: number) => new Date(Date.now() + days * 24 * 60 * 60 * 1000 - 60 * 60 * 1000);
+
   it("emails once per bucket and skips far-future grants", async () => {
-    await addGrant("PURCHASE", 400, new Date(Date.now() + 2 * 24 * 60 * 60 * 1000)); // bucket 3
-    await addGrant("SUBSCRIPTION", 200, new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)); // out of horizon
+    await addGrant("PURCHASE", 400, inDays(2)); // bucket 3
+    await addGrant("SUBSCRIPTION", 200, inDays(30)); // out of horizon
 
     await sweep();
     expect(mine()).toHaveLength(1);
@@ -62,7 +72,7 @@ describe("credit expiry reminders", () => {
   });
 
   it("sends a 7-day bucket for grants expiring in a week", async () => {
-    await addGrant("PURCHASE", 100, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
+    await addGrant("PURCHASE", 100, inDays(7));
     await sweep();
     expect(mine().at(-1)?.subject).toContain("expire in 7 days");
     const reminders = await prisma.creditReminder.findMany({ where: { userId } });

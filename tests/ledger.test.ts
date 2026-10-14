@@ -77,11 +77,17 @@ describe("credit ledger", () => {
       count: 1,
       prompt: "test icon",
     });
-    // claim then complete
-    const running = await prisma.job.update({ where: { id: job.id }, data: { status: "running" } });
-    await completeJob(running.id, [
-      { url: "/generated/x.png", model: "seedream", quality: "standard", credits: 6, prompt: "test icon" },
-    ]);
+    // claim then complete. The row must carry the claimant's id: completeJob's
+    // CAS is fenced on the holder (pass 37), and a claim is what sets it.
+    const running = await prisma.job.update({
+      where: { id: job.id },
+      data: { status: "running", worker: "t-ledger" },
+    });
+    await completeJob(
+      running.id,
+      [{ url: "/generated/x.png", model: "seedream", quality: "standard", credits: 6, prompt: "test icon" }],
+      "t-ledger",
+    );
     const after = (await prisma.user.findUniqueOrThrow({ where: { id: userId } })).credits;
     expect(after).toBe(before - 6);
     const images = await prisma.image.findMany({ where: { userId } });

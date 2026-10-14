@@ -285,9 +285,13 @@ describe("delivery refuses an order refunded mid-flight (pass 13)", () => {
     });
     await lockTaken;
 
-    const delivery = completeJob(job.id, [
-      { url: "p13/out.png", model: "gpt", quality: "medium", credits: 7, prompt: "lock" },
-    ]).then(
+    // "p13-worker" is the id claimNextJob stamped on the row above; the
+    // delivery CAS is fenced on it (pass 37).
+    const delivery = completeJob(
+      job.id,
+      [{ url: "p13/out.png", model: "gpt", quality: "medium", credits: 7, prompt: "lock" }],
+      "p13-worker",
+    ).then(
       () => "delivered",
       (e: Error) => `refused:${e.message}`,
     );

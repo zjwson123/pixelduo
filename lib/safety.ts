@@ -44,7 +44,27 @@ const BLOCKED: Array<{ re: RegExp; reason: string }> = [
 // space, combining marks (U+0301) and non-Latin scripts are NOT stripped —
 // pinned by a test — because the class only has to remove what nothing can
 // legitimately depend on and no reader can see.
-const FORMAT_CONTROLS = /[\p{Cf}\u{FE00}-\u{FE0F}\u{E0100}-\u{E01EF}\u{FFF9}-\u{FFFB}]/gu;
+// Pass 37 widened this twice more, both found by probing the class rather than
+// reading it:
+//
+//  - the property that means "renders as nothing" is NOT \p{Cf}. U+034F
+//    COMBINING GRAPHEME JOINER (Mn), U+115F/U+1160 HANGUL CHOSEONG FILLER
+//    (Lo), U+17B4/U+17B5, U+3164 HANGUL FILLER (Lo) and U+FFA0 HALFWIDTH
+//    HANGUL FILLER (Lo) are all DEFAULT-IGNORABLE and none of them is Cf, so
+//    `nud\u034FE` and `n\uFFA0ude` were neither stripped nor matched by
+//    \bnude\b — they render as "nude" to any reader and to the provider.
+//    \p{Default_Ignorable_Code_Point} is the class that actually means this
+//    (it also contains every tag character, U+E0000–E0FFF, and the variation
+//    selectors, which the enumerated ranges below keep because they are
+//    load-bearing documentation for the tests).
+//  - nothing normalized the text, so a mathematical-alphanumeric or fullwidth
+//    spelling (𝐧𝐮𝐝𝐞, ｎｕｄｅ) bypassed every rule while NFKC-folding to
+//    "nude"/"sex". checkPrompt now folds with NFKC BEFORE stripping — the fold
+//    can itself emit default-ignorable characters (U+FFA0 → U+1160), and
+//    stripping after it removes those in the same pass. The user's own prompt
+//    is never rewritten; only the copy the rules read is.
+const FORMAT_CONTROLS =
+  /[\p{Cf}\p{Default_Ignorable_Code_Point}\u{FE00}-\u{FE0F}\u{E0100}-\u{E01EF}\u{FFF9}-\u{FFFB}]/gu;
 
 export function stripFormatControls(text: string): string {
   return text.replace(FORMAT_CONTROLS, "");
@@ -79,8 +99,13 @@ export function checkPrompt(prompt: string): SafetyResult {
   // a Chinese-language rule expects apart, and the raw form is what a future
   // rule with its own punctuation handling will want). The RAW form is the
   // format-control-stripped one — `nudi\u200bty` only matches `\bnudity\b`
-  // after the strip (pass 34).
-  const stripped = stripFormatControls(prompt);
+  // after the strip (pass 34) — and the fold happens first (pass 37): NFKC turns
+  // the fullwidth, mathematical-alphanumeric and compatibility spellings of a
+  // blocked word into the word, and running the strip AFTER it also removes the
+  // default-ignorable characters the fold can emit (U+FFA0 HALFWIDTH HANGUL
+  // FILLER folds to U+1160 HANGUL CHOSEONG FILLER). The prompt itself is not
+  // rewritten — only this copy.
+  const stripped = stripFormatControls(prompt.normalize("NFKC"));
   const collapsed = collapseLetterSpacing(stripped);
   for (const rule of BLOCKED) {
     if (rule.re.test(stripped) || rule.re.test(collapsed)) {

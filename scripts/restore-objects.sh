@@ -37,6 +37,27 @@ SRC_SECRET="${BACKUP_S3_SECRET_ACCESS_KEY:?set BACKUP_S3_SECRET_ACCESS_KEY}"
 # note in docker-compose.yml. Override MC_IMAGE to bump it deliberately.
 MC_IMAGE="${MC_IMAGE:-minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727}"
 
+# The target must be a BARE bucket name before anything compares it.
+#
+# The loop below is whole-string equality, but `mc` parses its argument as
+# `alias/bucket/prefix`: "pixelduo/" IS the live bucket to mc and a different
+# string to `[ = ]`. A trailing slash — the standard copy-paste artefact of
+# half a URL, and the shape the pass-36 finding fixed elsewhere in this tree —
+# therefore walked past every arm and the drill mirrored WITH --remove into the
+# live bucket: every object uploaded after the snapshot deleted, and
+# "RESTORE DRILL PASSED" printed, because the restored count still matched the
+# snapshot (probed in pass 37 on a scratch bucket holding one post-snapshot
+# upload). The same applies to `<live>/<suffix>`. Only the bare-name form can
+# be compared, so anything else is refused outright rather than normalized —
+# the operator who typed the slash meant a bucket, and guessing which one is
+# the whole hazard.
+case "$SCRATCH_BUCKET" in
+  ""|*/*|*[!A-Za-z0-9._-]*)
+    echo "refusing '$SCRATCH_BUCKET': the target must be a bare bucket name (letters, digits, '.', '_', '-'), with no '/'. mc reads its argument as 'alias/bucket/prefix', so any slash aims somewhere this script cannot compare against the live-bucket list." >&2
+    exit 1
+    ;;
+esac
+
 # Anything that names real data. A drill into one of these destroys it and is
 # never what the operator meant — refuse rather than ask.
 #

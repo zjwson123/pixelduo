@@ -83,7 +83,9 @@ describe("video artifact supersession (pass 17)", () => {
     });
 
     // The guarded write must be refused (the job left the queue) ...
-    await expect(checkpointJobArtifact(job.id, delivered, losing)).rejects.toThrow(/left the queue/);
+    // The id only satisfies the fence: this write is refused by the older half
+    // of the CAS — the job left the queue (status done).
+    await expect(checkpointJobArtifact(job.id, delivered, losing, "p17-w")).rejects.toThrow(/left the queue/);
     // ... and the refused write must not have retired anything. Deleting the
     // superseded key BEFORE the write made this destroy the delivered file: the
     // job stayed `done` with an Image row pointing at an object that no longer
@@ -102,13 +104,13 @@ describe("video artifact supersession (pass 17)", () => {
       prompt: "supersede-normal",
       durationSec: 5,
     });
-    await prisma.job.update({ where: { id: job.id }, data: { status: "polling" } });
+    await prisma.job.update({ where: { id: job.id }, data: { status: "polling", worker: "p17-w" } });
     const first = `img/p17-first-${stamp}.mp4`;
     const second = `img/p17-second-${stamp}.mp4`;
     await storage.put(first, Buffer.from("one"));
     await storage.put(second, Buffer.from("two"));
-    await checkpointJobArtifact(job.id, null, first);
-    await checkpointJobArtifact(job.id, first, second);
+    await checkpointJobArtifact(job.id, null, first, "p17-w");
+    await checkpointJobArtifact(job.id, first, second, "p17-w");
     expect(await storage.get(first)).toBeNull();
     expect(await storage.get(second)).not.toBeNull();
   });

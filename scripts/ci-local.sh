@@ -142,13 +142,26 @@ docker run --rm --entrypoint sh pd-ci-web -c '
   test ! -e /app/prisma/seed.ts
   # Pass 34: the two glob expansions the prune list carries and no assertion
   # named. PRODUCT_OUTLINE.md is 33 KB of internal monetisation notes and is
-  # traced into .next/standalone (probed); only ./*.md removes it. .env.example
-  # is the one dotenv name the build context DOES carry (.dockerignore
-  # re-includes it), so unlike the three dotenv names below it can actually
-  # fail if the prune list loses .env .env.* — the other three are already
-  # excluded from the context and their test !s are true no matter what.
+  # traced into .next/standalone (probed); only ./*.md removes it.
+  #
+  # .env.example is deliberately NOT asserted here (pass 37). The pass-34 note
+  # claimed it was "the one dotenv name the build context DOES carry, so unlike
+  # the three below it can actually fail" — true of the CONTEXT, false of this
+  # STAGE: the web stage copies only .next/standalone, .next/static, public/ and
+  # prisma/, and the standalone writer in Next takes requiredServerFiles.files
+  # plus .env/.env.production only (no apostrophes anywhere in this block: it is
+  # one single-quoted shell string, and a stray quote ends it early — pass 33).
+  # It appears in ZERO trace manifests and cannot reach /app, so the assertion
+  # that used to sit on this line was true no matter what the prune list said
+  # (probed against the trace manifests this build wrote). The worker stage DOES
+  # carry it and still asserts it below. What replaces it are the names that are
+  # genuinely traced into standalone AND named by this prune — drop one from the
+  # prune list and the artifact ships it with the gate green:
   test ! -e /app/PRODUCT_OUTLINE.md
-  test ! -e /app/.env.example
+  test ! -e /app/instrumentation-client.ts
+  test ! -e /app/sentry.server.config.ts
+  test ! -e /app/sentry.edge.config.ts
+  test ! -e /app/vitest.setup.ts
   # ...while what actually RUNS is still there: the compiled chunks.
   test -e /app/server.js
   test -e /app/.next/server/instrumentation.js

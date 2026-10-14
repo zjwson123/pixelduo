@@ -354,8 +354,13 @@ services:
         TMP=/backups/.pixelduo-$${STAMP}.partial;
         if pg_dump -Fc -f $$TMP; then
           mv $$TMP /backups/pixelduo-$${STAMP}.dump.gz;
-          ls -1t /backups/pixelduo-*.dump.gz | tail -n +$$((BACKUP_KEEP + 1)) | xargs -r rm -f;
-          echo "[backup] $$STAMP written, keeping $${BACKUP_KEEP}";
+          # `BACKUP_KEEP > 0 ? … + 1 : 2`, not the bare `+ 1` (pass 37): tail -n
+          # +1 prints EVERY line, so BACKUP_KEEP=0 deleted the dump renamed into
+          # place one line earlier and still printed "written, keeping 0" — zero
+          # backups with every log affirming one. Same clamp as the full compose
+          # file and the two scripts under scripts/.
+          ls -1t /backups/pixelduo-*.dump.gz | tail -n +$$((BACKUP_KEEP > 0 ? BACKUP_KEEP + 1 : 2)) | xargs -r rm -f;
+          echo "[backup] $$STAMP written, keeping $$((BACKUP_KEEP > 0 ? BACKUP_KEEP : 1))";
         else
           rm -f $$TMP;
           echo "[backup] FAILED at $$STAMP — no dump written, rotation skipped (the previous dumps are untouched)" >&2;
@@ -403,8 +408,8 @@ services:
         STAMP=$$(date +%Y%m%d-%H%M%S);
         if mc alias set src http://storage:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD} >/dev/null 2>&1 && mc mirror --overwrite --remove src/pixelduo /backups/objects/.$${STAMP}.partial; then
           mv /backups/objects/.$${STAMP}.partial /backups/objects/$${STAMP};
-          ls -1t /backups/objects/ | tail -n +$$((BACKUP_KEEP + 1)) | while read -r f; do rm -rf /backups/objects/$$f; done;
-          echo "[backup-objects] $${STAMP} mirrored (keep $${BACKUP_KEEP})";
+          ls -1t /backups/objects/ | tail -n +$$((BACKUP_KEEP > 0 ? BACKUP_KEEP + 1 : 2)) | while read -r f; do rm -rf /backups/objects/$$f; done;
+          echo "[backup-objects] $${STAMP} mirrored (keep $$((BACKUP_KEEP > 0 ? BACKUP_KEEP : 1)))";
         else
           rm -rf /backups/objects/.$${STAMP}.partial;
           echo "[backup-objects] FAILED at $${STAMP} — no snapshot written, rotation skipped (the previous snapshots are untouched)" >&2;

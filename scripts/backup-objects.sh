@@ -40,6 +40,21 @@ TARGET_BUCKET="${BACKUP_TARGET_BUCKET:-}"
 # that passes it is unchanged.
 KEEP="${KEEP:-${BACKUP_KEEP_OBJECTS:-7}}"
 
+# Same clamp as scripts/backup.sh, for the same probed failure: `tail -n +N`
+# with N = KEEP + 1 = 1 prints every line, so KEEP=0 rotated away the snapshot
+# this run had just renamed into place and still reported success ("keeping 0"
+# after deleting all of them). A numeric 0 becomes 1 — the newest snapshot is
+# never the thing retention deletes — while a non-numeric value is refused
+# rather than clamped, so a typo cannot quietly retune a retention the operator
+# set high.
+case "$KEEP" in
+  ''|*[!0-9]*)
+    echo "KEEP/BACKUP_KEEP_OBJECTS must be a non-negative integer (got '$KEEP')" >&2
+    exit 1
+    ;;
+esac
+[ "$KEEP" -ge 1 ] || KEEP=1
+
 # Pinned by digest — the client both DR scripts depend on; see the
 # note in docker-compose.yml. Override MC_IMAGE to bump it deliberately.
 MC_IMAGE="${MC_IMAGE:-minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727}"

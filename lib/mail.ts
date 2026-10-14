@@ -180,6 +180,21 @@ function baseUrl(): string {
   return process.env.NEXTAUTH_URL ?? "http://localhost:3000";
 }
 
+// An absolute URL on THIS deployment. Every link a mail carries must go through
+// here (pass 37): five of the seven mail bodies hard-coded `https://pixelduo.ai`
+// — the vendor domain — while the two auth mails already built theirs from
+// NEXTAUTH_URL. On a self-hosted instance (the single-VPS compose pins
+// CADDY_DOMAIN/NEXTAUTH_URL to the operator's own origin) a receipt, an expiry
+// reminder and, worse, the "your password was changed, if this wasn't you…"
+// notice all sent the recipient to a site the operator does not own, and the
+// 2FA mails — the ones whose documented remedy is "reset your password" —
+// linked there too. Same rule as the auth mails: the origin the account signs in
+// at is the origin every mail points at, and there is one place that answers
+// which origin that is.
+function siteUrl(path: string): string {
+  return `${baseUrl().replace(/\/+$/, "")}${path}`;
+}
+
 // Global hourly ceiling on AUTHENTICATION mail (verification links and password
 // resets), shared by every address and every source.
 //
@@ -290,7 +305,7 @@ export async function sendVerificationEmail(to: string, rawToken: string): Promi
       "",
       "The link expires in 24 hours. If you didn't create this account, ignore this email and reset the password instead.",
     ].join("\n"),
-    verificationHtml(link),
+    verificationHtml(link, baseUrl()),
   );
 }
 
@@ -306,7 +321,7 @@ export async function sendResetPasswordEmail(to: string, rawToken: string): Prom
       "",
       "If you didn't request this, you can safely ignore this email.",
     ].join("\n"),
-    resetHtml(link),
+    resetHtml(link, baseUrl()),
   );
 }
 
@@ -320,9 +335,9 @@ export async function sendCreditExpiryEmail(to: string, daysLeft: number, credit
       "",
       "Use them before they're gone — or top up now to keep creating.",
       "",
-      `https://pixelduo.ai/studio`,
+      siteUrl("/studio"),
     ].join("\n"),
-    expiryHtml(daysLeft, credits),
+    expiryHtml(daysLeft, credits, baseUrl()),
   );
 }
 
@@ -344,9 +359,9 @@ export async function sendOrderReceiptEmail(
       "",
       "You can view your order history any time in the workbench.",
       "",
-      `https://pixelduo.ai/studio`,
+      siteUrl("/studio"),
     ].join("\n"),
-    receiptHtml(itemName, amountUsd, credits),
+    receiptHtml(itemName, amountUsd, credits, baseUrl()),
   );
 }
 
@@ -362,9 +377,9 @@ export async function sendRefundEmail(to: string, itemName: string, amountUsd: n
       "",
       "The refund may take a few business days to appear on your statement.",
       "",
-      `https://pixelduo.ai/studio`,
+      siteUrl("/studio"),
     ].join("\n"),
-    refundHtml(itemName, amountUsd),
+    refundHtml(itemName, amountUsd, baseUrl()),
   );
 }
 
@@ -407,7 +422,7 @@ export async function sendTwoFactorStateEmail(to: string, enabled: boolean): Pro
       enabled
         ? "Two-factor authentication was enabled on your PixelDuo account"
         : "Two-factor authentication was turned OFF on your PixelDuo account",
-      body.concat(["", `https://pixelduo.ai/login`]).join("\n"),
+      body.concat(["", siteUrl("/login")]).join("\n"),
     );
   } catch (e) {
     captureError(e, { mailTo: to, mailSubject: "2fa-state-change" });
@@ -443,7 +458,7 @@ export async function sendPasswordChangedEmail(to: string): Promise<void> {
     await getMailer().send(
       to,
       "Your PixelDuo password was changed",
-      body.concat(["", `https://pixelduo.ai/login`]).join("\n"),
+      body.concat(["", siteUrl("/login")]).join("\n"),
     );
   } catch (e) {
     captureError(e, { mailTo: to, mailSubject: "password-changed" });

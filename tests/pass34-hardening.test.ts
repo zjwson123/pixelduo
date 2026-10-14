@@ -676,9 +676,33 @@ describe("pass 34 — ops findings", () => {
     for (const f of [".github/workflows/ci.yml", "scripts/ci-local.sh"]) {
       const src = read(f);
       expect(src, f).toContain("test ! -e /app/PRODUCT_OUTLINE.md");
-      expect(src, f).toContain("test ! -e /app/.env.example");
       expect(src, f).toContain("test ! -e /app/docker-compose.single.yml");
       expect(src, f).toContain("test ! -e /app/docker-compose.prod.yml");
+      // `.env.example` is asserted by the WORKER stage only, and this test used
+      // to prove it by "the string occurs somewhere in the file" — which the
+      // worker block satisfies on its own. Pass 37 measured that the WEB
+      // assertion it was really about could not fail (`.env.example` appears in
+      // zero trace manifests and the web stage copies only
+      // .next/standalone|static, public/ and prisma/), replaced it with names
+      // that ARE traced, and pinned the split here so a future edit cannot put
+      // the assertion back on the vacuous side. Slices, not `toContain` on the
+      // whole file: each block ends with its own shape line.
+      const webEnd = src.indexOf("web image shape OK");
+      const workerEnd = src.indexOf("worker image shape OK");
+      expect(webEnd, f).toBeGreaterThan(0);
+      expect(workerEnd, f).toBeGreaterThan(webEnd);
+      const webBlock = src.slice(0, webEnd);
+      const workerBlock = src.slice(webEnd, workerEnd);
+      expect(webBlock, f).not.toContain("test ! -e /app/.env.example");
+      expect(workerBlock, f).toContain("test ! -e /app/.env.example");
+      for (const name of [
+        "instrumentation-client.ts",
+        "sentry.server.config.ts",
+        "sentry.edge.config.ts",
+        "vitest.setup.ts",
+      ]) {
+        expect(webBlock, `${f}: web gate must assert ${name}`).toContain(`test ! -e /app/${name}`);
+      }
     }
   });
 

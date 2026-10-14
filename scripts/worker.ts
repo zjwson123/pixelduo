@@ -128,7 +128,7 @@ export async function processImageJob(job: {
     const persistProgress = async (img: ProviderImage) => {
       saved.push(img);
       storedThisAttempt.push(img.key);
-      await checkpointJobProgress(job.id, saved);
+      await checkpointJobProgress(job.id, saved, workerId);
     };
 
     const generated =
@@ -174,7 +174,7 @@ export async function processImageJob(job: {
     // case where this attempt must take its own objects back out (see catch).
     if (uncheckpointed.length > 0) {
       for (const img of uncheckpointed) storedThisAttempt.push(img.key);
-      await checkpointJobProgress(job.id, images);
+      await checkpointJobProgress(job.id, images, workerId);
     }
 
     const rows = images.map((img) => ({
@@ -228,7 +228,7 @@ export async function processImageJob(job: {
     // means the job left the queue — completeJob's CAS is what decides delivery,
     // and re-baking on a later attempt is what this write exists to prevent, not
     // something it must be allowed to fail the job over.
-    if (bakedAny) await checkpointJobProgress(job.id, images).catch(() => undefined);
+    if (bakedAny) await checkpointJobProgress(job.id, images, workerId).catch(() => undefined);
 
     // Sequential, not Promise.all: each in-process audit holds the image
     // buffer plus its base64 encoding plus the JSON body at once.
@@ -265,7 +265,7 @@ export async function processImageJob(job: {
     } else {
       console.log(`[worker ${workerId}] job ${job.id}: safety audit passed (${audits.map((a) => a.provider).join(",")})`);
     }
-    await completeJob(job.id, rows);
+    await completeJob(job.id, rows, workerId);
     // The reference upload has served its purpose — remove it so user files
     // don't accumulate for the life of the account (they are also swept by
     // the account-deletion routes for any job that never reached here).
@@ -426,7 +426,7 @@ export async function processVideoJob(job: {
       const priorKey = checkpointKeys(job.images)[0] ?? null;
       const segmentKey = await saveRemoteVideo(status.videoUrl);
       storedKey = segmentKey;
-      await checkpointJobArtifact(job.id, priorKey, segmentKey);
+      await checkpointJobArtifact(job.id, priorKey, segmentKey, workerId);
       let videoKey = segmentKey;
       if (job.sourceVideoKey) {
         // Extend jobs deliver original + continuation as ONE clip. If the
@@ -462,7 +462,7 @@ export async function processVideoJob(job: {
             await getStorage().put(finalKey, merged, "video/mp4");
             videoKey = finalKey;
             storedKey = finalKey;
-            await checkpointJobArtifact(job.id, segmentKey, finalKey);
+            await checkpointJobArtifact(job.id, segmentKey, finalKey, workerId);
             console.log(`[worker ${workerId}] job ${job.id}: extended video assembled (${videoKey})`);
           } else {
             // A null result is a refusal, not just an ffmpeg failure: concatVideos
@@ -501,7 +501,7 @@ export async function processVideoJob(job: {
         credits: vc.credits,
         prompt: job.prompt,
       }];
-      await completeJob(job.id, rows);
+      await completeJob(job.id, rows, workerId);
       if (job.refImageKey) await getStorage().delete(job.refImageKey).catch(() => undefined);
       console.log(`[worker ${workerId}] job ${job.id} done (video: ${videoKey})`);
     } else if (status.status === "succeeded") {

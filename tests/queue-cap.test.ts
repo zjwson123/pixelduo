@@ -42,10 +42,15 @@ describe("per-user in-flight job cap", () => {
     await expect(mk("cap overflow")).rejects.toThrow(/queue-full/);
 
     // Terminal jobs free their slot: finish one, then submission works again
-    await prisma.job.update({ where: { id: created[0].id }, data: { status: "running" } });
-    await completeJob(created[0].id, [
-      { url: "img/cap-done.png", model: "seedream", quality: "standard", credits: 6, prompt: "cap job 0" },
-    ]);
+    await prisma.job.update({
+      where: { id: created[0].id },
+      data: { status: "running", worker: "p-cap-w" },
+    });
+    await completeJob(
+      created[0].id,
+      [{ url: "img/cap-done.png", model: "seedream", quality: "standard", credits: 6, prompt: "cap job 0" }],
+      "p-cap-w",
+    );
     const { job: afterFree } = await mk("cap after free");
     expect(afterFree.status).toBe("queued");
     // Failed jobs must free their slot too

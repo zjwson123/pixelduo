@@ -342,7 +342,7 @@ describe("delivery is refused when the funding order was refunded mid-flight", (
     // The worker picks the job up.
     await prisma.job.update({
       where: { id: job.id },
-      data: { status: "running", heartbeatAt: new Date() },
+      data: { status: "running", heartbeatAt: new Date(), worker: "rr-w" },
     });
     // Chargeback lands while the provider call is still running.
     await prisma.$transaction(async (tx) => {
@@ -351,9 +351,11 @@ describe("delivery is refused when the funding order was refunded mid-flight", (
     });
 
     await expect(
-      completeJob(job.id, [
-        { url: "img/x.png", model: "gpt", quality: "medium", credits: 8, prompt: "deliver me" },
-      ]),
+      completeJob(
+        job.id,
+        [{ url: "img/x.png", model: "gpt", quality: "medium", credits: 8, prompt: "deliver me" }],
+        "rr-w",
+      ),
     ).rejects.toThrow(/job-cancelled-refunded-order/);
 
     const after = await prisma.job.findUniqueOrThrow({ where: { id: job.id } });
@@ -376,11 +378,13 @@ describe("delivery is refused when the funding order was refunded mid-flight", (
     });
     await prisma.job.update({
       where: { id: job.id },
-      data: { status: "running", heartbeatAt: new Date() },
+      data: { status: "running", heartbeatAt: new Date(), worker: "rr-w" },
     });
-    await completeJob(job.id, [
-      { url: "img/y.png", model: "gpt", quality: "medium", credits: 8, prompt: "normal delivery" },
-    ]);
+    await completeJob(
+      job.id,
+      [{ url: "img/y.png", model: "gpt", quality: "medium", credits: 8, prompt: "normal delivery" }],
+      "rr-w",
+    );
     expect((await prisma.job.findUniqueOrThrow({ where: { id: job.id } })).status).toBe("done");
     expect(await prisma.image.count({ where: { jobId: job.id } })).toBe(1);
   });

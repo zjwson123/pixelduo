@@ -135,9 +135,11 @@ describe("video job state machine", () => {
     await makeDue(job.id);
     const finalClaim = await claimDuePollingJob(job.id, "w1");
     expect(finalClaim?.id).toBe(job.id);
-    await completeJob(job.id, [
-      { url: "videos/x.mp4", model: "seedance", quality: "standard", credits: 70, prompt: "a cat walking" },
-    ]);
+    await completeJob(
+      job.id,
+      [{ url: "videos/x.mp4", model: "seedance", quality: "standard", credits: 70, prompt: "a cat walking" }],
+      "w1",
+    );
     row = await prisma.job.findUniqueOrThrow({ where: { id: job.id } });
     expect(row.status).toBe("done");
   });
@@ -159,9 +161,11 @@ describe("video job state machine", () => {
     // Cleanup: drain the poll and complete
     await makeDue(job.id);
     await claimDuePollingJob(job.id, "w-a");
-    await completeJob(job.id, [
-      { url: "videos/r.mp4", model: "seedance", quality: "standard", credits: 42, prompt: "race condition" },
-    ]);
+    await completeJob(
+      job.id,
+      [{ url: "videos/r.mp4", model: "seedance", quality: "standard", credits: 42, prompt: "race condition" }],
+      "w-a",
+    );
   });
 
   it("a recovered job keeps its providerTaskId and does not need re-creation", async () => {
@@ -185,9 +189,11 @@ describe("video job state machine", () => {
     // NOT run again (no duplicate provider task / double billing).
     expect(reclaimed?.providerTaskId).toBe("task-3");
 
-    await completeJob(job.id, [
-      { url: "videos/y.mp4", model: "seedance", quality: "standard", credits: 42, prompt: "recovered job" },
-    ]);
+    await completeJob(
+      job.id,
+      [{ url: "videos/y.mp4", model: "seedance", quality: "standard", credits: 42, prompt: "recovered job" }],
+      "w1",
+    );
   });
 
   it("schedulePoll re-arms nextAttemptAt by the poll interval", async () => {
@@ -203,9 +209,11 @@ describe("video job state machine", () => {
     expect(after.status).toBe("polling");
     expect(after.nextAttemptAt!.getTime()).toBeGreaterThan(before.nextAttemptAt!.getTime());
     expect(after.nextAttemptAt!.getTime() - Date.now()).toBeLessThanOrEqual(POLL_INTERVAL_MS);
-    await completeJob(job.id, [
-      { url: "videos/i.mp4", model: "seedance", quality: "standard", credits: 42, prompt: "interval" },
-    ]);
+    await completeJob(
+      job.id,
+      [{ url: "videos/i.mp4", model: "seedance", quality: "standard", credits: 42, prompt: "interval" }],
+      "w1",
+    );
   });
 
   // A reaped job goes back to "queued" (not terminal), which the CAS still
@@ -223,9 +231,11 @@ describe("video job state machine", () => {
     expect(row.status).toBe("polling");
     expect(row.providerTaskId).toBe("task-reaped");
 
-    await completeJob(job.id, [
-      { url: "videos/reaped.mp4", model: "seedance", quality: "standard", credits: 42, prompt: "reaped" },
-    ]);
+    await completeJob(
+      job.id,
+      [{ url: "videos/reaped.mp4", model: "seedance", quality: "standard", credits: 42, prompt: "reaped" }],
+      "w1",
+    );
     // The job is done: a task created after that point can never be polled.
     expect(await setJobPolling(job.id, "task-late", "w1")).toBe(false);
     const after = await prisma.job.findUniqueOrThrow({ where: { id: job.id } });

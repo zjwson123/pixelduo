@@ -285,13 +285,26 @@ jobs:
             # Pass 34: the two glob expansions the prune list carries and no
             # assertion named. PRODUCT_OUTLINE.md is 33 KB of internal
             # monetisation notes and is traced into .next/standalone (probed);
-            # only ./*.md removes it. .env.example is the one dotenv name the
-            # build context DOES carry (.dockerignore re-includes it), so unlike
-            # the three names below it can actually fail if the prune list loses
-            # .env .env.* — the other three are already excluded from the context
-            # and their test !s are true no matter what.
+            # only ./*.md removes it.
+            #
+            # .env.example is deliberately NOT asserted here (pass 37). The
+            # pass-34 note claimed it was "the one dotenv name the build context
+            # DOES carry, so unlike the three names below it can actually fail"
+            # — true of the CONTEXT, false of this STAGE: the web stage copies
+            # only .next/standalone, .next/static, public/ and prisma/, and
+            # the standalone writer in Next takes requiredServerFiles.files plus
+            # .env/.env.production only. It appears in ZERO trace manifests and
+            # cannot reach /app, so the assertion was true no matter what the
+            # prune list said (probed against the trace manifests this build
+            # wrote). The worker stage carries it and still asserts it. What
+            # replaces it are names genuinely traced into standalone AND named
+            # by this prune — drop one from the list and the artifact ships it
+            # with the gate green:
             test ! -e /app/PRODUCT_OUTLINE.md
-            test ! -e /app/.env.example
+            test ! -e /app/instrumentation-client.ts
+            test ! -e /app/sentry.server.config.ts
+            test ! -e /app/sentry.edge.config.ts
+            test ! -e /app/vitest.setup.ts
             # ...while what actually RUNS is still there: the compiled chunks.
             test -e /app/server.js
             test -e /app/.next/server/instrumentation.js
@@ -320,7 +333,11 @@ jobs:
           DATABASE_URL: postgresql://pixelduo:pixelduo@localhost:5432/pixelduo_test
         run: |
           npx prisma migrate deploy
-          docker run -d --name pd-ci-web-smoke -p 3109:3000 \
+          # 127.0.0.1: the same loopback pin as the e2e app below (pass 37) —
+          # the smoke runs with PAYMENT_ALLOW_MOCK=1 and the published CI
+          # signing secret, so it must not be reachable from the runner's
+          # network. Everything that talks to it uses localhost.
+          docker run -d --name pd-ci-web-smoke -p 127.0.0.1:3109:3000 \
             --add-host=host.docker.internal:host-gateway \
             -e DATABASE_URL="postgresql://pixelduo:pixelduo@host.docker.internal:5432/pixelduo_test" \
             -e REDIS_URL="redis://host.docker.internal:6379" \
@@ -502,7 +519,15 @@ jobs:
       - run: npx playwright install --with-deps chromium
       - name: Start app + worker
         run: |
-          npx next start -p 3100 -H 0.0.0.0 &
+          # Loopback, not 0.0.0.0 (pass 37): this stack auto-verifies
+          # registrations, accepts mock payments and trusts X-Forwarded-For for
+          # its per-IP limiters, and `next start` binds every interface by
+          # default. scripts/ci-local.sh pins 127.0.0.1 for the same reason ("no
+          # TLS, no edge, XFF-trusting per-IP limiters"); a GitHub-hosted runner
+          # normally has no inbound path, so this aligns the two entry points
+          # rather than repairing a demonstrated exposure. Playwright, the
+          # worker and every health curl here use localhost.
+          npx next start -p 3100 -H 127.0.0.1 &
           npx tsx scripts/worker.ts &
           sleep 8
       - name: Wait for health

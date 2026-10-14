@@ -43,49 +43,66 @@ export function getModelVerseKey(): string | undefined {
   return process.env.MODELVERSE_IMAGE_API_KEY || firstKey("modelverse");
 }
 
-// Ark (Volcengine) image edits. The credential may come from env or from the
-// cc-proxy "ark" gateway, while the endpoint can ONLY come from that same
-// operator-owned gateway — and only when it looks like an image endpoint; the
-// gateway's usual base_url is Ark's /api/coding/v1 (a chat endpoint), which is
-// why that gate exists. There is no cross-vendor pairing to fix here the way
-// there was for vision (where a name-matching heuristic picked the key up from
-// a DIFFERENT vendor's gateway): both halves are the operator's own Ark
-// configuration, and the fallback below is Ark's own host.
+const ARK_DEFAULT_BASE = "https://ark.cn-beijing.volces.com/api/v3/images/generations";
+export const DASHSCOPE_DEFAULT_BASE = "https://dashscope.aliyuncs.com";
+
+// Ark (Volcengine) image edits. Credential and endpoint resolve as ONE PAIR,
+// from ONE source — the rule deepSeekSource below states and getVisionConfig
+// enforces (pass 37).
+//
+// The previous shape read them independently (key: env → gateway, endpoint:
+// gateway → vendor default), which pairs halves that were never meant to travel
+// together in BOTH directions, and .env.example documents the intended reading
+// ("Image providers — optional: fall back to ~/.cc-proxy/config.json when
+// unset"): an operator with a live ARK_IMAGE_API_KEY whose `ark` gateway points
+// at a relay sent the VENDOR credential to the relay, and a gateway carrying
+// only api_keys sent the RELAY's credential to Ark's own host (probed with a
+// fake HOME, both directions). The gateway's endpoint is now borrowed only when
+// the gateway also supplies the credential; the env key always goes to the
+// vendor's own host, which is the only endpoint its name claims.
+//
+// The `includes("images")` gate stays for its original reason: the `ark`
+// gateway's usual base_url is Ark's /api/coding/v1 (a chat endpoint), and a
+// chat URL must not be handed a generation payload. A gateway without a usable
+// image URL therefore pairs its OWN key with the vendor's default host.
+function arkSource(): { key: string; baseUrl: string } | null {
+  const envKey = process.env.ARK_IMAGE_API_KEY || undefined;
+  if (envKey) return { key: envKey, baseUrl: ARK_DEFAULT_BASE };
+  const gw = loadCcProxyConfig()?.gateways?.ark;
+  const key = gw?.api_keys?.find((k) => k.length > 0);
+  if (!key) return null;
+  return { key, baseUrl: gw?.base_url && gw.base_url.includes("images") ? gw.base_url : ARK_DEFAULT_BASE };
+}
+
 export function getArkKey(): string | undefined {
-  return process.env.ARK_IMAGE_API_KEY || firstKey("ark");
+  return arkSource()?.key;
 }
 
 export function getArkBaseUrl(): string {
-  const cfg = loadCcProxyConfig();
-  const gw = cfg?.gateways?.ark;
-  if (gw?.base_url && gw.base_url.includes("images")) return gw.base_url;
-  return "https://ark.cn-beijing.volces.com/api/v3/images/generations";
+  return arkSource()?.baseUrl ?? ARK_DEFAULT_BASE;
+}
+
+// DashScope, same atomic rule and the same probed mispairing. The gateway's
+// base_url is a compatible-mode URL (…/compatible-mode/v1) whose ORIGIN is what
+// the native generation endpoints hang off, hence the strip in the middle.
+function aliyunSource(): { key: string; base: string } | null {
+  const envKey = process.env.ALIYUN_API_KEY || process.env.DASHSCOPE_API_KEY || undefined;
+  if (envKey) return { key: envKey, base: DASHSCOPE_DEFAULT_BASE };
+  const gw = loadCcProxyConfig()?.gateways?.aliyun;
+  const key = gw?.api_keys?.find((k) => k.length > 0);
+  if (!key) return null;
+  const base = gw?.base_url
+    ? gw.base_url.replace(/\/compatible-mode\/v1$/, "").replace(/\/v1$/, "")
+    : DASHSCOPE_DEFAULT_BASE;
+  return { key, base };
 }
 
 export function getAliyunKey(): string | undefined {
-  return process.env.ALIYUN_API_KEY || process.env.DASHSCOPE_API_KEY || firstKey("aliyun");
+  return aliyunSource()?.key;
 }
 
 export function getAliyunBaseUrl(service: "multimodal-generation" | "video-synthesis" | "text2image" = "multimodal-generation"): string {
-  const cfg = loadCcProxyConfig();
-  const gw = cfg?.gateways?.aliyun;
-  if (gw?.base_url) {
-    // base_url is like https://dashscope.aliyuncs.com/compatible-mode/v1
-    // We need the base domain
-    const baseUrl = gw.base_url.replace(/\/compatible-mode\/v1$/, "").replace(/\/v1$/, "");
-    switch (service) {
-      case "multimodal-generation":
-        return `${baseUrl}/api/v1/services/aigc/multimodal-generation/generation`;
-      case "video-synthesis":
-        return `${baseUrl}/api/v1/services/aigc/video-generation/video-synthesis`;
-      case "text2image":
-        return `${baseUrl}/api/v1/services/aigc/text2image/image-synthesis`;
-      default:
-        return `${baseUrl}/api/v1/services/aigc/multimodal-generation/generation`;
-    }
-  }
-  // Default DashScope endpoints
-  const base = "https://dashscope.aliyuncs.com";
+  const base = aliyunSource()?.base ?? DASHSCOPE_DEFAULT_BASE;
   switch (service) {
     case "multimodal-generation":
       return `${base}/api/v1/services/aigc/multimodal-generation/generation`;
