@@ -381,11 +381,22 @@ describe("pass 37 — the restore-drill guard and the retention rotation", () =>
       for (const keep of [0, 1, 3]) {
         const d = path.join(dir, `${path.basename(file)}-${keep}`);
         fs.mkdirSync(d, { recursive: true });
-        for (const s of ["20261001-000000", "20261002-000000", "20261003-000000"]) {
-          fs.writeFileSync(path.join(d, `pixelduo-${s}.dump.gz`), "x");
+        // Explicit mtimes, one day apart: `ls -1t` orders by mtime, and four
+        // files written in the same tick can share one on a coarse-grained
+        // filesystem — the runner's overlayfs made the order arbitrary and this
+        // test failed there while passing on APFS, with the OLDEST file named
+        // the newest. The date in the NAME and the timestamp on the file agree
+        // here, so "the newest survives" is a deterministic claim.
+        const at = (dayOfOct: number) => new Date(Date.UTC(2026, 9, dayOfOct, 0, 0, 0));
+        for (const [i, s] of ["20261001-000000", "20261002-000000", "20261003-000000"].entries()) {
+          const f = path.join(d, `pixelduo-${s}.dump.gz`);
+          fs.writeFileSync(f, "x");
+          fs.utimesSync(f, at(1 + i), at(1 + i));
         }
         // The newest file, as the loop writes it before rotating.
-        fs.writeFileSync(path.join(d, "pixelduo-20261014-000000.dump.gz"), "x");
+        const fresh = path.join(d, "pixelduo-20261014-000000.dump.gz");
+        fs.writeFileSync(fresh, "x");
+        fs.utimesSync(fresh, at(14), at(14));
         execFileSync("sh", ["-c", `set -e; BACKUP_KEEP=${keep}; cd ${JSON.stringify(d)}; ${body}`], {
           encoding: "utf8",
           stdio: "pipe",

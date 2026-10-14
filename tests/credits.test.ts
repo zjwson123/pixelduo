@@ -5,9 +5,18 @@ import { listExpiringCredits } from "../lib/credits";
 
 let userId: string;
 
+// An hour INSIDE the requested day, not on its boundary (pass 37). daysLeft is
+// Math.ceil'd against the DATABASE's now() while the fixture is built from the
+// host clock: a database clock a few ms behind the host turned "3 days" into 4
+// (probed — this file failed in a full-suite run and passed alone) and made
+// "1 day" read as 2, i.e. a different reminder bucket. vitest.setup.ts refuses
+// only past 1000ms of skew, so the margin is what makes the fixture state what
+// the test means.
 async function addGrant(source: string, remaining: number, expiresInDays: number) {
   const expiresAt =
-    expiresInDays === -1 ? null : new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000);
+    expiresInDays === -1
+      ? null
+      : new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000 - 60 * 60 * 1000);
   await prisma.$transaction((tx) =>
     grantCreditsTx(tx, userId, source as never, remaining, expiresAt, "order", "o", "test"),
   );

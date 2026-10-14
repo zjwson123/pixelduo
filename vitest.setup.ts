@@ -46,7 +46,12 @@ beforeAll(async () => {
         "the host clock and the code compares them against the database's now(). Fix the clock " +
         "before reading any of it as a code regression — `docker restart pixelduo-db` re-syncs " +
         "Docker Desktop's VM clock (it lags after a host sleep), and a host that was just " +
-        "corrected by NTP shows the same offset until the container is restarted.",
+        "corrected by NTP shows the same offset until the container is restarted. " +
+        "A skew under that tolerance is still enough to flip a fixture that sits exactly on a " +
+        "DAY boundary: daysLeft is Math.ceil'd against the database's now() (lib/credits, " +
+        "lib/reminder) and the reminder buckets are [1,3,7], so build day-offset fixtures an " +
+        "hour INSIDE the bucket they mean (pass 37 — a fixture at exactly 7 days read as 8 and " +
+        "matched no bucket, so the mail was silently skipped).",
     );
   }
 });
