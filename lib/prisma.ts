@@ -77,6 +77,24 @@ export async function databaseSessionTimezone(client: PrismaClient = prisma): Pr
 // Fail-closed boot assertion for the pin above. Production only, like every
 // other boot gate: dev and the test suite run against the compose database
 // (UTC by default) and must stay usable without configuration.
+//
+// The verdict is the zone's UTC OFFSET, sampled at three instants — not the
+// zone's NAME (pass 38). `SHOW timezone` echoes the spelling the session was
+// given for every canonical name, so a deployment whose server/role default is
+// one of the OTHER correct spellings — Etc/UTC and GMT are the stock values on
+// Debian/Ubuntu images and in many postgresql.conf files — was refused at boot
+// with "the database session timezone is Etc/UTC, not UTC" even though every
+// rendering is already exactly right: web in a restart loop, the worker and all
+// four cron scripts exiting non-zero, and an error message that asserts
+// something untrue, which is what sends the operator doubting the rest of it
+// (probed: UTC, Etc/UTC and GMT all render now() at +00 and were worth
+// accepting; Etc/GMT+12 at −43200, refused). Two samples six months apart cover
+// both DST regimes, so a zone that merely HAPPENS to sit at +00 today
+// (Europe/London in winter) is still refused — its naive timestamps would be an
+// hour off for half the year — while every fixed zero-offset zone (UTC,
+// Etc/UTC, GMT, Zulu, UCT, Universal, Africa/Abidjan, Atlantic/Reykjavik…) is
+// accepted. Reachable when an operator supplies their own `options=` (the pin
+// deliberately leaves it alone) or a pooler strips ours.
 export async function assertDatabaseSessionUtc(opts?: {
   env?: NodeJS.ProcessEnv;
   client?: PrismaClient;
@@ -86,8 +104,17 @@ export async function assertDatabaseSessionUtc(opts?: {
   // the worker and by tests that never touch production gating).
   const { isProductionRuntime } = await import("./runtime-env");
   if (!isProductionRuntime(env)) return;
-  const tz = await databaseSessionTimezone(opts?.client);
-  if (tz !== "UTC") {
+  const client = opts?.client ?? prisma;
+  const [row] = await client.$queryRaw<
+    Array<{ tz: string; nowOff: number; janOff: number; julOff: number }>
+  >`SELECT current_setting('TimeZone') AS tz,
+       EXTRACT(timezone FROM now())::int AS "nowOff",
+       EXTRACT(timezone FROM TIMESTAMPTZ '2026-01-15 12:00:00+00')::int AS "janOff",
+       EXTRACT(timezone FROM TIMESTAMPTZ '2026-07-15 12:00:00+00')::int AS "julOff"`;
+  const fixedUtc = row !== undefined && row.nowOff === 0 && row.janOff === 0 && row.julOff === 0;
+  if (!fixedUtc) {
+    const tz = row?.tz ?? "";
+    const offsets = row ? ` (offsets ${row.nowOff}s now, ${row.janOff}s in January, ${row.julOff}s in July)` : "";
     // The remediation names the exact parameter for THIS url: pasted onto one
     // that already carries a query string (a managed provider's
     // ?sslmode=require, a pooler's ?pgbouncer=true), a second "?" makes Prisma
@@ -97,7 +124,7 @@ export async function assertDatabaseSessionUtc(opts?: {
       ? "&options=-c%20timezone%3DUTC"
       : "?options=-c%20timezone%3DUTC";
     throw new Error(
-      `the database session timezone is ${tz || "unknown"}, not UTC — every deadline, schedule and timestamp comparison in this app assumes UTC-naive storage (see lib/prisma.ts). Append ${param} to DATABASE_URL, or set the database/role default (ALTER DATABASE <db> SET timezone TO 'UTC')`,
+      `the database session timezone is ${tz || "unknown"}, not UTC${offsets} — every deadline, schedule and timestamp comparison in this app assumes UTC-naive storage (see lib/prisma.ts). Append ${param} to DATABASE_URL, or set the database/role default (ALTER DATABASE <db> SET timezone TO 'UTC')`,
     );
   }
 }

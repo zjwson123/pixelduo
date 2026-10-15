@@ -1,6 +1,6 @@
 import { requireVerifiedUser, ok, fail, enforceUserRateLimit } from "@/lib/api";
 import { dailyCheckin } from "@/lib/ledger";
-import { prisma } from "@/lib/prisma";
+import { spendableBalance } from "@/lib/credits";
 
 export async function POST() {
   try {
@@ -14,8 +14,14 @@ export async function POST() {
     const limited = await enforceUserRateLimit(userId, "checkin", 10, 60_000);
     if (limited) return fail(limited);
     const result = await dailyCheckin(userId);
-    const user = await prisma.user.findUnique({ where: { id: userId } });
-    return ok({ ...result, balance: user?.credits ?? 0 });
+    // The SPENDABLE balance, not User.credits (pass 38 — see spendableBalance
+    // in lib/credits.ts). This route reported the raw column, so an account
+    // with expired-but-unswept grants was told it held 142 credits while
+    // /api/me said 42 and the very next generate call refused everything above
+    // 42 (probed with a one-minute-old expired grant). Read after the check-in
+    // commits, so the fresh +2 is included.
+    const held = await spendableBalance(userId);
+    return ok({ ...result, balance: held.spendable });
   } catch (e) {
     return fail(e);
   }

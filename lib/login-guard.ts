@@ -2,6 +2,7 @@ import Redis from "ioredis";
 import { reserveAuthMailSend, sendSecurityNoticeEmail } from "./mail";
 import { prisma } from "./prisma";
 import { clientIp } from "./rate-limit";
+import { siteBase } from "./site";
 import { clearTwoFactorFailures } from "./twofa";
 
 // Per-account brute-force guard for the password login. Redis-backed; when
@@ -410,7 +411,15 @@ export async function alertLoginAbuse(email: string): Promise<boolean> {
   if (!(await reserveAuthMailSend("verify"))) return false;
   const failures = await loginFailures(email);
   try {
-    const base = process.env.NEXTAUTH_URL ?? "https://pixelduo.ai";
+    // The deployment's own origin, via the same helper every other mail body
+    // uses (pass 37 converted the other five; this one kept its own fallback —
+    // `?? "https://pixelduo.ai"` — so on a runtime without NEXTAUTH_URL the
+    // "your account is under attack" notice sent the victim to a domain the
+    // operator does not own, and pass 37's own gate could not see it because its
+    // file list was ["lib/mail.ts", "lib/mail-html.ts"]. siteBase() trims a
+    // trailing slash and falls back to localhost — useless but honest, never
+    // someone else's domain. Probed in pass 38 with NEXTAUTH_URL absent.
+    const base = siteBase();
     await sendSecurityNoticeEmail(
       email,
       "Repeated failed sign-in attempts on your PixelDuo account",

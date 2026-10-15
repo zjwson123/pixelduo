@@ -1,10 +1,32 @@
 import NextAuth from "next-auth";
 import { NextRequest } from "next/server";
 import { authOptions } from "@/lib/auth";
-import { ApiError, enforceRateLimit, errorResponse, readBodyCapped, tooLarge } from "@/lib/api";
+import { fail, enforceRateLimit, readBodyCapped, tooLarge } from "@/lib/api";
 import { envLimit } from "@/lib/rate-limit";
 
 const handler = NextAuth(authOptions);
+
+// The delegate, wrapped. next-auth reads its own body (getBody → req.json())
+// and THAT parse was the one unguarded read left in the app: a malformed or
+// empty JSON POST — no cookie, no CSRF token, the parse precedes both — threw
+// a SyntaxError out of handler(), which is Next's uncaught path: a bare 500
+// with no body and, on a deployment with SENTRY_DSN, one handled:false event
+// per request (pass 38, probed live: /api/auth/session, signout, csrf and the
+// credentials callback all answered 500 for `{`). Every app route answers 400
+// invalid-json for the same input through fail(), and the middleware's
+// 300/min per IP turned the difference into an anonymous incident faucet —
+// the class pass 25 and pass 30 closed for NULs and lone surrogates, one
+// layer up from where those guards run (they never see a body next-auth
+// parses itself). fail() classifies SyntaxError as the client error it is,
+// maps ApiError (the abort/NUL refusals) to their status, and still reports
+// genuine faults.
+async function delegate(req: NextRequest, ctx: Parameters<typeof handler>[1]) {
+  try {
+    return await handler(req, ctx);
+  } catch (e) {
+    return fail(e);
+  }
+}
 
 // Legitimate bodies here are a CSRF token plus an email and password, or an
 // OAuth callback's form fields — a few hundred bytes. 64KB is pure headroom.
@@ -90,18 +112,15 @@ async function limited(req: NextRequest, ctx: Parameters<typeof handler>[1]) {
   }
   // GET (session/CSRF/providers/OAuth redirect) carries no body and next-auth
   // reads none — delegate as-is.
-  if (req.method !== "POST") return handler(req, ctx);
+  if (req.method !== "POST") return delegate(req, ctx);
 
-  const bodyRaw = await readBodyCapped(req, MAX_BODY_BYTES).catch((e: unknown) => {
-    // readBodyCapped refuses a NUL body with ApiError, and this wrapper is the
-    // one caller with no try/catch of its own — the delegate IS the handler, so
-    // an uncaught throw here answered 500 for what is a client error. Every
-    // other caller funnels through fail(), which maps ApiError to its status.
-    if (e instanceof ApiError) {
-      return { refused: errorResponse({ ok: false, error: e.message }, { status: e.status }) };
-    }
-    throw e;
-  });
+  // readBodyCapped refuses a NUL body with ApiError and now classifies a
+  // mid-body client disconnect as a 400 (lib/api.ts) — both read the body here
+  // rather than inside the dependency, so both are mapped through fail(), the
+  // same way every other route maps them.
+  const bodyRaw = await readBodyCapped(req, MAX_BODY_BYTES).catch((e: unknown) => ({
+    refused: fail(e),
+  }));
   if ("refused" in bodyRaw) return bodyRaw.refused;
   if ("tooLarge" in bodyRaw) return tooLarge();
   // The body has been consumed, so the handler gets a fresh request carrying the
@@ -113,7 +132,7 @@ async function limited(req: NextRequest, ctx: Parameters<typeof handler>[1]) {
   const headers = new Headers(req.headers);
   headers.delete("content-length");
   headers.delete("transfer-encoding");
-  return handler(
+  return delegate(
     new NextRequest(req.url, { method: req.method, headers, body: bodyRaw.raw }),
     ctx,
   );

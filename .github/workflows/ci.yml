@@ -170,6 +170,23 @@ jobs:
             echo "the prune's report does not name the planted .env — the plant never reached the standalone tree:"; echo "$prune_line"; exit 1; }
           printf '%s' "$prune_line" | grep -q 'dev\.db' || {
             echo "the prune's report does not name the planted prisma/dev.db — the plant never reached the standalone tree:"; echo "$prune_line"; exit 1; }
+      - name: Assert the artifact's Prisma client cannot load a dotenv file (pass 38)
+        # The prune deletes .env from the tree, but the tree's generated Prisma
+        # client also READ one: its config resolved ../../../.env against its own
+        # directory, so a dotenv restored beside the artifact (a pre-prune
+        # backup, an rsync of a tree built without postbuild, a kept dev file)
+        # loaded into every process that imports the client — the app and the
+        # boot gates included — while docs/deploy.md said such a file
+        # configures nothing. scripts/prune-standalone.mjs now rewrites those
+        # paths to null, and this asserts the shipped artifact really carries
+        # the rewrite: drop the rewrite and this step goes red, because a
+        # regression here is invisible in every runtime check (the app boots
+        # fine either way).
+        run: |
+          client=.next/standalone/node_modules/.prisma/client/index.js
+          test -e "$client" || { echo "no Prisma client in the standalone tree — the app cannot run from this artifact"; exit 1; }
+          grep -q '"schemaEnvPath": null' "$client" || { echo "the artifact's Prisma client still resolves a schema env path — a .env beside the tree would be live configuration:"; grep -o '"relativeEnvPaths"[^}]*}' "$client"; exit 1; }
+          grep -q '"rootEnvPath": null' "$client" || { echo "the artifact's Prisma client still resolves a root env path"; exit 1; }
 
   # Every image build of this repository was broken for three weeks — npm ci
   # cannot install this lockfile without .npmrc, and no Dockerfile stage copied
@@ -309,6 +326,17 @@ jobs:
             test -e /app/server.js
             test -e /app/.next/server/instrumentation.js
             test -e /app/.next/server/middleware.js
+            # The Prisma client dotenv hook (pass 38). The tree carries a
+            # generated client whose config resolves ../../../.env against its
+            # own directory, so ANY dotenv placed beside the artifact loaded
+            # into every process that imports it — the app and the boot gates
+            # included — while docs/deploy.md told the operator such a file
+            # configures nothing. The postbuild prune rewrites those paths to
+            # null; assert the IMAGE carries the rewrite, not just a log line.
+            # (No apostrophes anywhere in this block: it is one single quoted
+            # shell string, and a stray quote ends it early — pass 33.)
+            test -e /app/node_modules/.prisma/client/index.js
+            grep -q "\"schemaEnvPath\": null" /app/node_modules/.prisma/client/index.js
             for f in /app/.env /app/.env.local /app/.env.production; do
               if [ -e "$f" ]; then echo "dotenv in image: $f"; exit 1; fi
             done
@@ -548,7 +576,13 @@ jobs:
           EMAIL_VERIFY_AUTO: "0"
           NEXTAUTH_URL: http://localhost:3101
         run: |
-          npx next start -p 3101 &
+          # -H 127.0.0.1: the same loopback pin as the 3100 instance above
+          # (pass 37), kept in step by pass 38 — this instance is also a
+          # production build with PAYMENT_ALLOW_MOCK=1 and the published CI
+          # signing secret, so `next start`'s 0.0.0.0 default would serve it to
+          # the network for the job's duration. Everything that talks to it
+          # (playwright, the health curls) uses localhost.
+          npx next start -p 3101 -H 127.0.0.1 &
           ok=""
           for i in $(seq 1 45); do
             if curl -fsS http://localhost:3101/api/health; then ok=1; break; fi

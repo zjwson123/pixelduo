@@ -166,6 +166,15 @@ docker run --rm --entrypoint sh pd-ci-web -c '
   test -e /app/server.js
   test -e /app/.next/server/instrumentation.js
   test -e /app/.next/server/middleware.js
+  # The Prisma client dotenv hook (pass 38). The tree carries a generated
+  # client whose config resolves ../../../.env against its own directory, so ANY
+  # dotenv placed beside the artifact loaded into every process importing it —
+  # the boot gates included — while docs/deploy.md said such a file configures
+  # nothing. postbuild rewrites those paths to null; assert the IMAGE carries
+  # the rewrite. (No apostrophes in this block: it is one single-quoted shell
+  # string, and a stray quote ends it early — pass 33.)
+  test -e /app/node_modules/.prisma/client/index.js
+  grep -q "\"schemaEnvPath\": null" /app/node_modules/.prisma/client/index.js
   for f in /app/.env /app/.env.local /app/.env.production; do
     if [ -e "$f" ]; then echo "dotenv in image: $f"; exit 1; fi
   done
@@ -384,6 +393,28 @@ case "$PRUNE_LINE" in
     exit 1
     ;;
 esac
+# Pass 38: deleting .env is not enough while the tree's generated Prisma client
+# READ one — its config resolves ../../../.env against its own directory, so a
+# dotenv restored beside the artifact (a pre-prune backup, an rsync of a tree
+# built without postbuild, a kept dev file) was live configuration for every
+# process that imports the client — the boot gates included — while docs/deploy.md
+# said such a file configures nothing. postbuild rewrites those paths to null;
+# this asserts the tree really carries the rewrite. CI's build job greps the
+# same two strings.
+PRISMA_CLIENT=".next/standalone/node_modules/.prisma/client/index.js"
+if [ ! -e "$PRISMA_CLIENT" ]; then
+  echo "no Prisma client in the standalone tree — the app cannot run from this artifact" >&2
+  exit 1
+fi
+if ! grep -q '"schemaEnvPath": null' "$PRISMA_CLIENT"; then
+  echo "the artifact's Prisma client still resolves a schema env path — a .env beside the tree would be live configuration:" >&2
+  grep -o '"relativeEnvPaths"[^}]*}' "$PRISMA_CLIENT" >&2 || true
+  exit 1
+fi
+if ! grep -q '"rootEnvPath": null' "$PRISMA_CLIENT"; then
+  echo "the artifact's Prisma client still resolves a root env path" >&2
+  exit 1
+fi
 
 echo "[7/9] seed + start app/worker (port 3100)"
 export EMAIL_VERIFY_AUTO="1" # e2e needs auto-verified registrations

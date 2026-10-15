@@ -491,7 +491,12 @@ describe("pass 37 — mail links come from the deployment's own origin", () => {
     // password-changed) while the two auth mails already used NEXTAUTH_URL, so
     // a self-hosted instance mailed its own users to a site the operator does
     // not own — including the "if this wasn't you" notices.
-    for (const file of ["lib/mail.ts", "lib/mail-html.ts"]) {
+    //
+    // lib/login-guard.ts joined the list in pass 38: it builds the login-abuse
+    // notice ("Repeated failed sign-in attempts…") and kept its own
+    // `?? "https://pixelduo.ai"` fallback — the sixth body of the same class —
+    // which this gate could not see while it read only the two files above.
+    for (const file of ["lib/mail.ts", "lib/mail-html.ts", "lib/login-guard.ts"]) {
       const src = read(file);
       for (const line of src.split("\n")) {
         // EMAIL_FROM's default address and the prose comments may name the

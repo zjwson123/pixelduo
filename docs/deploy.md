@@ -79,6 +79,8 @@ docker compose -f docker-compose.prod.yml run --rm migrate
 
 `.next/standalone`（web 镜像的内容，也是非 Docker 部署直接搬运的那棵树）**不含任何 dotenv 文件**：Next 构建时会把构建机的 `.env` 复制进去，而那份文件里是 `NEXTAUTH_SECRET`、`DATABASE_URL` 和 S3 凭据。`npm run build` 之后的 `postbuild`（`scripts/prune-standalone.mjs`）会删掉它们，Dockerfile 阶段也各删一次，CI 与 `scripts/ci-local.sh` 都会断言这件事。因此运行环境变量必须显式提供（compose 的 `environment:`，或主机进程自己的环境）——把 `.env` 放在产物旁边不再是配置方式。
 
+**而且这件事是被强制的，不只是"删掉就没人读"（pass 38）。** 产物里那份自动生成的 Prisma 客户端自己就是 dotenv 的读者：它的配置把 `../../../.env` 相对自身目录解析，于是任何进程一 import 它就会把产物旁的 `.env` 载入 `process.env`（实测：只 `require` 产物的 client，植入的 `.env` 里的 `DATABASE_URL`/`NEXTAUTH_SECRET`/`PAYMENT_ALLOW_MOCK` 就出现在环境里）。`postbuild` 现在会把这些路径改写为 `null`（形状不认识就直接让构建失败），改写结果由 CI 与 `scripts/ci-local.sh` 断言；所以即便某天产物旁边又出现了一个 `.env`（旧备份、没跑 postbuild 的 rsync、遗留的开发文件），它也无法再把 `PAYMENT_ALLOW_MOCK=1` 之类的开关喂给启动门禁——按本文档的约定，那份文件配置不了任何东西。
+
 web 镜像还额外删掉 Next 因 prerender source map 一路 trace 进来的 **TypeScript 源码**（`lib/`、`app/`、`components/`、`scripts/` 以及根目录的 `next.config.mjs`、`proxy.ts` 等，pass 32）：镜像里真正运行的是编译产物（`server.js` + `.next/server/*`，instrumentation 与 middleware 各有自己的编译 chunk），源码留在镜像里只会把内部注释、审计历史与运维脚本一起发出去。CI 与 `scripts/ci-local.sh` 既断言这些文件不在镜像里，也会**真正启动 web 镜像**（`node server.js`）并要求 `/api/health` 返回 200——只做文件形状检查的旧门禁发现不了"能构建、起不来"的产物。
 
 ### 用户反馈（`/feedback`）

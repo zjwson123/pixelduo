@@ -299,7 +299,12 @@ export async function readBodyCapped(
     return { tooLarge: true };
   }
   if (!req.body) {
-    const raw = await req.text();
+    let raw: string;
+    try {
+      raw = await req.text();
+    } catch (e) {
+      throw clientAbort(e);
+    }
     if (Buffer.byteLength(raw, "utf8") > maxBytes) return { tooLarge: true };
     refuseNul(raw);
     return { raw };
@@ -308,7 +313,13 @@ export async function readBodyCapped(
   const chunks: Uint8Array[] = [];
   let total = 0;
   for (;;) {
-    const { done, value } = await reader.read();
+    let chunk: ReadableStreamReadResult<Uint8Array>;
+    try {
+      chunk = await reader.read();
+    } catch (e) {
+      throw clientAbort(e);
+    }
+    const { done, value } = chunk;
     if (done) break;
     if (!value) continue;
     total += value.byteLength;
@@ -322,6 +333,35 @@ export async function readBodyCapped(
   const raw = Buffer.concat(chunks).toString("utf8");
   refuseNul(raw);
   return { raw };
+}
+
+// A client that hangs up mid-body makes the request stream reject — Node
+// surfaces it as "aborted" with ECONNRESET, undici as a premature close. This
+// is a CLIENT condition, the same rule fail() already states for malformed
+// JSON ("a client error, not an incident") — and it used to reach fail()
+// unclassified: expectedStatus matched nothing, so every aborted upload
+// answered 500 internal-error AND ran captureError (pass 38). The response is
+// undeliverable either way; the harm is the incident. The routes that read a
+// body before any credential — the payment webhook, register, the auth-mail
+// pair — are reachable with a bare socket, so at the route's rate limit an
+// anonymous caller could mint captured incidents and drown real ones, exactly
+// the class pass 25's NUL refusal and pass 30's surrogate refusal closed for
+// bodies that arrive whole. A genuine server-side read fault (an internal
+// stream error that is not an abort) still propagates and is still reported.
+function clientAbort(e: unknown): unknown {
+  if (!e || typeof e !== "object") return e;
+  const err = e as { name?: unknown; code?: unknown; message?: unknown };
+  const code = typeof err.code === "string" ? err.code : "";
+  const message = typeof err.message === "string" ? err.message : "";
+  if (
+    err.name === "AbortError" ||
+    code === "ECONNRESET" ||
+    code === "ERR_STREAM_PREMATURE_CLOSE" ||
+    /\baborted\b|premature close/i.test(message)
+  ) {
+    return new ApiError(400, "invalid-input: the request body was interrupted before it arrived in full");
+  }
+  return e;
 }
 
 // Every JSON request body is parsed through here, so the NUL refusal is one

@@ -24,10 +24,13 @@
 // plain `npm run build` cannot leave them behind either.
 //
 // Deleting is safe: nothing in the standalone tree reads a dotenv file or a
-// SQLite database at runtime once it is gone (Next only loads dotenv files as a
-// convenience for local runs), and every deployed configuration passes its
-// environment explicitly — docker compose, or the host's own process environment.
-import { readdirSync, rmSync, statSync } from "node:fs";
+// SQLite database at runtime once it is gone — and since pass 38 that is
+// enforced, not assumed: the Prisma client the tree carries was the one reader
+// (see neuterPrismaDotenv below), and the prune now rewrites its env-path
+// config as well as deleting the files. Every deployed configuration passes its
+// environment explicitly — docker compose, or the host's own process
+// environment.
+import { readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 // Optional root argument so a test can point this at a scratch tree.
@@ -76,6 +79,13 @@ function walk(dir) {
 
 walk(root);
 
+// The removal report comes FIRST, and the order is load-bearing: CI's build
+// job and scripts/ci-local.sh both read `grep -m1 '[prune-standalone]'` and
+// require that first line to say what was REMOVED — it is their only evidence
+// the planted .env reached the tree. Printing anything else on the line before
+// it turns that gate into "the prune reported no removals … so it proved
+// nothing", which is exactly how this change's first pipeline run failed (pass
+// 38). Reports, in the order the gates read them.
 if (removed.length) {
   const size = removed.reduce((a, r) => a + r.size, 0);
   console.log(
@@ -83,4 +93,85 @@ if (removed.length) {
   );
 } else {
   console.log(`[prune-standalone] no build-host-only files in ${root}`);
+}
+
+// The one runtime reader of a dotenv file, closed (pass 38).
+//
+// Deleting `.next/standalone/.env` is not enough on its own, and this script's
+// own claim — "nothing in the standalone tree reads a dotenv file at runtime" —
+// was false while the generated Prisma client sat in the tree: its config
+// carries `"relativeEnvPaths": { "schemaEnvPath": "../../../.env" }`, resolved
+// against the client's OWN directory, so every process that imports it loads
+// `<tree>/.env` into process.env (probed: a planted .env's DATABASE_URL,
+// NEXTAUTH_SECRET and PAYMENT_ALLOW_MOCK appeared in the environment of a bare
+// `require()` of the artifact's client, no server involved). The file is gone
+// after the prune, but it comes back — a pre-prune backup restored, an rsync of
+// a tree built without postbuild, an old dev `.env` kept next to the artifact —
+// and docs/deploy.md told the operator such a file configures nothing. Worse
+// than a stale config: PAYMENT_ALLOW_MOCK=1 from that file sets
+// instrumentation.ts's `testDeployment`, which is the flag that accepts the
+// CI-published NEXTAUTH_SECRET and skips the NEXTAUTH_URL/SMTP_URL boot gates,
+// so a stray dotenv could satisfy a signing key anyone can read out of the
+// public repository. Rewriting the paths to null makes the claim true and the
+// file inert. Fail closed if the shape is unrecognised (below).
+const NULL_ENV_PATHS = '"relativeEnvPaths": {"rootEnvPath": null, "schemaEnvPath": null}';
+
+function neuterPrismaDotenv(dir) {
+  let names;
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return { state: "absent" };
+  }
+  const pattern = /"relativeEnvPaths"\s*:\s*\{[^}]*\}/;
+  const patched = [];
+  for (const name of names) {
+    // index.js is the entry (default.js re-exports it); edge.js and wasm.js
+    // carry the same config for runtimes this deployment does not use, and a
+    // rewrite that skipped them would leave the claim true only by accident.
+    if (!name.endsWith(".js")) continue;
+    const p = join(dir, name);
+    let src;
+    try {
+      src = readFileSync(p, "utf8");
+    } catch {
+      continue;
+    }
+    if (!src.includes('"relativeEnvPaths"')) continue;
+    const match = pattern.exec(src);
+    if (!match) {
+      // The config exists but not in the shape this rewrite knows. Editing
+      // generated code by guesswork could break the client, and leaving it
+      // means a .env would be loaded again — so refuse to ship the artifact and
+      // let a human look at what Prisma changed. This is the gate; without it
+      // the rewrite could silently stop applying after a Prisma upgrade.
+      return { state: "unverifiable", path: p };
+    }
+    if (match[0] === NULL_ENV_PATHS) continue;
+    writeFileSync(p, src.replace(pattern, NULL_ENV_PATHS));
+    patched.push(p);
+  }
+  return { state: "ok", patched };
+}
+
+const prismaEnv = neuterPrismaDotenv(join(root, "node_modules", ".prisma", "client"));
+if (prismaEnv.state === "unverifiable") {
+  console.error(
+    `[prune-standalone] the Prisma client at ${prismaEnv.path} carries a "relativeEnvPaths" block this rewrite does not recognise — ` +
+      "refusing to ship an artifact whose dotenv loading cannot be neutralised (a .env beside the tree would configure the app, including the boot gates). " +
+      "Check what @prisma/client changed and update scripts/prune-standalone.mjs; see lib/prisma.ts and docs/deploy.md.",
+  );
+  process.exit(1);
+} else if (prismaEnv.state === "absent") {
+  console.log("[prune-standalone] no node_modules/.prisma/client in the tree — nothing to neutralise");
+} else if (prismaEnv.patched.length === 0) {
+  // Either the rewrite ran in an earlier pass over this tree (idempotent) or
+  // the client no longer carries non-null env paths. Both are the desired
+  // state; the line says which files were inspected so a silent no-op is
+  // visible in the build log the CI gates read.
+  console.log("[prune-standalone] Prisma client env paths already null — no dotenv can be loaded at runtime");
+} else {
+  console.log(
+    `[prune-standalone] neutralised the Prisma client's dotenv loading in ${prismaEnv.patched.length} file(s): ${prismaEnv.patched.join(", ")}`,
+  );
 }

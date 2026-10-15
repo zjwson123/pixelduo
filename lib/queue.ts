@@ -61,19 +61,63 @@ async function enforceInflightCap(tx: Prisma.TransactionClient, userId: string) 
 // Client-supplied keys are namespaced by owner before use: Job.idempotencyKey
 // is globally unique, so an un-namespaced key would let user B retrieve user
 // A's job (id/status/cost) by submitting A's key.
-function scopedIdempotencyKey(userId: string, key?: string): string | null {
+//
+// The stored key also carries the OPERATION the client key belongs to (pass
+// 38), because the owner prefix alone still let a key reused across routes
+// collide with itself: POST /api/generate {model:"seedream", idempotencyKey:K}
+// followed by POST /api/edit {model:"gpt", image, idempotencyKey:K} found the
+// seedream job on the fast path and returned it as `duplicate:true` — the edit
+// never ran, its uploaded reference was silently deleted by the route's own
+// duplicate cleanup, and the caller was told its edit had been accepted
+// (probed end to end). The operation is its own slot in the key, so a key
+// reused for a different operation is a different key — while a retry of the
+// SAME operation still computes the same key and still dedupes. v1's
+// `api:<model>:<n>:<duration>:<key>` fold is the same idea one level up.
+function scopedIdempotencyKey(userId: string, key: string | undefined, shape: string): string | null {
+  return key ? `${userId}:${shape}:${key}` : null;
+}
+
+// The pre-pass-38 spelling of a client key: owner + raw key, no operation slot.
+// Kept reachable for ONE purpose — a retry that spans the deploy that introduced
+// the operation slot must still find the row its first attempt created, or it
+// would be charged twice for one request. The row is only reused when it is the
+// SAME operation (see findIdempotentJob); a legacy row of a different shape
+// stays invisible, which is the fix itself.
+function legacyIdempotencyKey(userId: string, key: string | undefined): string | null {
   return key ? `${userId}:${key}` : null;
+}
+
+// Resolve a client key to an existing job, across both spellings. One query:
+// the shaped key resolves by equality (it names the operation), the legacy key
+// only when the row it names is the same operation — the comparison the shape
+// fold adds, and the one whose absence returned a seedream generation to an
+// edit request.
+async function findIdempotentJob(
+  shaped: string,
+  legacy: string | null,
+  sameOperation: (job: { mediaType: string; model: string; refImageKey: string | null; sourceVideoKey: string | null }) => boolean,
+) {
+  const keys = legacy && legacy !== shaped ? [shaped, legacy] : [shaped];
+  const rows = await prisma.job.findMany({ where: { idempotencyKey: { in: keys } } });
+  for (const job of rows) {
+    if (job.idempotencyKey === shaped || sameOperation(job)) return job;
+  }
+  return null;
 }
 
 // Legacy: create generation job (backward compat with old API)
 export async function createGenerationJob(input: CreateJobInput) {
   const cost = estimateGenerationCost(input.model, input.quality, input.count);
-  const idemKey = scopedIdempotencyKey(input.userId, input.idempotencyKey);
+  const idemKey = scopedIdempotencyKey(input.userId, input.idempotencyKey, `gen:${input.model}`);
   // Fast path: a replayed idempotency key returns the existing job without
   // waiting on the advisory lock or counting against the inflight cap — a
   // client retrying while at the cap must get the duplicate, not a 429.
   if (idemKey) {
-    const existing = await prisma.job.findUnique({ where: { idempotencyKey: idemKey } });
+    const existing = await findIdempotentJob(
+      idemKey,
+      legacyIdempotencyKey(input.userId, input.idempotencyKey),
+      (job) => job.mediaType === "image" && job.model === input.model && job.refImageKey === null,
+    );
     if (existing) return { job: existing, created: false };
   }
   return prisma.$transaction(async (tx) => {
@@ -130,12 +174,25 @@ export async function createMediaJob(input: CreateMediaJobInput) {
     }
   }
   const cost = estimateModelCost(input.model, input.count, input.quality, input.durationSec ?? 5);
-  const idemKey = scopedIdempotencyKey(input.userId, input.idempotencyKey);
+  // The operation slot (pass 38 — see scopedIdempotencyKey): media type, model,
+  // and which reference kinds the request carries. Deliberately NOT the count,
+  // quality or duration — a retry that re-sends the same operation must dedupe
+  // whatever those say, exactly as it did before the slot existed.
+  const shape = `media:${input.mediaType}:${input.model}${input.refImageKey ? ":ref" : ""}${input.sourceVideoKey ? ":src" : ""}`;
+  const idemKey = scopedIdempotencyKey(input.userId, input.idempotencyKey, shape);
   // Fast path: a replayed idempotency key returns the existing job without
   // waiting on the advisory lock or counting against the inflight cap — a
   // client retrying while at the cap must get the duplicate, not a 429.
   if (idemKey) {
-    const existing = await prisma.job.findUnique({ where: { idempotencyKey: idemKey } });
+    const existing = await findIdempotentJob(
+      idemKey,
+      legacyIdempotencyKey(input.userId, input.idempotencyKey),
+      (job) =>
+        job.mediaType === input.mediaType &&
+        job.model === input.model &&
+        (job.refImageKey !== null) === (input.refImageKey !== undefined) &&
+        (job.sourceVideoKey !== null) === (input.sourceVideoKey !== undefined),
+    );
     if (existing) return { job: existing, created: false };
   }
   return prisma.$transaction(async (tx) => {
