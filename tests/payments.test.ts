@@ -123,18 +123,32 @@ describe("StripeProvider", () => {
     expect(partialEvt?.fullRefund).toBe(false);
   });
 
-  it("maps charge.dispute.created to a full refund resolved via the payment intent", async () => {
+  it("maps charge.dispute.created to a measured refund resolved via the payment intent", async () => {
     // Pay-then-chargeback must revoke the granted credits: the dispute object
     // carries payment_intent (not our session id), so resolution goes through
     // providerOrderId — which the paid event rewrote to the PI id.
+    //
+    // The disputed amount is the DELTA (pass 39): a dispute can cover only part
+    // of the charge, and treating every dispute as a full refund revoked a
+    // whole pack/tier over a $1 partial.
     const p = new StripeProvider({ webhookSecret: WEBHOOK_SECRET });
     const payload = stripeEvent("charge.dispute.created", { payment_intent: "pi_dispute_1", amount: 1999 });
     const headers = new Headers({ "stripe-signature": stripeSignature(payload, WEBHOOK_SECRET) });
     const evt = await asEvent(p.verifyWebhook(payload, headers));
     expect(evt?.type).toBe("refunded");
-    expect(evt?.fullRefund).toBe(true);
+    expect(evt?.fullRefund).toBeUndefined();
+    expect(evt?.refundAmountUsd).toBe(19.99);
     expect(evt?.orderId).toBeUndefined();
     expect(evt?.providerOrderId).toBe("pi_dispute_1");
+  });
+
+  it("keeps an unmeasurable dispute fail-closed (full)", async () => {
+    const p = new StripeProvider({ webhookSecret: WEBHOOK_SECRET });
+    const payload = stripeEvent("charge.dispute.created", { payment_intent: "pi_dispute_2" });
+    const headers = new Headers({ "stripe-signature": stripeSignature(payload, WEBHOOK_SECRET) });
+    const evt = await asEvent(p.verifyWebhook(payload, headers));
+    expect(evt?.fullRefund).toBe(true);
+    expect(evt?.refundAmountUsd).toBeUndefined();
   });
 
   it("maps checkout.session.async_payment_succeeded (delayed methods) to paid", async () => {
@@ -330,6 +344,20 @@ describe("PaddleProvider", () => {
     const fullEvt = await asEvent(p.verifyWebhook(full, fullHeaders));
     expect(fullEvt?.fullRefund).toBe(true);
     expect(fullEvt?.refundAmountUsd).toBeCloseTo(19.99);
+
+    // Tax-inclusive totals: the per-delivery delta is the PRE-TAX subtotal
+    // (pass 39). Our order prices are pre-tax and the paid-event check already
+    // compares subtotal; adding gross totals against a net price promoted two
+    // ordinary $21-net partials on a $49.99 order to a full revoke at 20% VAT.
+    const taxed = paddleEvent("adjustment.created", {
+      ...base,
+      id: "adj_taxed",
+      type: "partial",
+      totals: { subtotal: "2100", tax: "420", total: "2520" },
+    });
+    const taxedHeaders = new Headers({ "paddle-signature": paddleSignature(taxed, PADDLE_SECRET) });
+    const taxedEvt = await asEvent(p.verifyWebhook(taxed, taxedHeaders));
+    expect(taxedEvt?.refundAmountUsd).toBeCloseTo(21);
 
     // Flag absent → fullRefund stays undefined; the webhook route then
     // compares refundAmountUsd against the order (or fails closed to full).

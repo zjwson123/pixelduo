@@ -52,6 +52,26 @@ export function isFreeTier(
   return !user.planRenewsAt || user.planRenewsAt.getTime() <= now.getTime();
 }
 
+// Take back output the audit refused — but only what this attempt owns.
+//
+// failJob now answers whether it performed the transition (pass 39). These two
+// branches used to delete unconditionally, so a worker that had stalled past
+// its lease (a paused container, SIGSTOP, a suspended VM — the class passes
+// 31/37 treat as in scope) woke up, was told its output was flagged or
+// unauditable, and deleted objects that a PEER's attempt had checkpointed and
+// delivered in the meantime: the job is done and paid, the gallery 404s, and
+// nothing can repair it because the pre-auth is settled. The catch path below
+// already asks the durable question (reclaimStoredArtifact), and this is the
+// same rule: when the transition was ours, every key is ours to destroy; when
+// it was not, keep whatever a checkpoint or an Image row still names.
+async function discardRefusedOutput(jobId: string, keys: string[], transitioned: boolean): Promise<void> {
+  if (transitioned) {
+    await Promise.all(keys.map((k) => getStorage().delete(k).catch(() => undefined)));
+    return;
+  }
+  for (const k of keys) await reclaimStoredArtifact(jobId, k);
+}
+
 export async function processImageJob(job: {
   id: string;
   model: string;
@@ -235,8 +255,8 @@ export async function processImageJob(job: {
     const audits = await analyzeAllImagesSequentially(rows.map((r) => r.url));
     if (audits.some((a) => a.flagged)) {
       const msg = "image-flagged: moderation rejected the generated image";
-      await failJob(job.id, msg, { terminal: true, worker: workerId });
-      await Promise.all(rows.map((r) => getStorage().delete(r.url).catch(() => undefined)));
+      const transitioned = await failJob(job.id, msg, { terminal: true, worker: workerId });
+      await discardRefusedOutput(job.id, rows.map((r) => r.url), transitioned);
       console.warn(`[worker ${workerId}] job ${job.id}: ${msg}`);
       captureError(new Error(msg), { jobId: job.id, model: job.model });
       return true;
@@ -253,8 +273,8 @@ export async function processImageJob(job: {
       // say so explicitly — unset IMAGE_MODERATION / IMAGE_NSFW_ENDPOINT.
       const msg =
         "safety-audit-unavailable: moderation could not run, so the output was not delivered (check IMAGE_MODERATION / IMAGE_NSFW_ENDPOINT and the vision gateway)";
-      await failJob(job.id, msg, { terminal: true, worker: workerId });
-      await Promise.all(rows.map((r) => getStorage().delete(r.url).catch(() => undefined)));
+      const transitioned = await failJob(job.id, msg, { terminal: true, worker: workerId });
+      await discardRefusedOutput(job.id, rows.map((r) => r.url), transitioned);
       console.error(`[worker ${workerId}] job ${job.id}: ${msg}`);
       captureError(new Error(msg), { jobId: job.id, model: job.model });
       return true;

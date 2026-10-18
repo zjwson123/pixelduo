@@ -40,11 +40,14 @@ class DevMailer implements Mailer {
     const dir = process.env.MAIL_DEV_DIR;
     if (dir) {
       const safe = to.replace(/[^a-zA-Z0-9@._-]/g, "_");
-      fs.mkdirSync(dir, { recursive: true });
-      fs.appendFileSync(
-        path.join(dir, `${safe}.txt`),
-        `Subject: ${subject}\n${replyTo ? `Reply-To: ${replyTo}\n` : ""}${text}\n\n---\n`,
-      );
+      // Owner-only (pass 39): these files carry LIVE verification and reset
+      // links, and the default umask made them 0644 in a 0755 directory — any
+      // other local account on a shared host or self-hosted runner could read
+      // a working reset token during the run.
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      fs.appendFileSync(path.join(dir, `${safe}.txt`), `Subject: ${subject}\n${replyTo ? `Reply-To: ${replyTo}\n` : ""}${text}\n\n---\n`, {
+        mode: 0o600,
+      });
     }
     return { response: "not sent — no SMTP_URL configured (log-only mailer)" };
   }

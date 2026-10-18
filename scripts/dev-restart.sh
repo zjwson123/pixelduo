@@ -7,6 +7,9 @@
 #
 # Usage: bash scripts/dev-restart.sh
 set -euo pipefail
+# This script redirects the dev mailer (and its live reset/verification links)
+# to /tmp logs; keep them owner-only (pass 39).
+umask 077
 cd "$(dirname "$0")/.."
 
 # The running process's env is unreadable on macOS; .env supplies only part of

@@ -26,6 +26,11 @@ export function isPermanentProviderError(msg: string): boolean {
     // completeJob): retrying re-bills the provider for output that will be
     // refused again.
     /job-cancelled-refunded-order/i.test(msg) ||
+    // The create call was already billed, but the id it answered cannot be
+    // polled (non-string, empty, NUL/control characters, a malformed shape).
+    // A retry creates and pays for ANOTHER upstream task — up to maxAttempts
+    // of them, none collectable (pass 39).
+    /unusable task id/i.test(msg) ||
     // An oversized provider payload is a property of the RESPONSE, not of our
     // request, so the retry re-calls the billed endpoint and pays again for the
     // images that were not checkpointed — the same three-times-billed shape as

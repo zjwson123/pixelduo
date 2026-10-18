@@ -85,6 +85,9 @@ export class ApiError extends Error {
     message: string,
     /** Seconds a 429 tells the client to wait, when the limiter reported one. */
     public retryAfterSec?: number,
+    /** The 429 contract the README documents: bucket size and remaining. */
+    public limit?: number,
+    public remaining?: number,
   ) {
     super(message);
   }
@@ -184,9 +187,18 @@ export function fail(error: unknown) {
     // the IP-keyed limiter (enforceRateLimit) has always sent one: an
     // authenticated route that hit its ACCOUNT bucket answered the same status
     // with none, so the same route returned two different shapes for the same
-    // condition and every honouring client lost its backoff hint.
+    // condition and every honouring client lost its backoff hint. The
+    // RateLimit-* pair joins it (pass 39): the README documents all three, and
+    // the account-keyed limiter — which is most of the routes — answered with
+    // only Retry-After while the IP-keyed one sent the full set.
     const headers: Record<string, string> = {};
-    if (error.status === 429 && error.retryAfterSec) headers["Retry-After"] = String(error.retryAfterSec);
+    if (error.status === 429) {
+      if (error.retryAfterSec) headers["Retry-After"] = String(error.retryAfterSec);
+      if (error.limit !== undefined) {
+        headers["RateLimit-Limit"] = String(error.limit);
+        headers["RateLimit-Remaining"] = String(error.remaining ?? 0);
+      }
+    }
     return errorResponse({ ok: false, error: error.message }, { status: error.status, headers });
   }
   // A malformed JSON body is a client error, not an incident.
@@ -259,7 +271,7 @@ export async function enforceUserRateLimit(
   windowMs: number,
 ): Promise<ApiError | null> {
   const r = await rateLimit(`u:${scope}:${userId}`, limit, windowMs);
-  return r.ok ? null : new ApiError(429, "rate-limited", r.retryAfterSec);
+  return r.ok ? null : new ApiError(429, "rate-limited", r.retryAfterSec, limit, r.remaining ?? 0);
 }
 
 // Upper bound for ?page=. Clamping only the lower bound left a huge finite

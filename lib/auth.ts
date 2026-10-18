@@ -6,6 +6,7 @@ import { Prisma } from "@prisma/client";
 import bcrypt from "bcryptjs";
 import { randomBytes } from "crypto";
 import { reserveLoginAttempt, refundLoginFailures, alertLoginAbuse } from "./login-guard";
+import { ipBucketAddress } from "./rate-limit";
 import { prisma } from "./prisma";
 import { verifyPreAuthToken } from "./twofa";
 import { signupBonus } from "./ledger";
@@ -25,7 +26,11 @@ export function loginAttemptIp(headers: Record<string, unknown> | undefined): st
   const value = Array.isArray(raw) ? raw[raw.length - 1] : raw;
   if (typeof value !== "string") return undefined;
   const parts = value.split(",").map((s) => s.trim()).filter(Boolean);
-  return parts.length > 0 ? parts[parts.length - 1] : undefined;
+  // /64, not /128 (pass 39): an IPv6 client rotates privacy addresses inside
+  // its own /64, and without the mask the per-(email, IP) counter could be
+  // split at will — the per-email hard cap still bound the campaign, but a
+  // targeted address lost the cheaper pair brake entirely.
+  return parts.length > 0 ? ipBucketAddress(parts[parts.length - 1]) : undefined;
 }
 
 interface AuthUser {
@@ -153,8 +158,26 @@ export const authOptions: NextAuthOptions = {
         // concurrent burst cannot slip past the cap by all reading the same
         // pre-increment count.
         const attempt = await reserveLoginAttempt(email, ip);
-        if (!attempt.allowed) return null;
-        const ok = await bcrypt.compare(credentials.password, user.passwordHash);
+        if (!attempt.allowed) {
+          // A refused reservation used to return BEFORE any KDF work (pass 39),
+          // while an unknown address always pays the dummy compare. Once the
+          // per-pair cap tripped, that made the 11th request an existence
+          // oracle: ~2 ms = a real account (the lockout answered), ~57 ms =
+          // none. The brake still refuses the attempt; the cost is the same
+          // either way, so the response does not disclose which.
+          await bcrypt.compare(credentials.password, DUMMY_HASH);
+          return null;
+        }
+        // OAuth-created accounts store a random hex placeholder instead of a
+        // bcrypt hash (see ensureOAuthUser). bcryptjs rejects it in ~0 ms, so
+        // an existing OAuth account answered a password login an order of
+        // magnitude faster than an unknown address and leaked its existence
+        // (pass 39). Pay the dummy cost instead; there is no password that
+        // could match, so the verdict is fixed.
+        const usable = hasUsablePassword(user.passwordHash);
+        const ok = usable
+          ? await bcrypt.compare(credentials.password, user.passwordHash)
+          : (await bcrypt.compare(credentials.password, DUMMY_HASH), false);
         if (!ok) {
           // Fire-and-forget: the owner learns about a distributed grind, and
           // the caller's response time doesn't depend on SMTP. Never awaited
@@ -421,18 +444,25 @@ export async function ensureOAuthUser(
   let user = await prisma.user.findUnique({ where: { email: e } });
   if (!user) {
     try {
-      user = await prisma.user.create({
-        data: {
-          email: e,
-          passwordHash: randomBytes(32).toString("hex"), // OAuth users have no password
-          // Display metadata, not user-authored content, so it is filtered rather
-          // than refused: control characters would hit the same 22021 on the
-          // create, and no legitimate provider sends them.
-          name: (name || e.split("@")[0]).replace(/[\u0000-\u001f\u007f]/g, ""),
-          emailVerified: new Date(),
-        },
+      // The account and its signup bonus commit together (pass 39): split into
+      // two transactions, a failure after the create left an OAuth account that
+      // no later sign-in re-creates and that would never receive the 30
+      // credits.
+      user = await prisma.$transaction(async (tx) => {
+        const created = await tx.user.create({
+          data: {
+            email: e,
+            passwordHash: randomBytes(32).toString("hex"), // OAuth users have no password
+            // Display metadata, not user-authored content, so it is filtered rather
+            // than refused: control characters would hit the same 22021 on the
+            // create, and no legitimate provider sends them.
+            name: (name || e.split("@")[0]).replace(/[\u0000-\u001f\u007f]/g, ""),
+            emailVerified: new Date(),
+          },
+        });
+        await signupBonus(created.id, tx);
+        return created;
       });
-      await signupBonus(user.id);
     } catch (err) {
       // Two concurrent first-sign-ins for the same new address (a double-tab
       // sign-in, a retried callback) both miss the lookup above and race on

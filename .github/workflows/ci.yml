@@ -187,6 +187,7 @@ jobs:
           test -e "$client" || { echo "no Prisma client in the standalone tree — the app cannot run from this artifact"; exit 1; }
           grep -q '"schemaEnvPath": null' "$client" || { echo "the artifact's Prisma client still resolves a schema env path — a .env beside the tree would be live configuration:"; grep -o '"relativeEnvPaths"[^}]*}' "$client"; exit 1; }
           grep -q '"rootEnvPath": null' "$client" || { echo "the artifact's Prisma client still resolves a root env path"; exit 1; }
+          grep -q "__NEXT_PROCESSED_ENV" .next/standalone/server.js || { echo "the artifact's server.js does not neutralise Next's runtime dotenv loading"; exit 1; }
 
   # Every image build of this repository was broken for three weeks — npm ci
   # cannot install this lockfile without .npmrc, and no Dockerfile stage copied
@@ -337,6 +338,13 @@ jobs:
             # shell string, and a stray quote ends it early — pass 33.)
             test -e /app/node_modules/.prisma/client/index.js
             grep -q "\"schemaEnvPath\": null" /app/node_modules/.prisma/client/index.js
+            # The Next runtime dotenv loader (pass 39): BaseServer calls
+            # loadEnvConfig on the standalone directory, so a .env restored
+            # beside the tree was still parsed at runtime even after the Prisma
+            # rewrite — before the boot gates. postbuild prepends
+            # __NEXT_PROCESSED_ENV to server.js, which makes @next/env skip
+            # populating from files.
+            grep -q "__NEXT_PROCESSED_ENV" /app/server.js
             for f in /app/.env /app/.env.local /app/.env.production; do
               if [ -e "$f" ]; then echo "dotenv in image: $f"; exit 1; fi
             done
@@ -449,6 +457,25 @@ jobs:
             for f in /app/.env /app/.env.local /app/.env.production; do
               if [ -e "$f" ]; then echo "dotenv in image: $f"; exit 1; fi
             done
+            # The worker regenerates its Prisma client AFTER the .env prune, so
+            # it needs the pass-38 rewrite too (pass 39) — and the source/config
+            # names the web stage refuses must not ride along in the image a
+            # registry push carries off the host.
+            test -e /app/node_modules/.prisma/client/index.js
+            grep -q "\"schemaEnvPath\": null" /app/node_modules/.prisma/client/index.js
+            test ! -e /app/app
+            test ! -e /app/components
+            test ! -e /app/next.config.mjs
+            test ! -e /app/proxy.ts
+            test ! -e /app/instrumentation.ts
+            test ! -e /app/instrumentation-client.ts
+            test ! -e /app/sentry.server.config.ts
+            test ! -e /app/sentry.edge.config.ts
+            test ! -e /app/vitest.config.ts
+            test ! -e /app/vitest.setup.ts
+            test ! -e /app/playwright.config.ts
+            test ! -e /app/prisma/seed.ts
+            test ! -e /app/public
             echo "worker image shape OK"
           '
       - name: Boot the worker image against the services

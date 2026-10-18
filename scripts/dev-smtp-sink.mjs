@@ -43,6 +43,8 @@ net
                 "===== END =====",
                 "",
               ].join("\n"),
+              // Live reset/verification links land here; owner-only (pass 39).
+              { mode: 0o600 },
             );
             message = "";
             inData = false;

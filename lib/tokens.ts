@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from "crypto";
+import type { Prisma } from "@prisma/client";
 import { prisma } from "./prisma";
 
 export type TokenPurpose = "verify-email" | "reset-password";
@@ -73,14 +74,24 @@ export async function previewToken(purpose: TokenPurpose, rawToken: string): Pro
 
 // Consume a raw token by its hash. Returns the owning email on success.
 // Tokens are single-use and expire (24h verify / 1h reset).
-export async function consumeToken(purpose: TokenPurpose, rawToken: string): Promise<ConsumeResult> {
+//
+// The optional client lets a caller spend the token in the SAME transaction as
+// the state change it authorizes (pass 39: verify-email's consume → mark
+// verified → signup bonus used to be two transactions, so a failure in the
+// second burned the link and left the account verified-without-bonus or, worse,
+// unverified with no way to retry).
+export async function consumeToken(
+  purpose: TokenPurpose,
+  rawToken: string,
+  client: Prisma.TransactionClient | typeof prisma = prisma,
+): Promise<ConsumeResult> {
   const tokenHash = sha256(rawToken);
   const now = new Date();
-  const token = await prisma.verificationToken.findFirst({
+  const token = await client.verificationToken.findFirst({
     where: { purpose, tokenHash, consumedAt: null },
   });
   if (!token || token.expiresAt <= now) return { ok: false };
-  const updated = await prisma.verificationToken.updateMany({
+  const updated = await client.verificationToken.updateMany({
     where: { id: token.id, consumedAt: null },
     data: { consumedAt: now },
   });

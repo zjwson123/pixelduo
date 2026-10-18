@@ -160,14 +160,23 @@ RUN --mount=type=bind,source=.,target=/ctx \
     cp -a /ctx/. /app/ \
  && rm -rf \
       .env .env.* \
-      docs tests e2e designs data backups public/generated public/showcase perf \
+      docs tests e2e designs data backups public perf \
       ./*.md docker-compose*.yml Caddyfile Dockerfile \
       .github .npmrc .gitignore .dockerignore \
       .vscode .idea .claude .cursor *.swp \
       *.db *.db-journal prisma/*.db prisma/*.db-journal \
       ./*.tsbuildinfo \
+      app components next.config.mjs proxy.ts instrumentation.ts instrumentation-client.ts \
+      sentry.server.config.ts sentry.edge.config.ts vitest.config.ts vitest.setup.ts \
+      playwright.config.ts tsconfig.json next-env.d.ts prisma/seed.ts \
  && chown -R node:node /app
 RUN npx prisma generate
+# `prisma generate` runs AFTER the .env prune above and writes a fresh client
+# whose config loads ../../../.env at import — so the worker artifact would
+# re-gain the dotenv reader pass 38 closed for the web tree (pass 39). Apply the
+# same rewrite the web postbuild applies, and fail the build on an unrecognised
+# shape. (scripts/ survives this stage's prune: the worker runs from it.)
+RUN node scripts/prisma-dotenv.mjs node_modules/.prisma/client
 # Why the worker image is the one that matters most: it is what a registry push
 # or `docker save` carries off the host, and it is what operators are told to
 # keep old tags of. Without the prune above it ships docs/ (the full history of

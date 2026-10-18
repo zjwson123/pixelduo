@@ -195,7 +195,10 @@ describe("pass 27 — /api/v1 bounds the credential-less flood before the key lo
     _resetLimiterForTests();
     const ip = "203.0.113.77";
     let last: Response | null = null;
-    for (let i = 0; i < 61; i++) {
+    // 600/min is the FLOOD bound (pass 39 raised it from 60, which used to be
+    // spent by one key's ordinary traffic and refused its neighbours); the
+    // per-key 20/min ceiling stays the caller limit.
+    for (let i = 0; i < 601; i++) {
       last = await v1POST(
         new Request("http://test.local/api/v1/images/generations", {
           method: "POST",
@@ -204,9 +207,9 @@ describe("pass 27 — /api/v1 bounds the credential-less flood before the key lo
         }),
       );
     }
-    // Pre-fix every one of the 61 was a 401 (authenticateApiKey short-circuits
-    // with no key) — the two DB lookups behind an invalid key were bounded only
-    // by the proxy's per-IP bucket.
+    // Pre-fix the address leg did not exist at all and every one was a 401
+    // (authenticateApiKey short-circuits with no key) — the two DB lookups
+    // behind an invalid key were bounded only by the proxy's per-IP bucket.
     expect(last?.status).toBe(429);
   }, 30_000);
 });

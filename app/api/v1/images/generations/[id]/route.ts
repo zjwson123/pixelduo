@@ -39,7 +39,14 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     if (!r.ok) {
       return errorResponse(
         { ok: false, error: "rate-limited" },
-        { status: 429, headers: { "Retry-After": String(r.retryAfterSec) } },
+        {
+          status: 429,
+          headers: {
+            "Retry-After": String(r.retryAfterSec),
+            "RateLimit-Limit": "120",
+            "RateLimit-Remaining": "0",
+          },
+        },
       );
     }
     const job = await prisma.job.findFirst({ where: { id: id, userId: auth.userId } });

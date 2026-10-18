@@ -79,7 +79,7 @@ docker compose -f docker-compose.prod.yml run --rm migrate
 
 `.next/standalone`（web 镜像的内容，也是非 Docker 部署直接搬运的那棵树）**不含任何 dotenv 文件**：Next 构建时会把构建机的 `.env` 复制进去，而那份文件里是 `NEXTAUTH_SECRET`、`DATABASE_URL` 和 S3 凭据。`npm run build` 之后的 `postbuild`（`scripts/prune-standalone.mjs`）会删掉它们，Dockerfile 阶段也各删一次，CI 与 `scripts/ci-local.sh` 都会断言这件事。因此运行环境变量必须显式提供（compose 的 `environment:`，或主机进程自己的环境）——把 `.env` 放在产物旁边不再是配置方式。
 
-**而且这件事是被强制的，不只是"删掉就没人读"（pass 38）。** 产物里那份自动生成的 Prisma 客户端自己就是 dotenv 的读者：它的配置把 `../../../.env` 相对自身目录解析，于是任何进程一 import 它就会把产物旁的 `.env` 载入 `process.env`（实测：只 `require` 产物的 client，植入的 `.env` 里的 `DATABASE_URL`/`NEXTAUTH_SECRET`/`PAYMENT_ALLOW_MOCK` 就出现在环境里）。`postbuild` 现在会把这些路径改写为 `null`（形状不认识就直接让构建失败），改写结果由 CI 与 `scripts/ci-local.sh` 断言；所以即便某天产物旁边又出现了一个 `.env`（旧备份、没跑 postbuild 的 rsync、遗留的开发文件），它也无法再把 `PAYMENT_ALLOW_MOCK=1` 之类的开关喂给启动门禁——按本文档的约定，那份文件配置不了任何东西。
+**而且这件事是被强制的，不只是"删掉就没人读"（pass 38/39）。** 产物里那份自动生成的 Prisma 客户端自己就是 dotenv 的读者：它的配置把 `../../../.env` 相对自身目录解析，于是任何进程一 import 它就会把产物旁的 `.env` 载入 `process.env`（实测：只 `require` 产物的 client，植入的 `.env` 里的 `DATABASE_URL`/`NEXTAUTH_SECRET`/`PAYMENT_ALLOW_MOCK` 就出现在环境里）。`postbuild` 现在会把这些路径改写为 `null`（形状不认识就直接让构建失败），改写结果由 CI 与 `scripts/ci-local.sh` 断言。Next 自身还有第二个 dotenv 读取点（`BaseServer` 构造时对产物目录调用 `loadEnvConfig`，pass 39）：`postbuild` 会在 `server.js` 顶部写入 `__NEXT_PROCESSED_ENV=1`，让 `@next/env` 不再从文件填充；worker 镜像在 `prisma generate` 之后也会跑同一套客户端改写。因此即便某天产物旁边又出现了一个 `.env`（旧备份、没跑 postbuild 的 rsync、遗留的开发文件），它也无法再把 `PAYMENT_ALLOW_MOCK=1` 之类的开关喂给启动门禁——按本文档的约定，那份文件配置不了任何东西。
 
 web 镜像还额外删掉 Next 因 prerender source map 一路 trace 进来的 **TypeScript 源码**（`lib/`、`app/`、`components/`、`scripts/` 以及根目录的 `next.config.mjs`、`proxy.ts` 等，pass 32）：镜像里真正运行的是编译产物（`server.js` + `.next/server/*`，instrumentation 与 middleware 各有自己的编译 chunk），源码留在镜像里只会把内部注释、审计历史与运维脚本一起发出去。CI 与 `scripts/ci-local.sh` 既断言这些文件不在镜像里，也会**真正启动 web 镜像**（`node server.js`）并要求 `/api/health` 返回 200——只做文件形状检查的旧门禁发现不了"能构建、起不来"的产物。
 
@@ -100,11 +100,14 @@ web 镜像还额外删掉 Next 因 prerender source map 一路 trace 进来的 *
 **一条命令配置 + 验证投递**（推荐；它会写 `.env`，只改那两个键并留 `.env.bak`，然后立刻发一封真实通知并把接收端应答打出来）：
 
 ```bash
-npx tsx scripts/setup-mail.ts <provider> <凭据> [发信地址]
-npx tsx scripts/setup-mail.ts aliyun no-reply@你的域名 <DirectMail密码>   # 大陆服务器首选
-npx tsx scripts/setup-mail.ts qq 你的QQ号@qq.com <授权码>                # 或 163
-npx tsx scripts/setup-mail.ts resend <API_KEY> "PixelDuo <no-reply@你的域名>"
-npx tsx scripts/setup-mail.ts local 2525                                # 无账号演练（配本地 sink）
+# 凭据走环境变量而不是命令行参数：argv 在脚本运行期间（含真实 SMTP 往返）可被本机
+# 其他用户通过 ps -ww 看到，也会进 shell 历史。read -s 不回显。
+read -s SMTP_CREDENTIAL; export SMTP_CREDENTIAL
+npx tsx scripts/setup-mail.ts <provider> [地址|端口] [发信地址]
+npx tsx scripts/setup-mail.ts aliyun no-reply@你的域名                 # 大陆服务器首选
+npx tsx scripts/setup-mail.ts qq 你的QQ号@qq.com                       # 或 163
+npx tsx scripts/setup-mail.ts resend "PixelDuo <no-reply@你的域名>"
+npx tsx scripts/setup-mail.ts local 2525                               # 无账号演练（配本地 sink）
 ```
 
 它只写 `SMTP_URL` / `EMAIL_FROM`；`FEEDBACK_TO` 要自己加进 `.env`（并在当前 shell 里 `export`，脚本读的是环境变量而不是文件），否则上面的投递检查会以"生产拒绝用兜底地址"失败——这正是它该有的失败方式。
@@ -228,7 +231,9 @@ docker compose -f docker-compose.prod.yml up -d
 
 - 托管 Postgres：开启自动备份 + PITR，按需 `pg_restore`（恢复演练已通过，见 `progress.md`）
 - 自托管 Postgres：`docker compose up -d backup` 每日 dump 到 `./backups/`；手动 `./scripts/backup.sh`
-- 恢复：`pg_restore -d $DATABASE_URL backups/pixelduo-<stamp>.dump.gz`
+- 恢复（两种格式，**不要混用**）：
+  - compose `backup` 服务的 `backups/pixelduo-<stamp>.dump.gz` 是 `pg_dump -Fc` **自定义格式**（文件名带 `.gz` 只是命名习惯，内容没有再 gzip）：`pg_restore -d $DATABASE_URL backups/pixelduo-<stamp>.dump.gz`
+  - 手动 `./scripts/backup.sh` 的 `backups/<db>-<stamp>.sql.gz` 是 gzip 压缩的**纯 SQL**，`pg_restore` 读不了：`gunzip -c backups/<db>-<stamp>.sql.gz | docker exec -i pixelduo-db psql -U pixelduo -d pixelduo`
 - **对象存储（用户图片）**：托管 R2/S3 开启**版本控制 + 跨区域复制**（DR 首选）；自托管 MinIO 用 `backup-objects` 服务每日镜像到 `./backups/objects/`（保留 7 份，`BACKUP_TARGET_*` 可同步第二桶异地）；恢复演练 `RESTORE_DRILL_CONFIRM=1 ./scripts/restore-objects.sh <stamp> <scratch-bucket>`（脚本默认 dry run：只打印将写入的对象并以 1 退出，必须显式确认；目标桶名必须是**裸桶名**——带 `/` 的写法（`pixelduo/`、`s3://…`）会被拒绝，因为 `mc` 把参数读作 `alias/bucket/prefix`，字符串比较看不见这种写法；目标等于正式桶同样被拒绝）
 - **备份文件只在成功时出现**：`backup` 服务先写隐藏的 `.partial` 再改名，失败则删掉临时文件并打印 `FAILED`，**不轮转**（此前 `;` 串联的循环在 `pg_dump` 失败时仍会删掉一份好备份并打印 "written"，`docker compose ps` 照样显示 `Up`）。`scripts/backup.sh` 同理（写 `.partial` 再 `mv`），避免半截文件顶替正式名字被恢复回去
 

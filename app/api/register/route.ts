@@ -49,8 +49,13 @@ export async function POST(req: Request) {
     // Anti-abuse: the 30-credit signup bonus is granted only after the email
     // is verified. Tests/CI can auto-verify via EMAIL_VERIFY_AUTO=1.
     if (process.env.EMAIL_VERIFY_AUTO === "1") {
-      await prisma.user.update({ where: { id: user.id }, data: { emailVerified: new Date() } });
-      await signupBonus(user.id);
+      // One transaction (pass 39): a crash between the flip and the bonus left
+      // a verified account that could never win the flip again, so the 30
+      // credits were lost with no retry path.
+      await prisma.$transaction(async (tx) => {
+        await tx.user.update({ where: { id: user.id }, data: { emailVerified: new Date() } });
+        await signupBonus(user.id, tx);
+      });
       return ok({ userId: user.id, credits: 30, pendingVerification: false });
     }
     const token = await createToken(email, "verify-email", user.id);

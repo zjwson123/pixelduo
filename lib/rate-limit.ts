@@ -1,4 +1,5 @@
 import Redis from "ioredis";
+import { isIP } from "net";
 import { isProductionRuntime } from "./runtime-env";
 
 export interface RateLimitResult {
@@ -170,7 +171,26 @@ let limiter: RateLimiter | null = null;
 
 export function getLimiter(): RateLimiter {
   if (!limiter) {
-    limiter = process.env.REDIS_URL ? new RedisRateLimiter(process.env.REDIS_URL) : new MemoryRateLimiter();
+    const url = process.env.REDIS_URL;
+    if (url) {
+      try {
+        limiter = new RedisRateLimiter(url);
+      } catch (e) {
+        // A malformed REDIS_URL throws from ioredis' constructor, BEFORE hit()'s
+        // try/catch — so the documented in-memory degradation never ran and a
+        // one-character typo turned every rate-limited route into a 500
+        // (pass 39). Fall back loudly instead; /api/health still reports Redis
+        // as down, which is the correct signal for a deployment that asked for
+        // it and could not get it.
+        console.error(
+          "[rate-limit] REDIS_URL is not a usable URL — falling back to the in-memory limiter:",
+          e instanceof Error ? e.message : String(e),
+        );
+        limiter = new MemoryRateLimiter();
+      }
+    } else {
+      limiter = new MemoryRateLimiter();
+    }
   }
   return limiter;
 }
@@ -201,6 +221,69 @@ export async function peekRateLimit(key: string, limit: number, windowMs: number
   return getLimiter().peek(key, limit, windowMs);
 }
 
+// The address a per-IP bucket is charged to. IPv4 is itself; IPv6 is its /64.
+//
+// Keying on the exact /128 was a bypass, not a nuance (pass 39): the file's own
+// sweep comment already states that one IPv6 /64 is 2^64 addresses, and every
+// pre-auth cap here is per address — the login endpoint's bcrypt brake
+// (300/min), register (10/hour), the OAuth callback's account-farming cap
+// (30/hour). A /64 (a normal VPS or residential allocation) therefore made all
+// of them unbounded: one address per request bought ~20 password-sprays/second
+// against unknown addresses, each paying a 56-64 ms dummy bcrypt, and turned
+// OAuth signup farming into 30 credits per request. Masking to the /64 is the
+// standard unit of "one subscriber"; IPv6 privacy addresses rotate inside it,
+// so /128 keying also punished legitimate clients.
+//
+// IPv4-mapped IPv6 (`::ffff:a.b.c.d`) is normalized to the IPv4 form so the
+// two spellings of one client share a bucket, and unknown/unparseable values
+// pass through unchanged (they are already shared or operator-defined).
+function expandIpv6(host: string): number[] | null {
+  let h = host;
+  const zone = h.indexOf("%");
+  if (zone >= 0) h = h.slice(0, zone);
+  // An embedded IPv4 tail (`::ffff:192.0.2.1`) is two hextets, not a hex part.
+  const lastColon = h.lastIndexOf(":");
+  const tail = lastColon >= 0 ? h.slice(lastColon + 1) : h;
+  if (isIP(tail) === 4) {
+    const o = tail.split(".").map(Number);
+    h = `${h.slice(0, lastColon + 1)}${(((o[0] << 8) | o[1]) >>> 0).toString(16)}:${(((o[2] << 8) | o[3]) >>> 0).toString(16)}`;
+  }
+  const halves = h.split("::");
+  if (halves.length > 2) return null;
+  const parse = (s: string): number[] | null => {
+    if (!s) return [];
+    const out: number[] = [];
+    for (const part of s.split(":")) {
+      if (!/^[0-9a-fA-F]{1,4}$/.test(part)) return null;
+      out.push(parseInt(part, 16));
+    }
+    return out;
+  };
+  const head = parse(halves[0]);
+  const tailParts = halves.length === 2 ? parse(halves[1]) : [];
+  if (!head || !tailParts) return null;
+  if (halves.length === 1) return head.length === 8 ? head : null;
+  const missing = 8 - head.length - tailParts.length;
+  if (missing < 1) return null;
+  return [...head, ...new Array<number>(missing).fill(0), ...tailParts];
+}
+
+export function ipBucketAddress(ip: string): string {
+  const value = ip.trim();
+  if (isIP(value) === 4) return value;
+  if (isIP(value) !== 6) return value;
+  const hextets = expandIpv6(value);
+  if (!hextets || hextets.length !== 8) return value;
+  // ::ffff:0:0/96 is an IPv4 address in IPv6 clothing.
+  if (hextets.slice(0, 5).every((h) => h === 0) && hextets[5] === 0xffff) {
+    return [hextets[6] >> 8, hextets[6] & 255, hextets[7] >> 8, hextets[7] & 255].join(".");
+  }
+  return `${hextets
+    .slice(0, 4)
+    .map((h) => h.toString(16))
+    .join(":")}::/64`;
+}
+
 // Behind the trusted reverse proxy (Caddy appends the real client IP), the
 // LAST X-Forwarded-For entry is the client address as seen by the edge; the
 // first entries originate from the client and are freely spoofable. Taking
@@ -217,10 +300,10 @@ export function clientIp(req: Request): string {
   const fwd = req.headers.get("x-forwarded-for");
   if (fwd) {
     const parts = fwd.split(",").map((s) => s.trim()).filter(Boolean);
-    if (parts.length > 0) return parts[parts.length - 1];
+    if (parts.length > 0) return ipBucketAddress(parts[parts.length - 1]);
   }
   if (process.env.TRUST_X_REAL_IP === "1") {
-    return req.headers.get("x-real-ip") ?? "unknown";
+    return ipBucketAddress(req.headers.get("x-real-ip") ?? "unknown");
   }
   // Without the header every caller shares ONE bucket per scope ("unknown"), so
   // a single caller can spend the register/login/reset caps for everybody —

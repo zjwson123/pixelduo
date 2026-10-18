@@ -64,8 +64,14 @@ class LocalStorage implements StorageDriver {
     // Async: a synchronous write of a multi-MB reference image blocks the
     // event loop for every other request in the web container.
     const f = this.p(key);
-    await fsp.mkdir(path.dirname(f), { recursive: true });
-    await fsp.writeFile(f, data);
+    // Owner-only modes (pass 39). The default umask produced 0755 directories
+    // and 0644 files, so on a host-run deployment using the local driver every
+    // other local account could read every user's generated images and uploaded
+    // reference photos — which the privacy policy calls private. Modes are set
+    // explicitly rather than left to the umask (0700/0600 are unaffected by the
+    // common 022), and existing trees are not rewritten.
+    await fsp.mkdir(path.dirname(f), { recursive: true, mode: 0o700 });
+    await fsp.writeFile(f, data, { mode: 0o600 });
   }
 
   async get(key: string): Promise<Buffer | null> {
@@ -81,8 +87,12 @@ class LocalStorage implements StorageDriver {
   async delete(key: string) {
     try {
       await fsp.unlink(this.p(key));
-    } catch {
-      // ignore missing
+    } catch (e) {
+      // Missing is success (delete is idempotent); anything else is a real
+      // failure the erasure path must see (pass 39) — swallowing EACCES/ENOSPC
+      // made "the account and its files are gone" a claim the code could not
+      // evidence.
+      if ((e as NodeJS.ErrnoException)?.code !== "ENOENT") throw e;
     }
   }
 
@@ -135,8 +145,8 @@ class LocalStorage implements StorageDriver {
     // rotation or trip the on-call alert.
     const probe = path.join(this.root, `.health-${process.pid}-${randomUUID()}`);
     try {
-      await fsp.mkdir(this.root, { recursive: true });
-      await fsp.writeFile(probe, String(Date.now()));
+      await fsp.mkdir(this.root, { recursive: true, mode: 0o700 });
+      await fsp.writeFile(probe, String(Date.now()), { mode: 0o600 });
       await fsp.unlink(probe);
       return true;
     } catch {
@@ -150,6 +160,11 @@ class LocalStorage implements StorageDriver {
 class S3Storage implements StorageDriver {
   private client: S3Client;
   private bucket: string;
+
+  // Total wall-clock budget for one object READ or WRITE body. Headers have
+  // their own requestTimeout; this is what bounds a bucket that keeps the
+  // connection alive but never finishes the body (see put()).
+  private static readonly BODY_DEADLINE_MS = 300_000;
 
   constructor() {
     const endpoint = process.env.S3_ENDPOINT;
@@ -191,14 +206,24 @@ class S3Storage implements StorageDriver {
   }
 
   async put(key: string, data: Buffer, contentType = "image/png") {
+    // A TOTAL budget, not just an idle one (pass 39). requestTimeout stops at
+    // the response headers and socketTimeout is reset by every chunk, so a
+    // bucket trickling one byte per <60s held put/get — and therefore the
+    // worker's single tick loop — indefinitely while the 20s heartbeat kept the
+    // job looking alive to the reaper. 300s is generous for a same-region
+    // object transfer and still bounded.
     await this.client.send(
       new PutObjectCommand({ Bucket: this.bucket, Key: key, Body: data, ContentType: contentType }),
+      { abortSignal: AbortSignal.timeout(S3Storage.BODY_DEADLINE_MS) },
     );
   }
 
   async get(key: string): Promise<Buffer | null> {
     try {
-      const r = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }));
+      const r = await this.client.send(
+        new GetObjectCommand({ Bucket: this.bucket, Key: key }),
+        { abortSignal: AbortSignal.timeout(S3Storage.BODY_DEADLINE_MS) },
+      );
       return Buffer.from(await r.Body!.transformToByteArray());
     } catch {
       return null;
@@ -243,11 +268,11 @@ class S3Storage implements StorageDriver {
   }
 
   async delete(key: string) {
-    try {
-      await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }));
-    } catch {
-      // ignore missing
-    }
+    // S3 DeleteObject is idempotent — a missing key is a 204, not an error —
+    // so there is nothing to swallow. A network/permission failure must reach
+    // the caller; the erasure routes use it to refuse claiming deletion of a
+    // file that is still there (pass 39).
+    await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }));
   }
 
   async publicUrl(key: string): Promise<string> {
@@ -280,23 +305,45 @@ export function newStorageKey(ext = "png"): string {
   return `img/${randomUUID()}.${ext}`;
 }
 
-// Best-effort delete of many objects with bounded concurrency. The erasure
-// routes used to hand every key to one Promise.allSettled, so an account with
-// tens of thousands of delivered rows queued that many DeleteObjectCommands into
-// the driver at once (S3: all of them into undici's connection pool; local: the
-// same number of concurrent fs operations) — a memory and socket spike on the
-// one request an operator cannot ask the user to retry. Callers tolerate
-// failures: the rows are what make content visible, so a blob that survives is
-// an ops concern, not a user-facing one.
-export async function deleteObjectsBounded(keys: string[], concurrency = 16): Promise<number> {
+// Bounded-concurrency delete of many objects. The erasure routes used to hand
+// every key to one Promise.allSettled, so an account with tens of thousands of
+// delivered rows queued that many DeleteObjectCommands into the driver at once
+// (S3: all of them into undici's connection pool; local: the same number of
+// concurrent fs operations) — a memory and socket spike on the one request an
+// operator cannot ask the user to retry.
+//
+// Failures are reported, not just counted into a number the caller ignored
+// (pass 39): erasure answers `{deleted:true}` only when every object it named
+// was actually removed, so a transient bucket fault leaves the account intact
+// and retryable instead of permanently orphaned. Other callers (gallery, admin
+// takedown, worker reclaim) deliberately stay best-effort and use .catch().
+export interface DeleteObjectsOutcome {
+  deletedKeys: Set<string>;
+  failed: number;
+}
+
+export async function deleteObjectsBounded(
+  keys: string[],
+  concurrency = 16,
+): Promise<DeleteObjectsOutcome> {
   const storage = getStorage();
-  let deleted = 0;
-  for (let i = 0; i < keys.length; i += concurrency) {
-    const batch = keys.slice(i, i + concurrency);
-    const results = await Promise.allSettled(batch.map((k) => storage.delete(k)));
-    deleted += results.filter((r) => r.status === "fulfilled").length;
+  const unique = [...new Set(keys)];
+  const deletedKeys = new Set<string>();
+  let failed = 0;
+  for (let i = 0; i < unique.length; i += concurrency) {
+    const batch = unique.slice(i, i + concurrency);
+    const results = await Promise.allSettled(
+      batch.map(async (k) => {
+        await storage.delete(k);
+        return k;
+      }),
+    );
+    results.forEach((r, index) => {
+      if (r.status === "fulfilled") deletedKeys.add(batch[index]);
+      else failed += 1;
+    });
   }
-  return deleted;
+  return { deletedKeys, failed };
 }
 
 // Test hook

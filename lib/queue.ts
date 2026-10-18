@@ -74,31 +74,52 @@ async function enforceInflightCap(tx: Prisma.TransactionClient, userId: string) 
 // SAME operation still computes the same key and still dedupes. v1's
 // `api:<model>:<n>:<duration>:<key>` fold is the same idea one level up.
 function scopedIdempotencyKey(userId: string, key: string | undefined, shape: string): string | null {
+  // The key's LENGTH is its delimiter (pass 39). Concatenating it after the
+  // shape let a client key SPELL another operation's slot: with no reference,
+  // key "ref:K" produced `…:media:image:gpt:ref:K`, exactly what a request WITH
+  // a reference and key "K" computed — the second request was answered with
+  // the first job (duplicate:true) and the route deleted its upload. The length
+  // makes the split unambiguous: everything before the key is server-shaped,
+  // and the remaining bytes are exactly `key.length` long. Self-inflicted only
+  // (the owner prefix still scopes rows to one account), but a paid edit
+  // silently dropped is still a defect.
+  return key ? `${userId}:${shape}:${key.length}:${key}` : null;
+}
+
+// The pass-38 spelling (owner + operation + raw key, no length). Kept reachable
+// for ONE purpose — a retry that spans the deploy that introduced the length
+// delimiter must still find the row its first attempt created, or it would be
+// charged twice for one request. It is only reused when the row it names is the
+// SAME operation (findIdempotentJob), which is also what keeps its one
+// ambiguity (the "ref:K" alias above) from resolving across shapes.
+function priorScopedIdempotencyKey(userId: string, key: string | undefined, shape: string): string | null {
   return key ? `${userId}:${shape}:${key}` : null;
 }
 
 // The pre-pass-38 spelling of a client key: owner + raw key, no operation slot.
-// Kept reachable for ONE purpose — a retry that spans the deploy that introduced
-// the operation slot must still find the row its first attempt created, or it
-// would be charged twice for one request. The row is only reused when it is the
-// SAME operation (see findIdempotentJob); a legacy row of a different shape
-// stays invisible, which is the fix itself.
+// Same deploy-spanning purpose as priorScopedIdempotencyKey.
 function legacyIdempotencyKey(userId: string, key: string | undefined): string | null {
   return key ? `${userId}:${key}` : null;
 }
 
-// Resolve a client key to an existing job, across both spellings. One query:
-// the shaped key resolves by equality (it names the operation), the legacy key
-// only when the row it names is the same operation — the comparison the shape
-// fold adds, and the one whose absence returned a seedream generation to an
-// edit request.
+// Resolve a client key to an existing job, across the three spellings. One
+// query: the current shaped key resolves by equality (it names the operation
+// and is collision-free), the two prior spellings only when the row they name
+// is the SAME operation — the comparison the shape fold adds, and the one whose
+// absence returned a seedream generation to an edit request.
+//
+// The client is a parameter so the in-transaction re-check reads through the
+// same snapshot and sees a row an OLD process committed while this one waited
+// on the advisory lock (a rolling deploy has both spellings live).
 async function findIdempotentJob(
+  client: Prisma.TransactionClient | typeof prisma,
   shaped: string,
+  prior: string | null,
   legacy: string | null,
   sameOperation: (job: { mediaType: string; model: string; refImageKey: string | null; sourceVideoKey: string | null }) => boolean,
 ) {
-  const keys = legacy && legacy !== shaped ? [shaped, legacy] : [shaped];
-  const rows = await prisma.job.findMany({ where: { idempotencyKey: { in: keys } } });
+  const keys = [...new Set([shaped, prior, legacy].filter((k): k is string => Boolean(k)))];
+  const rows = await client.job.findMany({ where: { idempotencyKey: { in: keys } } });
   for (const job of rows) {
     if (job.idempotencyKey === shaped || sameOperation(job)) return job;
   }
@@ -108,16 +129,17 @@ async function findIdempotentJob(
 // Legacy: create generation job (backward compat with old API)
 export async function createGenerationJob(input: CreateJobInput) {
   const cost = estimateGenerationCost(input.model, input.quality, input.count);
-  const idemKey = scopedIdempotencyKey(input.userId, input.idempotencyKey, `gen:${input.model}`);
+  const shape = `gen:${input.model}`;
+  const idemKey = scopedIdempotencyKey(input.userId, input.idempotencyKey, shape);
+  const priorKey = priorScopedIdempotencyKey(input.userId, input.idempotencyKey, shape);
+  const legacyKey = legacyIdempotencyKey(input.userId, input.idempotencyKey);
+  const sameOperation = (job: { mediaType: string; model: string; refImageKey: string | null; sourceVideoKey: string | null }) =>
+    job.mediaType === "image" && job.model === input.model && job.refImageKey === null;
   // Fast path: a replayed idempotency key returns the existing job without
   // waiting on the advisory lock or counting against the inflight cap — a
   // client retrying while at the cap must get the duplicate, not a 429.
   if (idemKey) {
-    const existing = await findIdempotentJob(
-      idemKey,
-      legacyIdempotencyKey(input.userId, input.idempotencyKey),
-      (job) => job.mediaType === "image" && job.model === input.model && job.refImageKey === null,
-    );
+    const existing = await findIdempotentJob(prisma, idemKey, priorKey, legacyKey, sameOperation);
     if (existing) return { job: existing, created: false };
   }
   return prisma.$transaction(async (tx) => {
@@ -125,7 +147,7 @@ export async function createGenerationJob(input: CreateJobInput) {
     // Re-check under the advisory lock: two concurrent same-key submissions
     // serialize here and the loser must see the winner's committed row.
     if (idemKey) {
-      const existing = await tx.job.findUnique({ where: { idempotencyKey: idemKey } });
+      const existing = await findIdempotentJob(tx, idemKey, priorKey, legacyKey, sameOperation);
       if (existing) return { job: existing, created: false };
     }
     const job = await tx.job.create({
@@ -180,19 +202,18 @@ export async function createMediaJob(input: CreateMediaJobInput) {
   // whatever those say, exactly as it did before the slot existed.
   const shape = `media:${input.mediaType}:${input.model}${input.refImageKey ? ":ref" : ""}${input.sourceVideoKey ? ":src" : ""}`;
   const idemKey = scopedIdempotencyKey(input.userId, input.idempotencyKey, shape);
+  const priorKey = priorScopedIdempotencyKey(input.userId, input.idempotencyKey, shape);
+  const legacyKey = legacyIdempotencyKey(input.userId, input.idempotencyKey);
+  const sameOperation = (job: { mediaType: string; model: string; refImageKey: string | null; sourceVideoKey: string | null }) =>
+    job.mediaType === input.mediaType &&
+    job.model === input.model &&
+    (job.refImageKey !== null) === (input.refImageKey !== undefined) &&
+    (job.sourceVideoKey !== null) === (input.sourceVideoKey !== undefined);
   // Fast path: a replayed idempotency key returns the existing job without
   // waiting on the advisory lock or counting against the inflight cap — a
   // client retrying while at the cap must get the duplicate, not a 429.
   if (idemKey) {
-    const existing = await findIdempotentJob(
-      idemKey,
-      legacyIdempotencyKey(input.userId, input.idempotencyKey),
-      (job) =>
-        job.mediaType === input.mediaType &&
-        job.model === input.model &&
-        (job.refImageKey !== null) === (input.refImageKey !== undefined) &&
-        (job.sourceVideoKey !== null) === (input.sourceVideoKey !== undefined),
-    );
+    const existing = await findIdempotentJob(prisma, idemKey, priorKey, legacyKey, sameOperation);
     if (existing) return { job: existing, created: false };
   }
   return prisma.$transaction(async (tx) => {
@@ -200,7 +221,7 @@ export async function createMediaJob(input: CreateMediaJobInput) {
     // Re-check under the advisory lock: two concurrent same-key submissions
     // serialize here and the loser must see the winner's committed row.
     if (idemKey) {
-      const existing = await tx.job.findUnique({ where: { idempotencyKey: idemKey } });
+      const existing = await findIdempotentJob(tx, idemKey, priorKey, legacyKey, sameOperation);
       if (existing) return { job: existing, created: false };
     }
     const job = await tx.job.create({
@@ -417,7 +438,7 @@ export async function failJob(
   jobId: string,
   error: string,
   opts?: { terminal?: boolean; expect?: JobObservation; worker?: string },
-) {
+): Promise<boolean> {
   // Objects a terminal transition orphans are reclaimed AFTER the transaction
   // commits, never inside it.
   //
@@ -437,10 +458,16 @@ export async function failJob(
   // be able to veto the other, so the transaction keeps the money and the
   // cleanup follows it. A crash between the two leaks objects, which is the
   // state the pre-pass-14 code was in permanently.
+  //
+  // Returns whether this call PERFORMED a transition (pass 39). A caller that
+  // deletes objects of its own — the worker's moderation branches did,
+  // unconditionally — must not assume the failure belonged to it: a zombie's
+  // row may have been taken over, and deleting on stand-down destroys the live
+  // attempt's (or the delivered) files.
   const reclaim: string[] = [];
-  await prisma.$transaction(async (tx) => {
+  const transitioned = await prisma.$transaction(async (tx) => {
     const job = await tx.job.findUnique({ where: { id: jobId } });
-    if (!job || job.status === "failed" || job.status === "done") return;
+    if (!job || job.status === "failed" || job.status === "done") return false;
     // A holder failing its OWN attempt can only be holding a row that is
     // running or polling — those are the two statuses a claim leaves behind.
     // A row parked back to 'queued' is the recovery sweep's requeue, and the
@@ -459,14 +486,14 @@ export async function failJob(
     // the sweep — not the zombie — owns the retry decision. Callers that pass
     // no worker (the sweep itself) are unaffected: observing a row rather than
     // holding it is the sweep's own shape.
-    if (opts?.worker && job.status !== "running" && job.status !== "polling") return;
+    if (opts?.worker && job.status !== "running" && job.status !== "polling") return false;
     if (opts?.expect) {
       const seen = opts.expect;
       const unchanged =
         job.status === seen.status &&
         sameInstant(job.heartbeatAt, seen.heartbeatAt) &&
         sameInstant(job.startedAt, seen.startedAt);
-      if (!unchanged) return;
+      if (!unchanged) return false;
     }
     // Job.error is the one text column a PROVIDER shapes, and this write is the
     // failure bookkeeping itself: the worker's catch blocks call failJob first,
@@ -478,8 +505,28 @@ export async function failJob(
     // makes for a bad byte — is the deliberate asymmetry to refuseNul: this is
     // a diagnostic, not user input, and a refusal that throws would re-break the
     // bookkeeping it exists to protect. The marker keeps the repair visible.
-    const errorText = error.isWellFormed() ? error : `${error.toWellFormed()} [ill-formed text repaired]`;
+    //
+    // U+0000 is repaired FIRST because isWellFormed() does not cover it (pass
+    // 39): a NUL is well-formed UTF-16 but not encodable as PostgreSQL text, so
+    // the write died with 22021 — an UNEXPECTED error — and rolled back the
+    // status flip, the refund and the reclaim. A provider can put one in an
+    // error body; errText's code-point slice preserves it.
+    const repaired = error.includes("\u0000") ? error.replaceAll("\u0000", "\uFFFD") : error;
+    const errorText = repaired.isWellFormed() ? repaired : `${repaired.toWellFormed()} [ill-formed text repaired]`;
     const nextAttempts = job.attempts + 1;
+    // The observation must be part of the CAS, not only of the read above (pass
+    // 39): a peer poll claim rewrites worker/heartbeatAt but leaves
+    // status='polling', so a status-only predicate matched a row that had moved
+    // on between the read and the write and requeued/failed a live attempt.
+    const observed = opts?.expect
+      ? { heartbeatAt: opts.expect.heartbeatAt, startedAt: opts.expect.startedAt }
+      : {};
+    const casWhere = {
+      id: jobId,
+      status: job.status,
+      ...(opts?.worker ? { worker: opts.worker } : {}),
+      ...observed,
+    };
 
     if (!opts?.terminal && nextAttempts < job.maxAttempts) {
       // Retry with exponential backoff; the pre-auth hold stays in place.
@@ -491,8 +538,8 @@ export async function failJob(
       // peer, under --scale worker) compares it against SQL now() — see there
       // for what an app-clock backoff does under skew.
       const nowMs = (await dbNow(tx)).getTime();
-      await tx.job.updateMany({
-        where: { id: jobId, status: job.status, ...(opts?.worker ? { worker: opts.worker } : {}) },
+      const res = await tx.job.updateMany({
+        where: casWhere,
         data: {
           status: "queued",
           attempts: nextAttempts,
@@ -501,14 +548,14 @@ export async function failJob(
           heartbeatAt: null,
         },
       });
-      return;
+      return res.count === 1;
     }
 
     // Terminal failure = DLQ; refund the held credits. CAS from the observed
     // status: two concurrent recovery sweeps (or a sweep racing a completion)
     // must not both pass — the refund would run twice, or run after delivery.
     const claim = await tx.job.updateMany({
-      where: { id: jobId, status: job.status, ...(opts?.worker ? { worker: opts.worker } : {}) },
+      where: casWhere,
       data: {
         status: "failed",
         attempts: nextAttempts,
@@ -517,7 +564,8 @@ export async function failJob(
         heartbeatAt: null,
       },
     });
-    if (claim.count === 1) {
+    if (claim.count !== 1) return false;
+    {
       const consumption = (job.consumption ?? null) as unknown as SpendConsumption[] | null;
       await refundCreditsTx(
         tx,
@@ -541,9 +589,11 @@ export async function failJob(
       // attempt can resume instead of re-billing the whole batch.
       reclaim.push(...checkpointKeys(job.images));
     }
+    return true;
   });
   // After commit, so a slow bucket cannot roll the transition back (see above).
   for (const key of reclaim) await getStorage().delete(key).catch(() => undefined);
+  return transitioned;
 }
 
 // Storage keys in a Job.images checkpoint. While a job is in flight the column

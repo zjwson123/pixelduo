@@ -1,12 +1,18 @@
 // Configure outbound mail in one command, then prove it works.
 //
-//   npx tsx scripts/setup-mail.ts aliyun no-reply@yourdomain.com <password>
-//   npx tsx scripts/setup-mail.ts resend <api-key> "PixelDuo <no-reply@yourdomain.com>"
+//   read -s SMTP_CREDENTIAL; export SMTP_CREDENTIAL   # hidden prompt, not history
+//   npx tsx scripts/setup-mail.ts aliyun no-reply@yourdomain.com
+//   npx tsx scripts/setup-mail.ts resend "PixelDuo <no-reply@yourdomain.com>"
 //   npx tsx scripts/setup-mail.ts local 2525            # verify the path with no provider
 //
 // Writes SMTP_URL + EMAIL_FROM into .env (after backing it up), then runs the
 // delivery check from scripts/verify-mail.ts and prints what the receiving
 // server answered. The credential is written to .env and never printed.
+//
+// The credential is read from SMTP_CREDENTIAL, NOT argv (pass 39): a command-
+// line argument is readable by every local account through `ps -ww` for the
+// whole life of the run (which includes a real SMTP round trip) and lands in
+// shell history — the same argv rule scripts/backup-objects.sh already follows.
 import fs from "fs";
 import path from "path";
 import { MAIL_PRESETS, findPreset, schemeForPort } from "../lib/mail-presets";
@@ -16,13 +22,15 @@ import { feedbackMailRefusal } from "../lib/mail";
 const [providerId, ...rest] = process.argv.slice(2);
 
 function usage(exitCode = 1): never {
-  console.error("usage: npx tsx scripts/setup-mail.ts <provider> <credential|port> [from-address]");
+  console.error("usage: SMTP_CREDENTIAL=<secret> npx tsx scripts/setup-mail.ts <provider> [address|port] [from-address]");
+  console.error("       (read the credential without echo:  read -s SMTP_CREDENTIAL; export SMTP_CREDENTIAL)");
   console.error("\nproviders:");
   for (const p of MAIL_PRESETS) {
     console.error(`  ${p.id.padEnd(9)} ${p.label}`);
     if (p.notes) console.error(`            ${p.notes}`);
   }
-  console.error("\nexample: npx tsx scripts/setup-mail.ts aliyun no-reply@example.com <password>");
+  console.error("\nexample: read -s SMTP_CREDENTIAL; export SMTP_CREDENTIAL");
+  console.error("         npx tsx scripts/setup-mail.ts aliyun no-reply@example.com");
   process.exit(exitCode);
 }
 
@@ -33,18 +41,24 @@ if (!preset) {
   usage();
 }
 
-// Argument shape differs per provider: address-first for mailbox providers,
-// credential-first for token providers, a PORT for the local sink.
+// Positional shape per provider (the credential never appears here):
+//   portFirst     <port>
+//   addressFirst  <address> [from]
+//   token (ses)   [smtp-username] [from]
+//   other token   [from]
 const args = rest.filter((a) => a !== "");
 const portFirst = preset.needs[0] === "port";
 const addressFirst = preset.needs[0] === "address";
-const address = portFirst ? args[0] : addressFirst ? args[0] : preset.id === "ses" ? args[1] : undefined;
-const credential = portFirst ? "" : addressFirst ? args[1] : args[0];
-const fromArg = portFirst ? undefined : addressFirst ? args[2] : args[1];
+const address = portFirst ? args[0] : addressFirst ? args[0] : preset.id === "ses" ? args[0] : undefined;
+const credential = portFirst ? "" : (process.env.SMTP_CREDENTIAL ?? "");
+const fromArg = portFirst ? undefined : addressFirst ? args[1] : preset.id === "ses" ? args[1] : args[0];
 
-if (!address && !credential) usage();
 if (portFirst ? !address : !credential) {
-  console.error(`missing ${addressFirst && !address ? "address" : "credential"}`);
+  if (!portFirst && !credential) {
+    console.error("missing SMTP_CREDENTIAL — pass the SMTP password/API key through the environment, not argv.");
+  } else {
+    console.error(`missing ${addressFirst && !address ? "address" : "credential"}`);
+  }
   usage();
 }
 
@@ -90,7 +104,8 @@ if (fs.existsSync("/.dockerenv")) {
       "",
       "Re-run the SAME command on the HOST, from the repository checkout: that is where it",
       "writes .env (SMTP_URL + EMAIL_FROM) and verifies delivery end to end.",
-      "  npx tsx scripts/setup-mail.ts <provider> <credential|port> [from-address]",
+      "  read -s SMTP_CREDENTIAL; export SMTP_CREDENTIAL",
+      "  npx tsx scripts/setup-mail.ts <provider> [address|port] [from-address]",
       "",
       "Then recreate the containers so they read the new values:",
       "  docker compose up -d --force-recreate web worker",

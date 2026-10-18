@@ -355,7 +355,9 @@ describe("the deploy artifact is installable and does not ship the build host's 
     fs.writeFileSync(path.join(tmp, ".env"), "NEXTAUTH_SECRET=leaked");
     fs.writeFileSync(path.join(tmp, ".env.production"), "DATABASE_URL=leaked");
     fs.writeFileSync(path.join(tmp, "sub", ".env.local"), "S3_SECRET_ACCESS_KEY=leaked");
-    fs.writeFileSync(path.join(tmp, "server.js"), "// keep me");
+    // The generated launcher's distinctive line: a server.js that does not
+    // require Next is refused by the prune (pass 39), so the fixture carries it.
+    fs.writeFileSync(path.join(tmp, "server.js"), "require('next') // keep me");
     // A dependency's own .env is not ours and must survive.
     fs.writeFileSync(path.join(tmp, "node_modules", "dep", ".env"), "keep=1");
 
@@ -369,6 +371,8 @@ describe("the deploy artifact is installable and does not ship the build host's 
     expect(fs.existsSync(path.join(tmp, "sub", ".env.local"))).toBe(false);
     expect(fs.existsSync(path.join(tmp, "node_modules", "dep", ".env"))).toBe(true);
     expect(fs.existsSync(path.join(tmp, "server.js"))).toBe(true);
+    // Next's own runtime dotenv loader is neutralised in the launcher (pass 39).
+    expect(fs.readFileSync(path.join(tmp, "server.js"), "utf8")).toContain("__NEXT_PROCESSED_ENV");
     fs.rmSync(tmp, { recursive: true, force: true });
   });
 

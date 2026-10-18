@@ -31,10 +31,23 @@
 // environment explicitly — docker compose, or the host's own process
 // environment.
 import { readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
+import os from "node:os";
+import { neuterPrismaDotenv } from "./prisma-dotenv.mjs";
 
-// Optional root argument so a test can point this at a scratch tree.
-const root = process.argv[2] ?? ".next/standalone";
+// Optional root argument so a test can point this at a scratch tree — but only
+// the real artifact or a scratch directory under the OS temp dir (pass 39). The
+// script deletes recursively; an invocation with $HOME or / would remove
+// credentials and databases outside any build tree.
+const root = resolve(process.argv[2] ?? ".next/standalone");
+const allowedStandalone = resolve(".next/standalone");
+const tempRoot = resolve(os.tmpdir());
+if (root !== allowedStandalone && !root.startsWith(tempRoot + sep)) {
+  console.error(
+    `[prune-standalone] refusing to prune ${root} — the root must be .next/standalone or a directory under ${tempRoot}`,
+  );
+  process.exit(1);
+}
 const removed = [];
 
 function buildHostOnly(name) {
@@ -95,6 +108,74 @@ if (removed.length) {
   console.log(`[prune-standalone] no build-host-only files in ${root}`);
 }
 
+// The Docker web stage prunes these exact top-level names from the artifact —
+// and a NON-Docker deployment ships `.next/standalone` itself (docs/deploy.md's
+// documented path). The build leaves the whole source tree, the design
+// prototypes, internal monetisation notes and the deploy files inside it, so
+// that artifact carried the same material the image deliberately refuses
+// (pass 39). `public/`, `prisma/schema.prisma`, `node_modules/`, `.next/`,
+// `server.js` and `package.json` are what actually runs and are kept.
+const SHIP_EXCLUDES = [
+  "app",
+  "components",
+  "lib",
+  "scripts",
+  "designs",
+  "docs",
+  "tests",
+  "e2e",
+  "perf",
+  "backups",
+  "data",
+  "PRODUCT_OUTLINE.md",
+  "README.md",
+  "docker-compose.yml",
+  "docker-compose.single.yml",
+  "docker-compose.prod.yml",
+  "Caddyfile",
+  "Dockerfile",
+  "next.config.mjs",
+  "proxy.ts",
+  "instrumentation.ts",
+  "instrumentation-client.ts",
+  "sentry.server.config.ts",
+  "sentry.edge.config.ts",
+  "vitest.config.ts",
+  "vitest.setup.ts",
+  "playwright.config.ts",
+  "tsconfig.json",
+  "tsconfig.tsbuildinfo",
+  "next-env.d.ts",
+  ".github",
+  ".npmrc",
+  ".gitignore",
+  ".dockerignore",
+  ".vscode",
+  ".idea",
+  ".claude",
+  ".cursor",
+  ".env.example",
+  "prisma/seed.ts",
+];
+const excluded = [];
+for (const name of SHIP_EXCLUDES) {
+  const p = join(root, name);
+  try {
+    if (statSync(p, { throwIfNoEntry: false })) {
+      rmSync(p, { recursive: true, force: true });
+      excluded.push(name);
+    }
+  } catch {
+    // A path that vanished (or cannot be read) is not a reason to fail the
+    // build; the artifact assertions in CI are the authority on the result.
+  }
+}
+if (excluded.length) {
+  console.log(
+    `[prune-standalone] removed ${excluded.length} non-runtime entr(ies) from the artifact: ${excluded.join(", ")}`,
+  );
+}
+
 // The one runtime reader of a dotenv file, closed (pass 38).
 //
 // Deleting `.next/standalone/.env` is not enough on its own, and this script's
@@ -113,47 +194,8 @@ if (removed.length) {
 // CI-published NEXTAUTH_SECRET and skips the NEXTAUTH_URL/SMTP_URL boot gates,
 // so a stray dotenv could satisfy a signing key anyone can read out of the
 // public repository. Rewriting the paths to null makes the claim true and the
-// file inert. Fail closed if the shape is unrecognised (below).
-const NULL_ENV_PATHS = '"relativeEnvPaths": {"rootEnvPath": null, "schemaEnvPath": null}';
-
-function neuterPrismaDotenv(dir) {
-  let names;
-  try {
-    names = readdirSync(dir);
-  } catch {
-    return { state: "absent" };
-  }
-  const pattern = /"relativeEnvPaths"\s*:\s*\{[^}]*\}/;
-  const patched = [];
-  for (const name of names) {
-    // index.js is the entry (default.js re-exports it); edge.js and wasm.js
-    // carry the same config for runtimes this deployment does not use, and a
-    // rewrite that skipped them would leave the claim true only by accident.
-    if (!name.endsWith(".js")) continue;
-    const p = join(dir, name);
-    let src;
-    try {
-      src = readFileSync(p, "utf8");
-    } catch {
-      continue;
-    }
-    if (!src.includes('"relativeEnvPaths"')) continue;
-    const match = pattern.exec(src);
-    if (!match) {
-      // The config exists but not in the shape this rewrite knows. Editing
-      // generated code by guesswork could break the client, and leaving it
-      // means a .env would be loaded again — so refuse to ship the artifact and
-      // let a human look at what Prisma changed. This is the gate; without it
-      // the rewrite could silently stop applying after a Prisma upgrade.
-      return { state: "unverifiable", path: p };
-    }
-    if (match[0] === NULL_ENV_PATHS) continue;
-    writeFileSync(p, src.replace(pattern, NULL_ENV_PATHS));
-    patched.push(p);
-  }
-  return { state: "ok", patched };
-}
-
+// file inert. Fail closed if the shape is unrecognised (scripts/prisma-dotenv.mjs,
+// shared with the Docker worker stage — pass 39).
 const prismaEnv = neuterPrismaDotenv(join(root, "node_modules", ".prisma", "client"));
 if (prismaEnv.state === "unverifiable") {
   console.error(
@@ -174,4 +216,46 @@ if (prismaEnv.state === "unverifiable") {
   console.log(
     `[prune-standalone] neutralised the Prisma client's dotenv loading in ${prismaEnv.patched.length} file(s): ${prismaEnv.patched.join(", ")}`,
   );
+}
+
+// Next has a dotenv loader of its own (pass 39), and the Prisma rewrite does
+// not close it: BaseServer's constructor calls loadEnvConfig(dir, dev) with the
+// standalone directory as `dir`, so a `.env` restored beside the artifact is
+// parsed at runtime — before instrumentation.ts's boot gates — even though the
+// Prisma client can no longer read it. `@next/env`'s processEnv() returns
+// immediately when `process.env.__NEXT_PROCESSED_ENV` is set, so setting it at
+// the top of the generated server.js (before `require("next")`) makes the
+// file's values inert while leaving an operator's real process environment
+// untouched. `next start` from the repo is NOT patched: there the dotenv is a
+// development feature, and every deployed configuration passes its environment
+// explicitly.
+function neuterNextDotenv(dir) {
+  const p = join(dir, "server.js");
+  let src;
+  try {
+    src = readFileSync(p, "utf8");
+  } catch {
+    return { state: "absent" };
+  }
+  if (src.includes("__NEXT_PROCESSED_ENV")) return { state: "ok", patched: false };
+  if (!/require\(['"]next['"]\)/.test(src)) return { state: "unverifiable", path: p };
+  writeFileSync(
+    p,
+    `// [pixelduo] runtime dotenv neutralised by scripts/prune-standalone.mjs — see docs/deploy.md\nprocess.env.__NEXT_PROCESSED_ENV = "1"\n${src}`,
+  );
+  return { state: "ok", patched: true };
+}
+
+const nextEnv = neuterNextDotenv(root);
+if (nextEnv.state === "unverifiable") {
+  console.error(
+    `[prune-standalone] ${nextEnv.path} does not look like a Next standalone server (no require('next')) — refusing to ship an artifact whose runtime dotenv loading cannot be neutralised`,
+  );
+  process.exit(1);
+} else if (nextEnv.state === "absent") {
+  console.log("[prune-standalone] no server.js in the tree — nothing to neutralise");
+} else if (!nextEnv.patched) {
+  console.log("[prune-standalone] server.js already neutralises Next's runtime dotenv loading");
+} else {
+  console.log("[prune-standalone] neutralised Next's runtime dotenv loading in server.js");
 }

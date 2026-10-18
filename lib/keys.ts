@@ -82,6 +82,43 @@ export function getArkBaseUrl(): string {
   return arkSource()?.baseUrl ?? ARK_DEFAULT_BASE;
 }
 
+// Ark VIDEO tasks: the same atomic key+endpoint rule as the image pair above,
+// which pass 37 applied to images and left the video create/poll paths out.
+//
+// Those paths paired `getArkKey()` — which returns the GATEWAY's credential when
+// no env key is set — with a hardcoded `ark.cn-beijing.volces.com`. An operator
+// whose `ark` gateway is a relay therefore sent the relay's key to Volcengine's
+// own host (and relay-based video deployments could not work at all). [pass 39]
+//
+// The task endpoint keeps only the gateway base's ORIGIN and appends Ark's
+// native tasks path: the gateway config's own base_url is usually a chat URL
+// (`…/api/coding/v1`), so reusing its path would hand a generation payload to a
+// chat route. On the vendor host (the normal case, and the only case when the
+// key came from ARK_IMAGE_API_KEY) the origin yields exactly the previous URL.
+const ARK_TASKS_PATH = "/api/v3/contents/generations/tasks";
+const ARK_TASKS_DEFAULT = `https://ark.cn-beijing.volces.com${ARK_TASKS_PATH}`;
+
+function arkVideoSource(): { key: string; tasksUrl: string } | null {
+  const envKey = process.env.ARK_IMAGE_API_KEY || undefined;
+  if (envKey) return { key: envKey, tasksUrl: ARK_TASKS_DEFAULT };
+  const gw = loadCcProxyConfig()?.gateways?.ark;
+  const key = gw?.api_keys?.find((k) => k.length > 0);
+  if (!key) return null;
+  if (!gw?.base_url) return { key, tasksUrl: ARK_TASKS_DEFAULT };
+  try {
+    return { key, tasksUrl: `${new URL(gw.base_url).origin}${ARK_TASKS_PATH}` };
+  } catch {
+    // A malformed base_url with a gateway key: refusing to borrow an
+    // unparseable origin is the fail-closed direction. Still pair the key with
+    // the vendor only when the gateway named no endpoint at all (above).
+    return null;
+  }
+}
+
+export function getArkVideoConfig(): { key: string; tasksUrl: string } | null {
+  return arkVideoSource();
+}
+
 // DashScope, same atomic rule and the same probed mispairing. The gateway's
 // base_url is a compatible-mode URL (…/compatible-mode/v1) whose ORIGIN is what
 // the native generation endpoints hang off, hence the strip in the middle.
@@ -113,6 +150,18 @@ export function getAliyunBaseUrl(service: "multimodal-generation" | "video-synth
     default:
       return `${base}/api/v1/services/aigc/multimodal-generation/generation`;
   }
+}
+
+// The poll half of a DashScope video task, derived from the SAME source as the
+// key (pass 39). `pollWanVideoTask` used to hardcode dashscope.aliyuncs.com
+// while `getAliyunKey()` returns the gateway's credential when no env key is
+// set — so a relay-backed deployment sent the relay's key to Alibaba's host on
+// every poll (and could not poll its own task at all). Same atomic rule as the
+// create side; the wan lanes are disabled today, which is exactly when a latent
+// credential-mispairing is cheapest to fix.
+export function getAliyunTaskUrl(taskId: string): string {
+  const base = aliyunSource()?.base ?? DASHSCOPE_DEFAULT_BASE;
+  return `${base}/api/v1/tasks/${encodeURIComponent(taskId)}`;
 }
 
 // Key for the DeepSeek chat API (prompt assistant + smart routing).

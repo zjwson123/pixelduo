@@ -345,7 +345,10 @@ describe("pass 38 — a truncated data export says so", () => {
       rowLimit: number;
       data: { ledger: unknown[] };
     };
-    expect(body.truncated).toBe(true);
+    // The response shape is part of the assertion: a refusal (429/500) leaves
+    // truncated undefined, and the failure should say which one it was.
+    expect(res.status).toBe(200);
+    expect(body.truncated, JSON.stringify(body).slice(0, 300)).toBe(true);
     expect(body.rowLimit).toBe(5000);
     expect(body.data.ledger.length).toBe(5000);
   }, 30_000);

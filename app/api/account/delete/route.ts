@@ -1,11 +1,11 @@
 import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import { ApiError, enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, requireUserId, zodMessage, tooLarge } from "@/lib/api";
-import { prisma, withDeadlockRetry } from "@/lib/prisma";
+import { prisma } from "@/lib/prisma";
 import { passwordReauthRefusal } from "@/lib/auth";
 import { GRANT_LOCK_ORDER } from "@/lib/ledger";
-import { deleteObjectsBounded } from "@/lib/storage";
-import { checkpointKeys } from "@/lib/queue";
+import { eraseUserArtifacts } from "@/lib/erasure";
+import { captureError } from "@/lib/observability";
 import { ADMIN_GUARD_LOCK, assertAnotherAdminRemains } from "@/lib/admin";
 import {
   verifyTotp,
@@ -104,73 +104,77 @@ export async function POST(req: Request) {
     // files we hold) must both be erased for a true GDPR/PIPL delete. So must
     // the images a job had already persisted into its checkpoint: those have no
     // Image row yet, so nothing else here (or /api/files) can reach them, and
-    // they were generated from the user's own prompts.
-    const images = await prisma.image.findMany({ where: { userId }, select: { url: true } });
-    const jobs = await prisma.job.findMany({
-      where: { userId },
-      select: { refImageKey: true, images: true, sourceVideoKey: true },
-    });
-    const refKeys = jobs.map((j) => j.refImageKey).filter((k): k is string => Boolean(k));
-    const staged = jobs.flatMap((j) => checkpointKeys(j.images));
-    // Job.sourceVideoKey is the OTHER durable pointer to a stored object: an
-    // extend job names the clip it continues (app/api/video/route.ts:102), and
-    // nothing else in the schema or the code reaches that column — only the
-    // worker reads it. Gallery delete removes the Image row first and deletes
-    // the blob best-effort, so a single transient failure there would leave the
-    // object with no row naming it, and this sweep is the last chance to reach
-    // it. Erasure has to collect every pointer the user's own rows hold.
-    const sourceKeys = jobs.map((j) => j.sourceVideoKey).filter((k): k is string => Boolean(k));
-    await deleteObjectsBounded([
-      ...images.map((i) => i.url),
-      ...refKeys,
-      ...staged,
-      ...sourceKeys,
-    ]);
-    await withDeadlockRetry(() =>
-      prisma.$transaction(async (tx) => {
-        // Re-checked under a lock held to commit, in the same transaction as the
-        // delete. The unlocked count above cannot be the invariant: two admins
-        // erasing themselves at the same moment each saw 2 admins and both deletes
-        // landed, leaving an install with no admin and no in-app way to mint one
-        // (both admin routes refuse to target the caller, so recovery needs host
-        // access to scripts/promote-admin.ts).
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(${ADMIN_GUARD_LOCK})`;
-        const current = await tx.user.findUnique({ where: { id: userId }, select: { role: true } });
-        if (!current) throw new Error("user-not-found");
-        if (current.role === "admin") await assertAnotherAdminRemains(tx, userId);
-        // Lock what the cascade below will reach, in the order every writer that
-        // can meet this transaction takes it: Order → Job → CreditGrant → User.
-        //
-        // The grant lock alone was not enough. This transaction reaches the Job
-        // and Order rows through the cascade, i.e. AFTER the User row, while the
-        // writers that hold those rows take them FIRST: completeJob (Order → Job
-        // → User), failJob (Job → grants → User), the refund webhook (Order →
-        // grants → User), fulfilOrder (Order → User). An erasure overlapping any
-        // of them was therefore still a cycle, and PostgreSQL aborted the erasure
-        // (40P01 on `user.delete`, observed in probes against the real failJob
-        // and against the webhook's statement pair) — a 500 on the one route
-        // whose promise is that the customer can retry. The sweep and the spend
-        // path are the two races the previous version did close, which is why the
-        // order has to come from the writers rather than from the race that
-        // happened to be seen. withDeadlockRetry is the net for the next writer
-        // this list does not know about yet.
-        //
-        // Locking rows the cascade will delete is idempotent, and the cost is
-        // bounded by the account's own row count (a 20k-grant / 2k-job account
-        // measured 26 ms, against the 5 s transaction timeout).
-        await tx.$queryRaw(Prisma.sql`SELECT id FROM "Order" WHERE "userId" = ${userId} ORDER BY id FOR UPDATE`);
-        await tx.$queryRaw(Prisma.sql`SELECT id FROM "Job" WHERE "userId" = ${userId} ORDER BY id FOR UPDATE`);
-        await tx.$queryRaw(
-          Prisma.sql`SELECT id FROM "CreditGrant" WHERE "userId" = ${userId} ${GRANT_LOCK_ORDER} FOR UPDATE`,
-        );
-        await tx.backupCode.deleteMany({ where: { userId } });
-        await tx.verificationToken.deleteMany({ where: { userId } });
-        await tx.creditReminder.deleteMany({ where: { userId } });
-        // ApiKey has no FK relation (by design, hash-only table), so it needs an
-        // explicit wipe or key metadata survives the erasure request.
-        await tx.apiKey.deleteMany({ where: { userId } });
-        await tx.user.delete({ where: { id: userId } });
-      }),
+    // they were generated from the user's own prompts. Job.sourceVideoKey is
+    // the OTHER durable pointer to a stored object (an extend job names the
+    // clip it continues, and only the worker reads that column).
+    //
+    // eraseUserArtifacts owns the whole sequence (pass 39): every key, a delete
+    // whose failures are no longer swallowed, a locked re-read that proves no
+    // worker completed an artifact in between, and only then the row deletes.
+    // A storage fault now answers 503 with the account intact and retryable,
+    // instead of `{deleted:true}` over objects that were still in the bucket
+    // with nothing left naming them.
+    await eraseUserArtifacts(
+      userId,
+      {
+        lockRows: async (tx) => {
+          // Re-checked under a lock held to commit, in the same transaction as the
+          // delete. The unlocked count above cannot be the invariant: two admins
+          // erasing themselves at the same moment each saw 2 admins and both deletes
+          // landed, leaving an install with no admin and no in-app way to mint one
+          // (both admin routes refuse to target the caller, so recovery needs host
+          // access to scripts/promote-admin.ts).
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(${ADMIN_GUARD_LOCK})`;
+          const current = await tx.user.findUnique({ where: { id: userId }, select: { role: true } });
+          if (!current) throw new Error("user-not-found");
+          if (current.role === "admin") await assertAnotherAdminRemains(tx, userId);
+          // Lock what the cascade below will reach, in the order every writer that
+          // can meet this transaction takes it: Order → Job → CreditGrant → User.
+          //
+          // The grant lock alone was not enough. This transaction reaches the Job
+          // and Order rows through the cascade, i.e. AFTER the User row, while the
+          // writers that hold those rows take them FIRST: completeJob (Order → Job
+          // → User), failJob (Job → grants → User), the refund webhook (Order →
+          // grants → User), fulfilOrder (Order → User). An erasure overlapping any
+          // of them was therefore still a cycle, and PostgreSQL aborted the erasure
+          // (40P01 on `user.delete`, observed in probes against the real failJob
+          // and against the webhook's statement pair) — a 500 on the one route
+          // whose promise is that the customer can retry. The sweep and the spend
+          // path are the two races the previous version did close, which is why the
+          // order has to come from the writers rather than from the race that
+          // happened to be seen. lib/erasure keeps withDeadlockRetry as the net for
+          // the next writer this list does not know about yet.
+          //
+          // Locking rows the cascade will delete is idempotent, and the cost is
+          // bounded by the account's own row count (a 20k-grant / 2k-job account
+          // measured 26 ms, against the 5 s transaction timeout). The artifact
+          // re-read runs INSIDE this lock: a worker that committed its Image row
+          // before the lock is seen and forces one more sweep; one that commits
+          // after it blocks and then loses its own CAS because the row is gone.
+          await tx.$queryRaw(Prisma.sql`SELECT id FROM "Order" WHERE "userId" = ${userId} ORDER BY id FOR UPDATE`);
+          await tx.$queryRaw(Prisma.sql`SELECT id FROM "Job" WHERE "userId" = ${userId} ORDER BY id FOR UPDATE`);
+          await tx.$queryRaw(
+            Prisma.sql`SELECT id FROM "CreditGrant" WHERE "userId" = ${userId} ${GRANT_LOCK_ORDER} FOR UPDATE`,
+          );
+        },
+        deleteRows: async (tx) => {
+          await tx.backupCode.deleteMany({ where: { userId } });
+          await tx.verificationToken.deleteMany({ where: { userId } });
+          await tx.creditReminder.deleteMany({ where: { userId } });
+          // ApiKey has no FK relation (by design, hash-only table), so it needs an
+          // explicit wipe or key metadata survives the erasure request.
+          await tx.apiKey.deleteMany({ where: { userId } });
+          await tx.user.delete({ where: { id: userId } });
+        },
+      },
+      {
+        onStorageFailure: (keys) =>
+          captureError(new Error("erasure-storage-delete-failed"), {
+            scope: "erasure-storage",
+            userId,
+            failedKeys: keys.length,
+          }),
+      },
     );
     return ok({ deleted: true });
   } catch (e) {

@@ -228,7 +228,14 @@ export async function cycleUsageTx(
   // callers that rely on it would silently stop granting carryover.
   const ended = await tx.creditGrant.findFirst({
     where: { userId, source: "SUBSCRIPTION", expiresAt: { lte: now } },
-    orderBy: { createdAt: "desc" },
+    // Order by the CYCLE BOUNDARY, not by createdAt (pass 39). createdAt is
+    // DEFAULT CURRENT_TIMESTAMP — the writing transaction's BEGIN time, which
+    // for two nearly simultaneous fulfillments can be in the opposite order to
+    // their commit/cycle order. Picking the older cycle as "the one that just
+    // ended" measures the wrong quota (and the rollover witness then suppresses
+    // the real cycle's carryover). expiresAt IS the cycle and is monotone for
+    // sequential/early renewals; id is the total-order tiebreak.
+    orderBy: [{ expiresAt: { sort: "desc", nulls: "last" } }, { id: "desc" }],
     select: grantSelect,
   });
   const funding =
@@ -236,7 +243,7 @@ export async function cycleUsageTx(
     (cycleAnchor.getTime() <= now.getTime()
       ? await tx.creditGrant.findFirst({
           where: { userId, source: "SUBSCRIPTION" },
-          orderBy: { createdAt: "desc" },
+          orderBy: [{ expiresAt: { sort: "desc", nulls: "last" } }, { id: "desc" }],
           select: grantSelect,
         })
       : null);
@@ -266,8 +273,22 @@ export async function cycleUsageTx(
     // grant if the anchor was moved backwards after the fact (the expiry tests
     // do exactly that to simulate a lapsed cycle, and an operator correction
     // looks the same), and in that case the spend is still this cycle's spend.
+    //
+    // The bound is BACKDATED by the transaction-start allowance (pass 39).
+    // Job.createdAt is the job-creation transaction's BEGIN time, and a
+    // transaction that began before the renewal can still run its spend AFTER
+    // the renewal commits (it waits on the User lock): its spend drew on the
+    // new SUBSCRIPTION grant while its createdAt is earlier than the grant's.
+    // The old exact bound then filtered that job out, understating the cycle's
+    // spend and overpaying carryover. Transactions are bounded by Prisma's 5s
+    // interactive budget, so a minute is generous; extra rows are harmless
+    // because `consumption` is the authoritative attribution.
+    const TX_START_ALLOWANCE_MS = 60_000;
     const jobs = await tx.job.findMany({
-      where: { userId, createdAt: { gte: funding.createdAt } },
+      where: {
+        userId,
+        createdAt: { gte: new Date(funding.createdAt.getTime() - TX_START_ALLOWANCE_MS) },
+      },
       select: { id: true, consumption: true },
     });
     const jobIds = jobs.filter((j) => consumesGrant(j.consumption, funding.id)).map((j) => j.id);
@@ -907,9 +928,17 @@ export async function dailyCheckin(userId: string): Promise<CheckinResult> {
   });
 }
 
-export async function signupBonus(userId: string) {
-  return prisma.$transaction((tx) =>
-    grantCreditsTx(tx, userId, "SIGNUP_BONUS", 30, null, "none", null, "signup bonus"),
+// Grant the 30-credit signup bonus. Pass the caller's transaction when the
+// bonus has to be atomic with the state change that earned it (pass 39): the
+// verification, auto-verification and OAuth-creation paths each used to commit
+// that state and then call this in a SECOND transaction, so a failure between
+// them left a verified account (or a created OAuth account, which no later
+// sign-in re-creates) permanently without the bonus — the token was consumed
+// and there was no retry path.
+export async function signupBonus(userId: string, tx?: Prisma.TransactionClient) {
+  if (tx) return grantCreditsTx(tx, userId, "SIGNUP_BONUS", 30, null, "none", null, "signup bonus");
+  return prisma.$transaction((t) =>
+    grantCreditsTx(t, userId, "SIGNUP_BONUS", 30, null, "none", null, "signup bonus"),
   );
 }
 

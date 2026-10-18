@@ -140,8 +140,10 @@ describe("pass 31 — bounding text cannot manufacture a lone surrogate", () => 
     // Pre-fix this REJECTED with Prisma InvalidArg ("unexpected end of hex
     // escape"), i.e. the failure bookkeeping itself threw — the worker's catch
     // block never reached its reclaim or its retry/terminal decision, and the
-    // job sat running until the reaper re-billed it.
-    await expect(failJob(job.id, illFormed)).resolves.toBeUndefined();
+    // job sat running until the reaper re-billed it. (The return value became a
+    // boolean in pass 39: callers that delete their own objects must know
+    // whether the transition was theirs.)
+    await expect(failJob(job.id, illFormed)).resolves.toBe(true);
     const after = await prisma.job.findUniqueOrThrow({ where: { id: job.id } });
     expect(after.status).toBe("queued"); // the retry branch still ran
     expect(after.attempts).toBe(2);

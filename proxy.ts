@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { decode } from "next-auth/jwt";
-import { envLimit } from "./lib/rate-limit";
+import { createHash } from "crypto";
+import { envLimit, ipBucketAddress } from "./lib/rate-limit";
 
 // Edge-safe in-memory limiter: a cheap first line of defense, per-instance.
 // Authoritative cross-instance limits live in route handlers backed by Redis
@@ -99,27 +100,44 @@ function sweep(now: number) {
 // worse trade. Residual, documented.
 async function bucketFor(req: NextRequest, ip: string): Promise<string> {
   const secret = process.env.NEXTAUTH_SECRET;
-  if (!secret) return `ip:${ip}`;
   // Both spellings: next-auth picks __Secure- purely from the NEXTAUTH_URL
   // scheme, and getting that wrong here would silently downgrade every
   // authenticated request back onto the shared IP bucket.
   const raw = ["__Secure-next-auth.session-token", "next-auth.session-token"]
     .map((n) => req.cookies.get(n)?.value)
     .find((v) => v);
-  if (!raw) return `ip:${ip}`;
-  try {
-    // decode() is what next-auth itself uses to read the session cookie
-    // (salt ""), and it returns null on a token that does not verify.
-    const payload = await decode({ token: raw, secret });
-    const id = payload?.uid ?? payload?.sub;
-    if (typeof id !== "string" || !id) return `ip:${ip}`;
-    // A token whose sv is not a number is one no current version mints; "na"
-    // keeps it in a bucket of its own rather than the live session's.
-    const sv = typeof payload?.sv === "number" ? String(payload.sv) : "na";
-    return `u:${id}:${sv}`;
-  } catch {
-    return `ip:${ip}`;
+  if (raw && secret) {
+    try {
+      // decode() is what next-auth itself uses to read the session cookie
+      // (salt ""), and it returns null on a token that does not verify.
+      const payload = await decode({ token: raw, secret });
+      const id = payload?.uid ?? payload?.sub;
+      if (typeof id === "string" && id) {
+        // A token whose sv is not a number is one no current version mints;
+        // "na" keeps it in a bucket of its own rather than the live session's.
+        const sv = typeof payload?.sv === "number" ? String(payload.sv) : "na";
+        return `u:${id}:${sv}`;
+      }
+    } catch {
+      // fall through: an unverifiable cookie is an anonymous caller
+    }
   }
+  // Bearer API keys are a credential too (pass 39). Without this every
+  // `/api/v1/*` and Bearer `/api/files` request was charged to the SHARED
+  // `ip:<addr>:api` bucket — so one key (or one anonymous health loop) could
+  // exhaust the ceiling for every other tenant behind the same egress, even
+  // though the caller was authenticated. Keying on a hash of the token gives
+  // each credential its own bucket without the proxy needing the database; the
+  // raw key never appears in a Redis key. Short/garbage values fall back to the
+  // address (the route-level IP legs still bound an invalid-key flood).
+  const auth = req.headers.get("authorization") ?? "";
+  if (auth.startsWith("Bearer ")) {
+    const token = auth.slice(7).trim();
+    if (token.length >= 16) {
+      return `k:${createHash("sha256").update(token).digest("hex").slice(0, 24)}`;
+    }
+  }
+  return `ip:${ip}`;
 }
 
 export async function proxy(req: NextRequest) {
@@ -127,10 +145,14 @@ export async function proxy(req: NextRequest) {
   // entries are client-spoofable (see lib/rate-limit.ts clientIp).
   const fwd = req.headers.get("x-forwarded-for");
   const parts = fwd?.split(",").map((s) => s.trim()).filter(Boolean) ?? [];
-  const ip =
+  // Same /64 normalization as clientIp (pass 39): this layer is the ONLY
+  // ceiling in front of the page shells and the pre-login routes, and a
+  // per-/128 key let one owned IPv6 /64 rotate through 2^64 fresh buckets.
+  const ip = ipBucketAddress(
     parts[parts.length - 1] ??
-    (process.env.TRUST_X_REAL_IP === "1" ? req.headers.get("x-real-ip") : null) ??
-    "unknown";
+      (process.env.TRUST_X_REAL_IP === "1" ? req.headers.get("x-real-ip") : null) ??
+      "unknown",
+  );
   const path = req.nextUrl.pathname;
   const isApi = path.startsWith("/api");
   const isAuth = isApi && path.startsWith("/api/auth");
@@ -181,18 +203,42 @@ export async function proxy(req: NextRequest) {
   // an address key there would restore the CGNAT denial this file exists to
   // avoid, and the per-route account limiters are the binding ceiling anyway.
   // Pages take the same "credential's bucket alone" rule as /api/*.
+  //
+  // An ANONYMOUS address bucket is scoped per endpoint (pass 39). One shared
+  // `ip:<addr>:api` bucket meant a 300-request loop at /api/health — whose own
+  // 60/min refusal still spent the shared count — refused registration,
+  // feedback, v1 and Bearer files to every neighbour behind the same NAT for
+  // the rest of the window. The group is the first path segment (health,
+  // register, v1, files, …), so a flood at one endpoint can no longer deny
+  // another. A credential-keyed bucket stays shared across endpoints on
+  // purpose: it is a per-account ceiling on total work, not a toll per URL.
+  const anonGroup = /^\/api\/([^/]+)/.exec(path)?.[1] ?? "root";
   const keys =
     isAuth && !bucket.startsWith("ip:")
       ? [`${bucket}:auth`, `ip:${ip}:auth`]
-      : [`${bucket}:${isAuth ? "auth" : isPage ? "page" : "api"}`];
+      : [
+          `${bucket}:${
+            isAuth ? "auth" : isPage ? "page" : bucket.startsWith("ip:") ? `api:${anonGroup}` : "api"
+          }`,
+        ];
   const retry = hitAll(keys, isAuth ? authLimit : isPage ? pageLimit : apiLimit, 60_000);
   if (retry !== null) {
+    const limit = isAuth ? authLimit : isPage ? pageLimit : apiLimit;
     return NextResponse.json(
       { ok: false, error: "rate-limited" },
       // Same no-store as lib/api.ts stamps on every other /api/* response: a
       // cache in front of /api/* would otherwise be free to pin one source's
-      // rate-limit for a whole URL.
-      { status: 429, headers: { "Retry-After": String(retry), "Cache-Control": "private, no-store" } },
+      // rate-limit for a whole URL. The RateLimit-* pair matches the contract
+      // lib/api.ts's limiters follow (pass 39).
+      {
+        status: 429,
+        headers: {
+          "Retry-After": String(retry),
+          "RateLimit-Limit": String(limit),
+          "RateLimit-Remaining": "0",
+          "Cache-Control": "private, no-store",
+        },
+      },
     );
   }
   return NextResponse.next();

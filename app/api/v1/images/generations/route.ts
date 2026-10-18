@@ -35,7 +35,14 @@ export async function POST(req: Request) {
     // the invalid-key flood — and the two lookups authenticateApiKey costs
     // (ApiKey by hash, User by PK) ran before any limiter at all. Same shape as
     // /api/files: an address leg first, for the caller with no credential yet.
-    const ipLimited = await enforceRateLimit(req, "v1-create", 60, 60_000);
+    //
+    // It is a FLOOD bound, not the account's budget (pass 39): at 60/min it was
+    // spent before authentication, so one key bursting its 20/min and being
+    // refused still spent the shared egress bucket and refused every OTHER key
+    // behind the same NAT for the rest of the window. 600/min keeps the
+    // invalid-key lookup bound (10 lookups/s) while the per-key 20/min ceiling
+    // is the actual caller limit.
+    const ipLimited = await enforceRateLimit(req, "v1-create", 600, 60_000);
     if (ipLimited) return ipLimited;
     const auth = await authenticateApiKey(req);
     if (!auth) return errorResponse({ ok: false, error: "unauthorized" }, { status: 401 });

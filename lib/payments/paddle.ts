@@ -192,9 +192,10 @@ export class PaddleProvider implements PaymentProvider {
         // earlier version compared data.amount against
         // data.transaction.totals.total — fields real adjustment payloads
         // don't carry — so both parsed NaN and every partial was treated as
-        // full.) When the flag is absent, expose the adjustment's own grand
-        // total (data.totals.total, in cents) so the webhook route can compare
-        // it against the order amount once the order row is resolved.
+        // full.) When the flag is absent, expose the adjustment's own pre-tax
+        // subtotal (data.totals.subtotal, in cents) so the webhook route can
+        // compare it against the pre-tax order amount once the order row is
+        // resolved.
         //
         // The flag's own scope is the trap (pass 32): `type` describes THIS
         // adjustment, so two partials that together refund the entire price are
@@ -203,9 +204,23 @@ export class PaddleProvider implements PaymentProvider {
         // across deliveries and promotes to full when the sum reaches the order
         // amount; this provider's number is a per-delivery delta, which is
         // exactly what that accumulation needs.
-        const totals = data.totals as { total?: string | number } | undefined;
+        //
+        // The delta is the SUBTOTAL, not the gross total (pass 39). Our order
+        // prices are pre-tax — checkout sets `unitPrice` before tax and the PAID
+        // path above deliberately verifies `details.totals.subtotal` against
+        // Order.amountUsd — while `totals.total` is after tax. Adding gross
+        // partials against a net order price promoted refunds that returned less
+        // than the price: a $49.99 order at 20% VAT turned two $25.20 gross ($21
+        // net) partials into a full revoke, wiping 6000 credits and the paid
+        // tier for product the customer still held. `total` remains the fallback
+        // for a payload that carries no subtotal.
+        const totals = data.totals as
+          | { subtotal?: string | number; total?: string | number }
+          | undefined;
+        const subtotalNum = totals?.subtotal !== undefined ? Number(totals.subtotal) : NaN;
         const totalNum = totals?.total !== undefined ? Number(totals.total) : NaN;
-        const amountUsd = Number.isFinite(totalNum) ? totalNum / 100 : undefined;
+        const deltaNum = Number.isFinite(subtotalNum) ? subtotalNum : totalNum;
+        const amountUsd = Number.isFinite(deltaNum) ? deltaNum / 100 : undefined;
         // The adjustment's own id: the webhook route's dedupe key for a
         // re-delivered approval or reversal (pass 36) — eventId is a
         // NOTIFICATION id and a provider may change it while re-sending the

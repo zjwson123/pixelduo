@@ -69,7 +69,7 @@ npm run worker
 
 - 本地无 SMTP 时，验证/重置邮件打印到服务器日志（`[mail:dev]`），点链接即可
 - 验证页要**同时**输入注册时设置的密码：邮件链接证明"你有邮箱"，密码证明"账号是你注册的"。注册接口不校验邮箱归属，攻击者可以拿别人的邮箱预注册并设一个自己知道的密码——只凭链接就能激活的话，之后对方用 Google 登录会直接进到攻击者的账号里（账号劫持）。忘记密码时走"重置密码"即可换掉那把密码
-- 生产设置 `SMTP_URL` 与 `EMAIL_FROM`：一条命令配置并验证——`npx tsx scripts/setup-mail.ts aliyun no-reply@域名 <密码>`（也支持 `qq`/`163`/`resend`/`sendgrid`/`postmark`/`ses`/`gmail`/`local`；不带参数运行会列出全部）。它会写 `.env`（留备份、只改这两个键）并立刻打印接收端应答；脚本打印的连接串一律打码（只留方案/主机/端口 + 长度提示），可以放心贴进工单或群聊
+- 生产设置 `SMTP_URL` 与 `EMAIL_FROM`：一条命令配置并验证——`read -s SMTP_CREDENTIAL; export SMTP_CREDENTIAL; npx tsx scripts/setup-mail.ts aliyun no-reply@域名`（凭据走环境变量，别放命令行——argv 运行期可被本机其他用户 `ps` 看到并进 shell 历史）（也支持 `qq`/`163`/`resend`/`sendgrid`/`postmark`/`ses`/`gmail`/`local`；不带参数运行会列出全部）。它会写 `.env`（留备份、只改这两个键）并立刻打印接收端应答；脚本打印的连接串一律打码（只留方案/主机/端口 + 长度提示），可以放心贴进工单或群聊
 - 用户反馈的收件箱是 `FEEDBACK_TO`，**生产必须显式设置**：代码里的兜底地址是开发者的个人邮箱，生产运行时拒绝使用它——未设置就不发通知邮件、只记一条失败原因（管理台 feedback 标签页可见），留言本身照旧入库。改它不需要动代码
 - 测试/CI 用 `EMAIL_VERIFY_AUTO=1` 让注册自动验证（e2e 默认路径，跳过上面的密码步骤）；本地跑验证 UX 全流程：
 
@@ -178,7 +178,7 @@ CI（`.github/workflows/ci.yml`）：Postgres 服务容器下跑单测、构建�
 
 - 文档：[ToS](docs/compliance/terms.md) · [Privacy/GDPR](docs/compliance/privacy.md) · [上线前清单](docs/compliance/launch-checklist.md)
 - 站内合规页：[/terms](/terms) · [/privacy](/privacy)（landing footer 与登录/注册页均已挂链）
-- 数据导出/删除：`POST /api/account/export`、`POST /api/account/delete`（`{"confirm":true}`）
+- 数据导出/删除：`POST /api/account/export`、`POST /api/account/delete`（body：`{"confirm":true,"password":"<当前密码>"}`；开启 2FA 的账号还需 `token`（TOTP）或 `backupCode`）
 
 ## 测试
 

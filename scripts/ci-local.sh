@@ -3,6 +3,10 @@
 # before pushing (unit tests, typecheck, production build, e2e).
 # Requires: local Postgres 16 + Redis (e.g. `docker compose up -d db redis`).
 set -euo pipefail
+# Everything this script writes (/tmp logs, MAIL_DEV_DIR, build logs) can contain
+# LIVE reset/verification tokens from the e2e flows; keep it owner-only on a
+# shared host or self-hosted runner (pass 39).
+umask 077
 
 export DATABASE_URL="postgresql://pixelduo:pixelduo@localhost:5432/pixelduo_test"
 export TEST_DATABASE_URL="$DATABASE_URL"
@@ -175,6 +179,7 @@ docker run --rm --entrypoint sh pd-ci-web -c '
   # string, and a stray quote ends it early — pass 33.)
   test -e /app/node_modules/.prisma/client/index.js
   grep -q "\"schemaEnvPath\": null" /app/node_modules/.prisma/client/index.js
+  grep -q "__NEXT_PROCESSED_ENV" /app/server.js
   for f in /app/.env /app/.env.local /app/.env.production; do
     if [ -e "$f" ]; then echo "dotenv in image: $f"; exit 1; fi
   done
@@ -272,6 +277,24 @@ docker run --rm --entrypoint sh pd-ci-worker -c '
   for f in /app/.env /app/.env.local /app/.env.production; do
     if [ -e "$f" ]; then echo "dotenv in image: $f"; exit 1; fi
   done
+  # Pass 39: the worker regenerates its Prisma client AFTER the .env prune, so
+  # it needs the pass-38 rewrite too; and the source/config names the web stage
+  # refuses must not ride along in the registry-pushed image.
+  test -e /app/node_modules/.prisma/client/index.js
+  grep -q "\"schemaEnvPath\": null" /app/node_modules/.prisma/client/index.js
+  test ! -e /app/app
+  test ! -e /app/components
+  test ! -e /app/next.config.mjs
+  test ! -e /app/proxy.ts
+  test ! -e /app/instrumentation.ts
+  test ! -e /app/instrumentation-client.ts
+  test ! -e /app/sentry.server.config.ts
+  test ! -e /app/sentry.edge.config.ts
+  test ! -e /app/vitest.config.ts
+  test ! -e /app/vitest.setup.ts
+  test ! -e /app/playwright.config.ts
+  test ! -e /app/prisma/seed.ts
+  test ! -e /app/public
   echo "worker image shape OK"
 ' || { echo "worker image artifact assertion FAILED"; exit 1; }
 # Boot the worker image too (pass 33). Its shape was asserted and nothing else:
@@ -413,6 +436,13 @@ if ! grep -q '"schemaEnvPath": null' "$PRISMA_CLIENT"; then
 fi
 if ! grep -q '"rootEnvPath": null' "$PRISMA_CLIENT"; then
   echo "the artifact's Prisma client still resolves a root env path" >&2
+  exit 1
+fi
+# Pass 39: Next's own loader (BaseServer -> loadEnvConfig) also reads a .env
+# placed beside the tree. postbuild prepends the flag that makes @next/env skip
+# file population; assert the host tree carries it as well as the image.
+if ! grep -q "__NEXT_PROCESSED_ENV" .next/standalone/server.js; then
+  echo "the artifact's server.js does not neutralise Next's runtime dotenv loading" >&2
   exit 1
 fi
 

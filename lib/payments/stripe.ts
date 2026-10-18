@@ -138,6 +138,11 @@ export class StripeProvider implements PaymentProvider {
       // proves the session was built for this order's price.
       let paidAmountUsd: number | undefined;
       let currency: string | undefined;
+      // A per-delivery refund delta, for the route's accumulator. Stripe's own
+      // charge.refunded reports CUMULATIVELY (amount_refunded) and is left to
+      // fullRefund; a DISPUTE reports only the disputed amount, which can be
+      // less than the charge (pass 39).
+      let refundAmountUsd: number | undefined;
       // async_payment_succeeded: delayed-notification methods (SEPA, Boleto…)
       // settle after checkout.session.completed arrived as unpaid.
       if (
@@ -165,10 +170,24 @@ export class StripeProvider implements PaymentProvider {
       // (not the session), so resolution goes through providerOrderId —
       // which the paid event already rewrote to the PI id. Dispute *wins*
       // (funds_reinstated) are handled by an admin re-grant, deliberately.
+      //
+      // A dispute is NOT necessarily for the whole charge (pass 39): Stripe
+      // documents `amount` as "usually the amount of the charge, but it can
+      // differ … because only part of the order is disputed". Treating every
+      // dispute as a full refund revoked a $49.99 pack's 6000 credits and a
+      // plan's tier over a $1 partial dispute. The disputed amount enters the
+      // same accumulator as a refund; only a dispute that covers the order's
+      // price promotes to a full revoke. An unmeasurable dispute (no `amount`)
+      // keeps the fail-closed default: full.
       if (event.type === "charge.dispute.created") {
         type = "refunded";
-        fullRefund = true;
         orderId = undefined;
+        if (typeof obj.amount === "number") {
+          refundAmountUsd = obj.amount / 100;
+          fullRefund = undefined;
+        } else {
+          fullRefund = true;
+        }
       }
       // Signature verified — this is a real event we simply do not act
       // on. ACK it instead of answering 400 "invalid signature".
@@ -179,6 +198,7 @@ export class StripeProvider implements PaymentProvider {
         type,
         orderId,
         fullRefund,
+        refundAmountUsd,
         paidAmountUsd,
         currency,
         // Refund webhooks reference the payment intent, not our session id —

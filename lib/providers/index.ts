@@ -2,7 +2,7 @@
 // Supports: gpt-image-2, doubao-seedream, wan2.7-image(-pro) [image]
 //            doubao-seedance, wan2.7-t2v/i2v [video, async task-based]
 
-import { getModelVerseKey, getArkKey, getArkBaseUrl, getAliyunKey, getAliyunBaseUrl } from "../keys";
+import { getModelVerseKey, getArkKey, getArkBaseUrl, getArkVideoConfig, getAliyunKey, getAliyunBaseUrl, getAliyunTaskUrl } from "../keys";
 import { isProductionRuntime } from "../runtime-env";
 import { saveBase64Image, saveRemoteImage, fetchPublicBuffer, readBodyCapped, outboundTimeoutMs } from "../store";
 import { getStorage } from "../storage";
@@ -106,10 +106,21 @@ export function refImageDataUrl(imageBase64: string): string {
 // lines and in a URL rebuilt on every poll — amplification with no useful
 // effect, since a real task id is a UUID. Bounded like errText() bounds every
 // other provider string that reaches us.
-const TASK_ID_MAX = 200;
+//
+// Pass 39 tightened this from "a non-empty short string" to a conservative
+// charset, and the error is now classified PERMANENT (lib/worker-errors.ts).
+// The old check ran AFTER the billed create call and accepted U+0000, so:
+//   - `{"id": 123}`, `{"id": ""}` or a 201-char value threw a message no
+//     classifier matched — the job retried and created (and paid for) three
+//     upstream tasks, none of them pollable;
+//   - a NUL passed type/length, reached setJobPolling's raw UPDATE, and died
+//     with SQLSTATE 22021 — also "transient", so three more billed creates.
+// Ark ids are `cgt-…`/UUID-shaped and DashScope's are UUIDs, so the charset
+// costs nothing real; anything else is a gateway we cannot poll.
+const TASK_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
 function boundedTaskId(raw: unknown, label: string): string {
   const id = typeof raw === "string" ? raw : "";
-  if (!id || id.length > TASK_ID_MAX) {
+  if (!TASK_ID_RE.test(id)) {
     throw new Error(`${label} returned an unusable task id`);
   }
   return id;
@@ -539,8 +550,13 @@ async function createSeedanceTask(appModel: string, prompt: string, durationSec:
   const info = getModel(appModel);
   const upstream = upstreamFor(appModel);
   if (!info || upstream?.gateway !== "ark") throw new Error(`not-an-ark-video-model:${appModel}`);
-  const keys = [getArkKey()].filter((k): k is string => Boolean(k));
-  if (!keys.length) throw new Error("ark key missing for video generation");
+  // Key and endpoint from ONE source (pass 39 — see getArkVideoConfig): a
+  // gateway credential must never travel to the vendor's host, and the poll
+  // below derives the same origin from the same source.
+  const ark = getArkVideoConfig();
+  if (!ark) throw new Error("ark key missing for video generation");
+  const keys = [ark.key];
+  const tasksUrl = ark.tasksUrl;
 
   // Live-probed 2026-09-19: task_type=extend returns ONLY the new segment
   // (a 10s reference with duration=-1 yielded a 5.09s clip), and the
@@ -553,7 +569,7 @@ async function createSeedanceTask(appModel: string, prompt: string, durationSec:
       { type: "text", text: prompt },
     ];
     const data = await callWithKeys(
-      "https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks",
+      tasksUrl,
       {
         model: upstream.modelId,
         task_type: "extend",
@@ -576,7 +592,7 @@ async function createSeedanceTask(appModel: string, prompt: string, durationSec:
     });
   }
   const data = await callWithKeys(
-    "https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks",
+    tasksUrl,
     {
       model: upstream.modelId,
       content,
@@ -684,18 +700,22 @@ export function parseSeedanceVideoUrl(vu: string | Array<{ url?: string }> | und
 }
 
 async function pollSeedanceTask(taskId: string): Promise<VideoTaskStatus> {
-  const keys = [getArkKey()].filter((k): k is string => Boolean(k));
-  if (!keys.length) return { status: "unknown", error: "ark key missing" };
+  // The poll must go to the SAME source the task was created through (pass 39):
+  // a gateway key is only valid on the gateway's own origin, and sending it to
+  // the vendor (or polling a relay-created task on the vendor) both leak and
+  // fail. See getArkVideoConfig.
+  const ark = getArkVideoConfig();
+  if (!ark) return { status: "unknown", error: "ark key missing" };
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 30_000);
   try {
-    const key = keys[0];
+    const key = ark.key;
     // The id comes from the provider's own JSON and is interpolated into a URL
     // path while our Authorization header rides along, so it is percent-encoded:
     // a value containing "/", "?" or "#" would otherwise re-target the request
     // within the provider host.
     const res = await fetch(
-      `https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks/${encodeURIComponent(taskId)}`,
+      `${ark.tasksUrl}/${encodeURIComponent(taskId)}`,
       { headers: { Authorization: `Bearer ${key}` }, signal: controller.signal, redirect: "manual" },
     );
     // Cancel the body before returning: an undici response whose body is never
@@ -734,11 +754,15 @@ async function pollWanVideoTask(taskId: string): Promise<VideoTaskStatus> {
   const timer = setTimeout(() => controller.abort(), 30_000);
   try {
     const key = keys[0];
-    // Percent-encoded for the same reason as pollSeedanceTask above.
-    const res = await fetch(
-      `https://dashscope.aliyuncs.com/api/v1/tasks/${encodeURIComponent(taskId)}`,
-      { headers: { Authorization: `Bearer ${key}` }, signal: controller.signal, redirect: "manual" },
-    );
+    // Percent-encoded for the same reason as pollSeedanceTask above, and
+    // derived from the key's own source (pass 39): getAliyunTaskUrl follows
+    // the gateway that supplied the credential instead of always dialing the
+    // vendor host.
+    const res = await fetch(getAliyunTaskUrl(taskId), {
+      headers: { Authorization: `Bearer ${key}` },
+      signal: controller.signal,
+      redirect: "manual",
+    });
     if (!res.ok) {
       await res.body?.cancel().catch(() => undefined);
       return { status: "unknown", error: `poll failed: ${res.status}` };

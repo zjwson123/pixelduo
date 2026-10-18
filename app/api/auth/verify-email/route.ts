@@ -62,19 +62,25 @@ export async function POST(req: Request) {
       await refundLoginFailures(user.email, ip);
     }
 
-    // Single-use CAS. Losing it means a concurrent request consumed the token.
-    const consumed = await consumeToken("verify-email", body.token);
-    if (!consumed.ok) return fail(new Error("invalid-token"));
-
-    // updateMany guards against double-verification granting the bonus twice.
-    const updated = await prisma.user.updateMany({
-      where: { id: user.id, emailVerified: null },
-      data: { emailVerified: new Date() },
+    // Single-use CAS, the verification flip and the signup bonus in ONE
+    // transaction (pass 39). Split across transactions, a failure after the
+    // token was consumed left the account verified with no bonus and no retry
+    // path (the link is single-use) — or, if the flip failed, unverified with a
+    // dead link.
+    const outcome = await prisma.$transaction(async (tx) => {
+      const consumed = await consumeToken("verify-email", body.token, tx);
+      if (!consumed.ok) return "invalid" as const;
+      // updateMany guards against double-verification granting the bonus twice.
+      const updated = await tx.user.updateMany({
+        where: { id: user.id, emailVerified: null },
+        data: { emailVerified: new Date() },
+      });
+      if (updated.count !== 1) return "already" as const;
+      await signupBonus(user.id, tx);
+      return "granted" as const;
     });
-    if (updated.count === 1) {
-      await signupBonus(user.id);
-      return ok({ verified: true, credits: 30 });
-    }
+    if (outcome === "invalid") return fail(new Error("invalid-token"));
+    if (outcome === "granted") return ok({ verified: true, credits: 30 });
     return ok({ verified: true, alreadyVerified: true });
   } catch (e) {
     if (e instanceof z.ZodError) return fail(new Error("invalid-token"));

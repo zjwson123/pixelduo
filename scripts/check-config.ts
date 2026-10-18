@@ -89,6 +89,11 @@ const NOT_FORWARDED: Record<string, { files: string[]; reason: string }> = {
     reason:
       "writes each dev mail to a file for e2e specs; the container stacks forward MAIL_DEV_MODE instead",
   },
+  SMTP_CREDENTIAL: {
+    files: COMPOSE_FILES,
+    reason:
+      "host-only input to scripts/setup-mail.ts — the script writes SMTP_URL; no process inside a container reads it",
+  },
   // PAYMENT_ALLOW_MOCK is the one escape hatch that really is local-only: the
   // default compose sets it to 1 for the mock flow, and neither prod file
   // forwards it at all (a deployment that sets it in its own .env is opt-ing in
