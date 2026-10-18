@@ -176,15 +176,29 @@ async function main() {
   for (const c of cases) {
     const id = String(c.id);
     const existing = await prisma.template.findUnique({ where: { id } }).catch(() => null);
-    if (existing && !dryRun) {
-      // Already imported — skip the image download, just update metadata
-      const { credits, quality } = costFor(pickModel(c));
+    // A seeded placeholder is NOT an imported case. `prisma/seed.ts` inserts
+    // numeric ids that overlap the upstream case ids, all pointing at the seven
+    // bundled `/templates/*.png` placeholders. Treating such a row as "already
+    // imported" updated its title/prompt but kept the placeholder image forever
+    // — the whole Explore grid rendered as the same white mug after a database
+    // rebuild that ran the seed and then the import (probed pass 39). Fall
+    // through to the download+upsert path for those rows; a real imported key
+    // (img/…) still takes the metadata-only path.
+    const placeholder = existing?.img.startsWith("/templates/") ?? false;
+    if (existing && !dryRun && !placeholder) {
+      // Already imported — skip the image download, just update metadata.
+      // The model is recomputed too: leaving the old one while credits/quality
+      // came from a different heuristic produced rows whose price and model
+      // disagreed.
+      const model = pickModel(c);
+      const { credits, quality } = costFor(model);
       await prisma.template.update({
         where: { id },
         data: {
           cat: CAT_ZH[c.category] ?? c.category,
           title: c.title,
           prompt: c.prompt,
+          model,
           sourceUrl: safeSourceUrl(c.sourceUrl),
           tags: { styles: c.styles, scenes: c.scenes, category: c.category } as object,
           featured: c.featured,
@@ -195,6 +209,7 @@ async function main() {
       imported++;
       continue;
     }
+    if (placeholder) console.log(`  [replace] #${c.id} placeholder image → case image`);
     if (dryRun) {
       console.log(`  [dry] #${c.id} ${c.title} (${c.category})`);
       continue;
