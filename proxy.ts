@@ -98,7 +98,7 @@ function sweep(now: number) {
 // makes — for the whole IP. Bounding that would mean removing the limiter in
 // front of password verification, which is the bcrypt-amplification brake — a
 // worse trade. Residual, documented.
-async function bucketFor(req: NextRequest, ip: string): Promise<string> {
+async function bucketFor(req: NextRequest, ip: string, allowBearer: boolean): Promise<string> {
   const secret = process.env.NEXTAUTH_SECRET;
   // Both spellings: next-auth picks __Secure- purely from the NEXTAUTH_URL
   // scheme, and getting that wrong here would silently downgrade every
@@ -130,14 +130,46 @@ async function bucketFor(req: NextRequest, ip: string): Promise<string> {
   // each credential its own bucket without the proxy needing the database; the
   // raw key never appears in a Redis key. Short/garbage values fall back to the
   // address (the route-level IP legs still bound an invalid-key flood).
-  const auth = req.headers.get("authorization") ?? "";
-  if (auth.startsWith("Bearer ")) {
-    const token = auth.slice(7).trim();
-    if (token.length >= 16) {
-      return `k:${createHash("sha256").update(token).digest("hex").slice(0, 24)}`;
+  //
+  // Only for API paths (follow-up to pass 39). The token is a CLAIM this layer
+  // cannot verify — there is no database at the edge — so it must not REPLACE a
+  // bound nothing else backs up. The page shells are exactly that case: every
+  // page request is a JWT decrypt, a sessionVersion read and an SSR pass with
+  // no route-level limiter behind this layer, and real navigation never carries
+  // `Authorization`. A page request that does is simply rotating a header for a
+  // fresh bucket (probed: three distinct random tokens, three renders, zero
+  // 429s). Pages therefore stay on the address bucket and keep pass 34's
+  // ceiling; API paths keep the credential bucket and pay the address flood leg
+  // in proxy() below.
+  if (allowBearer) {
+    const auth = req.headers.get("authorization") ?? "";
+    if (auth.startsWith("Bearer ")) {
+      const token = auth.slice(7).trim();
+      if (token.length >= 16) {
+        return `k:${createHash("sha256").update(token).digest("hex").slice(0, 24)}`;
+      }
     }
   }
   return `ip:${ip}`;
+}
+
+// One refusal shape for both ceilings in proxy(): Retry-After plus the
+// RateLimit-* pair lib/api.ts's limiters follow (pass 39), and the same
+// no-store every other /api/* response carries, so a cache in front of /api/*
+// cannot pin one source's refusal for a whole URL.
+function rateLimited(retry: number, limit: number) {
+  return NextResponse.json(
+    { ok: false, error: "rate-limited" },
+    {
+      status: 429,
+      headers: {
+        "Retry-After": String(retry),
+        "RateLimit-Limit": String(limit),
+        "RateLimit-Remaining": "0",
+        "Cache-Control": "private, no-store",
+      },
+    },
+  );
 }
 
 export async function proxy(req: NextRequest) {
@@ -195,7 +227,7 @@ export async function proxy(req: NextRequest) {
   // the API budget of the same session (and vice versa) — the page bucket is a
   // ceiling on work, not a toll on the account's own calls.
   const pageLimit = envLimit(process.env.MIDDLEWARE_PAGE_LIMIT, 120);
-  const bucket = await bucketFor(req, ip);
+  const bucket = await bucketFor(req, ip, isApi);
   // Auth paths: the credential's own bucket AND the source address's (see the
   // rotation note above). The address key is the SAME one an anonymous caller
   // gets, so a cookie buys a second bucket to be measured against, never a
@@ -221,25 +253,22 @@ export async function proxy(req: NextRequest) {
             isAuth ? "auth" : isPage ? "page" : bucket.startsWith("ip:") ? `api:${anonGroup}` : "api"
           }`,
         ];
-  const retry = hitAll(keys, isAuth ? authLimit : isPage ? pageLimit : apiLimit, 60_000);
-  if (retry !== null) {
-    const limit = isAuth ? authLimit : isPage ? pageLimit : apiLimit;
-    return NextResponse.json(
-      { ok: false, error: "rate-limited" },
-      // Same no-store as lib/api.ts stamps on every other /api/* response: a
-      // cache in front of /api/* would otherwise be free to pin one source's
-      // rate-limit for a whole URL. The RateLimit-* pair matches the contract
-      // lib/api.ts's limiters follow (pass 39).
-      {
-        status: 429,
-        headers: {
-          "Retry-After": String(retry),
-          "RateLimit-Limit": String(limit),
-          "RateLimit-Remaining": "0",
-          "Cache-Control": "private, no-store",
-        },
-      },
-    );
+  const limit = isAuth ? authLimit : isPage ? pageLimit : apiLimit;
+  const retry = hitAll(keys, limit, 60_000);
+  if (retry !== null) return rateLimited(retry, limit);
+  // A Bearer token is a CLAIM the edge cannot verify (see bucketFor), so it must
+  // not remove the aggregate bound an anonymous caller has. Without this leg a
+  // client rotating the header minted a fresh credential bucket per request, and
+  // an unauthenticated flood of a route without its own address leg (/api/health
+  // and friends — and every page shell) had no address ceiling at all. The bound
+  // is a FLOOD bound — twice the per-credential ceiling, 600/min by default, the
+  // same number the v1 route uses for its own address leg — so one legitimate
+  // tenant's ordinary burst never trips it while rotating claims cannot
+  // multiply it.
+  if (bucket.startsWith("k:")) {
+    const claimLimit = apiLimit * 2;
+    const claimRetry = hitAll([`ip:${ip}:claim`], claimLimit, 60_000);
+    if (claimRetry !== null) return rateLimited(claimRetry, claimLimit);
   }
   return NextResponse.next();
 }

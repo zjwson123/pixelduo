@@ -748,3 +748,58 @@ describe("pass 39 — a malformed REDIS_URL degrades to the memory limiter", () 
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// 13. An unverified Bearer claim cannot replace the address bound
+// ---------------------------------------------------------------------------
+describe("pass 39 — an unverified Bearer claim cannot replace the address bound", () => {
+  const prev = {
+    api: process.env.MIDDLEWARE_API_LIMIT,
+    page: process.env.MIDDLEWARE_PAGE_LIMIT,
+  };
+  beforeAll(() => {
+    process.env.MIDDLEWARE_API_LIMIT = "2";
+    process.env.MIDDLEWARE_PAGE_LIMIT = "2";
+  });
+  afterAll(() => {
+    for (const [k, v] of [
+      ["MIDDLEWARE_API_LIMIT", prev.api],
+      ["MIDDLEWARE_PAGE_LIMIT", prev.page],
+    ] as const) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+
+  function req(path: string, ip: string, token?: string) {
+    const headers: Record<string, string> = { "x-forwarded-for": ip };
+    if (token) headers.authorization = `Bearer ${token}`;
+    return new NextRequest(`http://localhost${path}`, { headers });
+  }
+
+  it("a rotating Bearer does not buy a fresh PAGE bucket", async () => {
+    const ip = `p39-claim-page-${stamp}`;
+    // The page shells have no route-level limiter behind this layer, and real
+    // navigation never carries `Authorization`. An unverified Bearer is a CLAIM
+    // the edge cannot check, so honouring it here let one client rotate the
+    // header per request for a fresh bucket — the pass-32/36 rotation escape
+    // again. Pre-fix this was 200, 200, 200.
+    expect((await proxy(req("/studio", ip, "random-token-one-aaaaaaaa"))).status).toBe(200);
+    expect((await proxy(req("/studio", ip, "random-token-two-bbbbbbbb"))).status).toBe(200);
+    expect((await proxy(req("/studio", ip, "random-token-three-cccccc"))).status).toBe(429);
+  });
+
+  it("the credential bucket keeps tenant isolation but adds an address flood bound", async () => {
+    const ip = `p39-claim-api-${stamp}`;
+    // Tenant isolation still holds (pass 39's own shape: one key's burst does
+    // not refuse another) …
+    expect((await proxy(req("/api/jobs", ip, "alpha-key-aaaaaaaaaaaa"))).status).toBe(200);
+    expect((await proxy(req("/api/jobs", ip, "beta-key-bbbbbbbbbbbb"))).status).toBe(200);
+    // … but a rotating claim cannot multiply the address's ceiling. The flood
+    // bound is 2×MIDDLEWARE_API_LIMIT (600/min by default), so with the limit at
+    // 2 the fifth claim from one address is refused. Pre-fix this was 200.
+    expect((await proxy(req("/api/jobs", ip, "gamma-key-cccccccccccc"))).status).toBe(200);
+    expect((await proxy(req("/api/jobs", ip, "delta-key-dddddddddddd"))).status).toBe(200);
+    expect((await proxy(req("/api/jobs", ip, "epsilon-key-eeeeeeeeee"))).status).toBe(429);
+  });
+});
