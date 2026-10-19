@@ -19,7 +19,16 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
     // Blob first (the original order): a crash between the two leaves a row
     // pointing at a missing object, which the admin simply re-runs and heals —
     // the reverse order leaks the blob with nothing left to name it.
-    await getStorage().delete(image.url).catch(() => undefined);
+    //
+    // A storage failure must FAIL the request, not be swallowed (pass 41). The
+    // drivers reject on every real error (EACCES/ENOSPC, an S3 permission or
+    // network fault) and treat a missing key as success, exactly like erasure;
+    // swallowing the throw deleted the only row naming the object and answered
+    // `{deleted:true}`, so a moderation takedown was recorded as done while the
+    // blob stayed live (reachable by any still-valid presigned URL) and no
+    // re-run could find it — the row was already gone. fail() reports it and
+    // the row survives, so the admin can retry.
+    await getStorage().delete(image.url);
     // The row delete is a CAS on the id, not `delete()` (pass 38). The read
     // above and the storage round trip between it and the delete leave a wide
     // window: two concurrent takedowns (a double-clicked console button, two

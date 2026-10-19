@@ -73,6 +73,18 @@ export class PaddleProvider implements PaymentProvider {
             // Paddle amounts are in the lowest currency denomination (cents).
             unitPrice: { amount: String(Math.round(input.amountUsd * 100)), currencyCode: "USD" },
             product: { name: "PixelDuo credits", taxCategory: "digital-goods" },
+            // The order price is NET everywhere on our side: paid-event
+            // verification compares details.totals.subtotal against
+            // Order.amountUsd, and refund adjustments are accumulated by their
+            // pre-tax subtotal. Paddle's default (`account_setting`) can make
+            // the inline unit_price tax-INCLUSIVE, and then subtotal = price −
+            // tax: a 20%-VAT $19 charge reports $15.83, the route rejects it as
+            // payment-underpaid with a 500, and every provider retry fails
+            // identically — money captured, credits never granted, and a
+            // failing streak on the endpoint all payments share. Pinning the
+            // price to external tax keeps unit_price == subtotal and adds tax
+            // on top, which is exactly what the rest of the money code assumes.
+            taxMode: "external",
           },
         },
       ],

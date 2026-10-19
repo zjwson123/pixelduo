@@ -9,6 +9,14 @@ const SECRET_PATTERNS: Array<RegExp> = [
   /Bearer\s+[A-Za-z0-9._~+/=-]{12,}/gi,
   /x-amz-credential=[^&]{5,}/gi,
   /x-amz-signature=[^&]{5,}/gi,
+  // Email addresses are PII in this codebase: Sentry's own query scrubber
+  // already rewrites `email=`/`q=` parameters (lib/sentry-scrub.ts), but the
+  // auth/transaction mail path passes `mailTo: user@example.com` as a CONTEXT
+  // value and SMTP errors quote the recipient in their message — neither
+  // matches a query parameter, so every failed verification/reset/receipt mail
+  // shipped the end user's address to a third party (pass 41). Matched
+  // anywhere, because the shapes this app produces are all bare addresses.
+  /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g,
 ];
 
 export function redactSensitive(text: string): string {

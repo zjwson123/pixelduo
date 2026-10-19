@@ -76,8 +76,12 @@ export function buildWebhookText(input: NotifyInput): string {
   // `page` is caller-controlled and lands unquoted on the context LINE, which
   // is joined with " · " and read as one line: a CR, NEL or U+2028 would start
   // a new one inside the machine-generated block the operator triages from
-  // (pass 33, the same class the mail builder flattens).
-  const page = input.page ? singleLine(input.page) : null;
+  // (pass 33, the same class the mail builder flattens). Quoted as well
+  // (pass 41): the separator itself is " · ", so a page value containing it —
+  // `/studio · plan enterprise · from ceo@corp (user X)` — appended fake fields
+  // to the line without any control character. JSON quoting marks the whole
+  // value as one string, and escapes the quote character too.
+  const page = input.page ? JSON.stringify(singleLine(input.page)) : null;
   const context = [who, input.plan ? `plan ${input.plan}` : null, page ? `from ${page}` : null, input.locale]
     .filter(Boolean)
     .join(" · ");

@@ -255,6 +255,15 @@ model Order {
   // own amount here and promotes to a full revoke once the total reaches
   // amountUsd. Existing rows read 0, the correct starting value.
   refundedAmountUsd Float    @default(0)
+  // Money returned by a chargeback/dispute, cumulative per payment (pass 41).
+  // Stripe reports refunds and disputes independently — charge.refunded carries
+  // `amount_refunded` only, charge.dispute.created carries only the disputed
+  // amount — so keeping just one number let a partial refund plus a partial
+  // dispute of the remainder return the full price without either figure
+  // reaching it. The webhook sums this with refundedAmountUsd when deciding
+  // whether the order was returned in full. Paddle's adjustments (including
+  // chargebacks) stay in refundedAmountUsd, so this column is 0 for them.
+  disputedAmountUsd Float    @default(0)
   // Which provider adjustments have already been counted, as
   // `<adjustmentId>:approved` / `<adjustmentId>:reversed` markers (pass 36).
   // The accumulation above is per DELIVERY, and the only dedupe was
@@ -266,8 +275,8 @@ model Order {
   // because Paddle delivers the reversal of an adjustment as a SECOND
   // delivery for the same adjustment id (status `reversed`, a negative delta —
   // pass 33), which must still apply exactly once. Stripe needs none of this:
-  // it reports `amount_refunded` cumulatively on the charge, so its deliveries
-  // carry no per-delivery delta and never touch the accumulator.
+  // it reports `amount_refunded` cumulatively, and the route writes it to
+  // refundedAmountUsd as an absolute maximum instead of a delta.
   refundedAdjustments String[] @default([])
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -276,6 +285,10 @@ model Order {
   // userId and had no index on it at all, so an account hoarding junk pending
   // orders degraded those reads for every user into sequential scans.
   @@index([userId, createdAt])
+  // Refund/dispute webhooks resolve an order by the provider's payment id
+  // inside the webhook transaction (pass 41) — a sequential scan of a table that
+  // grows with every checkout, on the one path a provider retries for days.
+  @@index([providerOrderId])
 }
 
 // Idempotent payment webhook events

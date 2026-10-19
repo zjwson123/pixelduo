@@ -32,6 +32,21 @@ export interface PaymentWebhookEvent {
   // scopes its full/partial flag to each adjustment, so two partials that
   // return the whole price both read `partial`).
   refundAmountUsd?: number;
+  // For "refunded": the provider's CUMULATIVE refunded total for the payment
+  // (Stripe's charge.amount_refunded). Stripe reports the same running total on
+  // every charge.refunded delivery, so the route takes the maximum rather than
+  // adding it; mixing it into refundAmountUsd would double-count. Kept separate
+  // from refundAmountUsd because Paddle's adjustment totals are per-delivery
+  // deltas and the two providers must not share a semantic.
+  refundCumulativeUsd?: number;
+  // For "refunded": the amount of a chargeback/dispute, also cumulative per
+  // charge (Stripe's charge.dispute.created). It lives in its own order column
+  // because a dispute is not a refund: Stripe reports refunds cumulatively and
+  // disputes separately, and a goodwill partial refund followed by a dispute of
+  // the remainder returns the whole price while neither number alone reaches
+  // it. The route sums the two columns when deciding whether the order was
+  // returned in full (pass 41).
+  disputedAmountUsd?: number;
   // For "refunded": the provider's id for the adjustment/refund this delivery
   // describes, when it has one (Paddle's adjustment `data.id`). Two deliveries
   // of the SAME adjustment can carry different notification ids — that is

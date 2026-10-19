@@ -642,9 +642,20 @@ export const JOB_ABANDONED = "job-abandoned";
 // keeps its object (the next attempt resumes from it), and a key already deleted
 // by failJob's terminal reclaim is simply deleted again.
 export async function reclaimStoredArtifact(jobId: string, key: string): Promise<void> {
-  const job = await prisma.job
-    .findUnique({ where: { id: jobId }, select: { images: true } })
-    .catch(() => null);
+  // Both reads below MUST fail closed (pass 41). They answer "does anything
+  // still name this key?", and the delete is only safe on a definite NO. The
+  // reads used to swallow errors into null/0 — negative answers — so a
+  // transient database fault during a zombie's late cleanup deleted on a
+  // question it never got an answer to. By then the checkpoint can have been
+  // overwritten by the attempt that won and delivered this same key, so the
+  // object could be a delivered, paid artifact; keeping it under the wrong name
+  // is recoverable, deleting a delivered file is not.
+  let job: { images: string | null } | null;
+  try {
+    job = await prisma.job.findUnique({ where: { id: jobId }, select: { images: true } });
+  } catch {
+    return;
+  }
   if (job) {
     // Two shapes live in this column: checkpoint objects ({ key }) while the job
     // is in flight, bare URL strings after delivery.
@@ -666,7 +677,12 @@ export async function reclaimStoredArtifact(jobId: string, key: string): Promise
       // an object on the strength of a broken string.
     }
   }
-  const owned = await prisma.image.count({ where: { jobId, url: key } }).catch(() => 0);
+  let owned: number;
+  try {
+    owned = await prisma.image.count({ where: { jobId, url: key } });
+  } catch {
+    return;
+  }
   if (owned > 0) return;
   await getStorage().delete(key).catch(() => undefined);
 }

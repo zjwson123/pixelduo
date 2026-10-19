@@ -34,6 +34,8 @@ export class MockProvider implements PaymentProvider {
         status?: string;
         fullRefund?: boolean;
         refundAmountUsd?: number;
+        refundCumulativeUsd?: number;
+        disputedAmountUsd?: number;
         // Carried through so the route's amount/currency binding is reachable
         // in tests and demos, exactly as the real providers populate it.
         paidAmountUsd?: number;
@@ -48,6 +50,8 @@ export class MockProvider implements PaymentProvider {
         orderId: body.orderId,
         fullRefund: typeof body.fullRefund === "boolean" ? body.fullRefund : undefined,
         refundAmountUsd: typeof body.refundAmountUsd === "number" ? body.refundAmountUsd : undefined,
+        refundCumulativeUsd: typeof body.refundCumulativeUsd === "number" ? body.refundCumulativeUsd : undefined,
+        disputedAmountUsd: typeof body.disputedAmountUsd === "number" ? body.disputedAmountUsd : undefined,
         paidAmountUsd: typeof body.paidAmountUsd === "number" ? body.paidAmountUsd : undefined,
         currency: typeof body.currency === "string" ? body.currency : undefined,
         raw: body.raw ?? body,

@@ -115,12 +115,14 @@ describe("StripeProvider", () => {
     const fullEvt = await asEvent(p.verifyWebhook(full, fullHeaders));
     expect(fullEvt?.type).toBe("refunded");
     expect(fullEvt?.fullRefund).toBe(true);
+    expect(fullEvt?.refundCumulativeUsd).toBe(19.99);
 
     const partial = stripeEvent("charge.refunded", { amount_refunded: 1, amount: 1999, payment_intent: "pi_1" });
     const partialHeaders = new Headers({ "stripe-signature": stripeSignature(partial, WEBHOOK_SECRET) });
     const partialEvt = await asEvent(p.verifyWebhook(partial, partialHeaders));
     expect(partialEvt?.type).toBe("refunded");
     expect(partialEvt?.fullRefund).toBe(false);
+    expect(partialEvt?.refundCumulativeUsd).toBe(0.01);
   });
 
   it("maps charge.dispute.created to a measured refund resolved via the payment intent", async () => {
@@ -137,7 +139,10 @@ describe("StripeProvider", () => {
     const evt = await asEvent(p.verifyWebhook(payload, headers));
     expect(evt?.type).toBe("refunded");
     expect(evt?.fullRefund).toBeUndefined();
-    expect(evt?.refundAmountUsd).toBe(19.99);
+    // An ABSOLUTE measurement in its own column (pass 41): a dispute is not a
+    // refund delta, and the route sums it with the cumulative refund total.
+    expect(evt?.disputedAmountUsd).toBe(19.99);
+    expect(evt?.refundAmountUsd).toBeUndefined();
     expect(evt?.orderId).toBeUndefined();
     expect(evt?.providerOrderId).toBe("pi_dispute_1");
   });
@@ -251,8 +256,12 @@ describe("PaddleProvider", () => {
       collectionMode: "automatic",
       customData: { orderId: "order_9" },
     });
-    const items = (captured as unknown as { items: Array<{ price: { unitPrice: { amount: string } } }> }).items;
+    const items = (captured as unknown as { items: Array<{ price: { unitPrice: { amount: string }; taxMode?: string } }> }).items;
     expect(items[0].price.unitPrice.amount).toBe("1999");
+    // Pinned (pass 41): the account default can make an inline price
+    // tax-INCLUSIVE, and then totals.subtotal = price − tax — a $19 charge
+    // reporting $15.83, refused as underpaid by the webhook forever.
+    expect(items[0].price.taxMode).toBe("external");
   });
 
   it("verifies a signed transaction.completed webhook (real SDK HMAC)", async () => {

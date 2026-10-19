@@ -143,6 +143,14 @@ export class StripeProvider implements PaymentProvider {
       // fullRefund; a DISPUTE reports only the disputed amount, which can be
       // less than the charge (pass 39).
       let refundAmountUsd: number | undefined;
+      // The two ABSOLUTE measurements Stripe sends (pass 41). A partial refund
+      // and a partial dispute are reported through different objects with
+      // different semantics, and tracking only one of them let a $5 goodwill
+      // refund plus a $44.99 dispute on the remaining balance return 100% of a
+      // $49.99 payment while the accumulator stood at $44.99 and no revoke ever
+      // fired. Both feed the order row; the route adds them when deciding.
+      let refundCumulativeUsd: number | undefined;
+      let disputedAmountUsd: number | undefined;
       // async_payment_succeeded: delayed-notification methods (SEPA, Boleto…)
       // settle after checkout.session.completed arrived as unpaid.
       if (
@@ -158,7 +166,10 @@ export class StripeProvider implements PaymentProvider {
         type = "refunded";
         orderId = orderId ?? obj?.metadata?.orderId;
         // amount_refunded is cumulative; equal (or beyond) the charge amount
-        // means the payment is now fully refunded.
+        // means the payment is now fully refunded. It is also written to the
+        // order as an absolute total (not a delta) so a later dispute of the
+        // unrefunded remainder can be added to it.
+        if (typeof obj.amount_refunded === "number") refundCumulativeUsd = obj.amount_refunded / 100;
         fullRefund =
           typeof obj.amount_refunded === "number" && typeof obj.amount === "number"
             ? obj.amount_refunded >= obj.amount
@@ -183,7 +194,7 @@ export class StripeProvider implements PaymentProvider {
         type = "refunded";
         orderId = undefined;
         if (typeof obj.amount === "number") {
-          refundAmountUsd = obj.amount / 100;
+          disputedAmountUsd = obj.amount / 100;
           fullRefund = undefined;
         } else {
           fullRefund = true;
@@ -199,6 +210,8 @@ export class StripeProvider implements PaymentProvider {
         orderId,
         fullRefund,
         refundAmountUsd,
+        refundCumulativeUsd,
+        disputedAmountUsd,
         paidAmountUsd,
         currency,
         // Refund webhooks reference the payment intent, not our session id —

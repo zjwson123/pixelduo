@@ -262,36 +262,68 @@ export async function POST(req: Request) {
         // adjustment id (Stripe — cumulative, no delta; a relay that strips the
         // field) keep the old unconditional behavior.
         let fullRefund = event.fullRefund;
-        if (order && event.refundAmountUsd !== undefined) {
-          const marker =
-            event.refundAdjustmentId === undefined
-              ? null
-              : `${event.refundAdjustmentId}:${event.refundAmountUsd < 0 ? "reversed" : "approved"}`;
-          const accumulated = marker
-            ? (
-                await tx.$queryRaw<Array<{ refundedAmountUsd: number }>>(Prisma.sql`
-                  UPDATE "Order"
-                  SET "refundedAmountUsd" = GREATEST("refundedAmountUsd" + ${event.refundAmountUsd}, 0),
-                      "refundedAdjustments" = array_append("refundedAdjustments", ${marker})
-                  WHERE id = ${order.id} AND NOT (${marker} = ANY("refundedAdjustments"))
-                  RETURNING "refundedAmountUsd"
-                `)
-              )[0]
-            : event.refundAmountUsd < 0
-              ? (
-                  await tx.$queryRaw<Array<{ refundedAmountUsd: number }>>(Prisma.sql`
-                    UPDATE "Order"
-                    SET "refundedAmountUsd" = GREATEST("refundedAmountUsd" + ${event.refundAmountUsd}, 0)
-                    WHERE id = ${order.id}
-                    RETURNING "refundedAmountUsd"
-                  `)
-                )[0]
-              : await tx.order.update({
-                  where: { id: order.id },
-                  data: { refundedAmountUsd: { increment: event.refundAmountUsd } },
-                  select: { refundedAmountUsd: true },
-                });
-          if (fullRefund !== true && accumulated && accumulated.refundedAmountUsd >= order.amountUsd - 0.005) {
+        if (order) {
+          // Stripe's ABSOLUTE measurements (pass 41). charge.refunded carries
+          // the CUMULATIVE amount refunded on the charge (the same running
+          // total on every re-delivery), and a dispute carries only its own
+          // amount; both are maxima, not deltas. They are kept in separate
+          // columns because Stripe reports them independently: a $5 goodwill
+          // refund followed by a $44.99 dispute of the remaining balance
+          // returned all $49.99 while neither number on its own reached the
+          // price — the accumulator stood at $44.99 and no revoke ever fired.
+          if (event.refundCumulativeUsd !== undefined) {
+            await tx.$queryRaw(Prisma.sql`
+              UPDATE "Order"
+              SET "refundedAmountUsd" = GREATEST("refundedAmountUsd", ${event.refundCumulativeUsd})
+              WHERE id = ${order.id}
+            `);
+          }
+          if (event.disputedAmountUsd !== undefined) {
+            await tx.$queryRaw(Prisma.sql`
+              UPDATE "Order"
+              SET "disputedAmountUsd" = GREATEST("disputedAmountUsd", ${event.disputedAmountUsd})
+              WHERE id = ${order.id}
+            `);
+          }
+          // Paddle's per-delivery deltas (positive approvals, negative
+          // reversals) keep the marker-guarded accumulation below.
+          if (event.refundAmountUsd !== undefined) {
+            const marker =
+              event.refundAdjustmentId === undefined
+                ? null
+                : `${event.refundAdjustmentId}:${event.refundAmountUsd < 0 ? "reversed" : "approved"}`;
+            if (marker) {
+              await tx.$queryRaw(Prisma.sql`
+                UPDATE "Order"
+                SET "refundedAmountUsd" = GREATEST("refundedAmountUsd" + ${event.refundAmountUsd}, 0),
+                    "refundedAdjustments" = array_append("refundedAdjustments", ${marker})
+                WHERE id = ${order.id} AND NOT (${marker} = ANY("refundedAdjustments"))
+              `);
+            } else if (event.refundAmountUsd < 0) {
+              await tx.$queryRaw(Prisma.sql`
+                UPDATE "Order"
+                SET "refundedAmountUsd" = GREATEST("refundedAmountUsd" + ${event.refundAmountUsd}, 0)
+                WHERE id = ${order.id}
+              `);
+            } else {
+              await tx.order.update({
+                where: { id: order.id },
+                data: { refundedAmountUsd: { increment: event.refundAmountUsd } },
+              });
+            }
+          }
+          // One promotion decision, after every write above, over the sum of
+          // both columns. A refund and a dispute on the same payment are two
+          // halves of the money returned, not two competing totals.
+          const totals = await tx.order.findUnique({
+            where: { id: order.id },
+            select: { refundedAmountUsd: true, disputedAmountUsd: true },
+          });
+          if (
+            fullRefund !== true &&
+            totals &&
+            totals.refundedAmountUsd + totals.disputedAmountUsd >= order.amountUsd - 0.005
+          ) {
             fullRefund = true;
           }
         }
@@ -301,9 +333,10 @@ export async function POST(req: Request) {
         // overreaction).
         if (fullRefund === undefined) {
           fullRefund =
-            event.refundAmountUsd === undefined ||
             !order ||
-            event.refundAmountUsd >= order.amountUsd - 0.005;
+            (event.refundAmountUsd === undefined &&
+              event.refundCumulativeUsd === undefined &&
+              event.disputedAmountUsd === undefined);
         }
         if (order && fullRefund) {
           // The pre-state has to be part of the CAS, never a value read earlier

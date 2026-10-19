@@ -239,6 +239,28 @@ export const authOptions: NextAuthOptions = {
       : []),
   ],
   callbacks: {
+    // Every /api/auth/* request carries an optional `callbackUrl`, and next-auth
+    // validates it through this callback BEFORE it looks at the CSRF token or
+    // the session. The default (`if (url.startsWith("/")) … else new URL(url)`)
+    // throws on anything a non-string body rejected: `/api/auth/session?
+    // callbackUrl=foo` is a GET whose URL parser throw escapes the route
+    // wrapper as a bare 500 plus one captured incident per request, i.e. an
+    // anonymous incident faucet reachable from an <img> tag; a relative
+    // callbackUrl with CR/LF or non-Latin-1 characters reached
+    // `headers.set("Location", …)` on signout and threw there instead. Resolve
+    // every input against our own origin, accept only same-origin results, and
+    // return the parser's percent-encoded form — ASCII by construction, so it
+    // is a valid header value whatever the caller sent.
+    async redirect({ url, baseUrl }) {
+      if (typeof url !== "string") return baseUrl;
+      try {
+        const target = new URL(url, baseUrl);
+        if (target.origin !== baseUrl) return baseUrl;
+        return target.href;
+      } catch {
+        return baseUrl;
+      }
+    },
     // OAuth: find-or-create the local account (providers verify the email).
     // Users with 2FA enabled must keep using password login — otherwise OAuth
     // would silently bypass the second factor.

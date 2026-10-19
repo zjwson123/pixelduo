@@ -1207,6 +1207,37 @@ export async function revokeOrderCreditsTx(
       revoked += g.remaining;
     }
   }
+  // The renewal that minted a carryover stamps it with the PREVIOUS cycle's
+  // funding order (see fulfillOrder) so refunding that previous order revokes
+  // it. The other half was missing (pass 41): refunding the RENEWAL itself left
+  // the carryover untouched, because its refId names the old order — a customer
+  // who bought a cycle and charged it back sat on the free tier holding up to
+  // 30% of the previous cycle's quota until the end of the cycle they had just
+  // refunded. The carryover expires with this order's SUBSCRIPTION grant (both
+  // are written with `renew` in the same transaction), so that shared deadline
+  // names exactly the grants this fulfillment minted; an earlier or later
+  // fulfillment's `renew` is a different instant.
+  const subscription = await tx.$queryRaw<Array<{ expiresAt: Date }>>(Prisma.sql`
+    SELECT "expiresAt" FROM "CreditGrant"
+    WHERE "refId" = ${order.id} AND "refType" = 'order' AND "source" = 'SUBSCRIPTION'
+    LIMIT 1
+  `);
+  if (subscription.length > 0) {
+    const rollovers = await tx.$queryRaw<Array<{ id: string; remaining: number }>>(
+      Prisma.sql`SELECT id, remaining FROM "CreditGrant"
+        WHERE "userId" = ${order.userId} AND "source" = 'ROLLOVER'
+          AND "expiresAt" = ${subscription[0].expiresAt}
+        ${GRANT_LOCK_ORDER}
+        FOR UPDATE`,
+    );
+    for (const g of rollovers) {
+      if (seen.has(g.id)) continue;
+      seen.add(g.id);
+      if (g.remaining <= 0) continue;
+      await tx.creditGrant.update({ where: { id: g.id }, data: { remaining: 0 } });
+      revoked += g.remaining;
+    }
+  }
   // No spendable remainder (already spent, or drained and revoked elsewhere):
   // nothing to take, so no ledger entry either — a zero-delta REVOKE would
   // just be noise in the cycle-usage window.

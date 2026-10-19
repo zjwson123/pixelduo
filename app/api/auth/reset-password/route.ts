@@ -2,9 +2,10 @@ import bcrypt from "bcryptjs";
 import { z } from "zod";
 import { enforceRateLimit, fail, ok, parseJsonBody, readBodyCapped, zodMessage, tooLarge } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
-import { consumeToken } from "@/lib/tokens";
+import { consumeToken, previewToken } from "@/lib/tokens";
 import { clearLoginFailures } from "@/lib/login-guard";
 import { sendPasswordChangedEmail } from "@/lib/mail";
+import { captureError } from "@/lib/observability";
 
 const schema = z.object({
   token: z.string().min(20).max(200),
@@ -18,9 +19,16 @@ export async function POST(req: Request) {
     const bodyRaw = await readBodyCapped(req, 8 * 1024);
     if ("tooLarge" in bodyRaw) return tooLarge();
     const body = schema.parse(parseJsonBody(bodyRaw.raw));
-    const result = await consumeToken("reset-password", body.token);
-    if (!result.ok || !result.email) return fail(new Error("invalid-token"));
-    const user = await prisma.user.findUnique({ where: { email: result.email } });
+    // Preview BEFORE hashing (an invalid token must not buy a bcrypt compare),
+    // and spend the single use in the SAME transaction as the state change it
+    // authorizes (pass 41, the shape pass 39 gave verify-email). The token used
+    // to be consumed in its own transaction first: a Prisma timeout, a
+    // deadlock, or any failure between the two burned the link and left the
+    // password unchanged, so the user had to request another mail — and the
+    // account owner's only recovery path was the one that just failed.
+    const preview = await previewToken("reset-password", body.token);
+    if (!preview.ok || !preview.email) return fail(new Error("invalid-token"));
+    const user = await prisma.user.findUnique({ where: { email: preview.email } });
     if (!user) return fail(new Error("invalid-token"));
     const passwordHash = await bcrypt.hash(body.password, 10);
     // Bump sessionVersion so all previously issued JWTs are rejected, and
@@ -28,12 +36,18 @@ export async function POST(req: Request) {
     // compromised, and the explicit revoke is the belt to the version stamp's
     // braces (pass 25's ApiKey.sessionVersion check closes the mint-races-a-
     // revoke ordering; this flip makes the row itself dead, immediately).
-    await prisma.$transaction([
-      prisma.user.update({
+    await prisma.$transaction(async (tx) => {
+      // Re-checks expiry and the single-use CAS under the transaction: a
+      // concurrent reset with the same link either waits here and loses the
+      // CAS, or wins before this transaction started, in which case the
+      // preview above was stale and this refuses rather than writing twice.
+      const result = await consumeToken("reset-password", body.token, tx);
+      if (!result.ok || result.email !== user.email) throw new Error("invalid-token");
+      await tx.user.update({
         where: { id: user.id },
         data: { passwordHash, sessionVersion: { increment: 1 } },
-      }),
-      prisma.apiKey.updateMany({ where: { userId: user.id, revokedAt: null }, data: { revokedAt: new Date() } }),
+      });
+      await tx.apiKey.updateMany({ where: { userId: user.id, revokedAt: null }, data: { revokedAt: new Date() } });
       // Retire every OTHER live link for this address — reset siblings AND any
       // outstanding verify-email link. createToken only invalidates siblings
       // older than ROTATION_GRACE_MS (30 min), and that grace exists so a
@@ -55,21 +69,26 @@ export async function POST(req: Request) {
       // and not trusted any more, and this link is that same mailbox's residue.
       // An owner who still needs to verify can request a fresh link from a
       // session (unverified accounts can sign in).
-      prisma.verificationToken.updateMany({
+      await tx.verificationToken.updateMany({
         where: {
           email: user.email,
           purpose: { in: ["reset-password", "verify-email"] },
           consumedAt: null,
         },
         data: { consumedAt: new Date() },
-      }),
-    ]);
+      });
+    });
     // The owner learns that their credential moved, in the mailbox the reset
     // link came from — the one place a silent takeover would otherwise have no
-    // witness (pass 33; the 2FA routes mail for the same reason). Sent here,
-    // before the lockout clear below: the reset is already committed, and a
-    // Redis hiccup in the clear must not be the reason the notice is skipped.
-    await sendPasswordChangedEmail(user.email);
+    // witness (pass 33; the 2FA routes mail for the same reason). Delivery is
+    // reported but not fatal: the reset is already committed, and a broken SMTP
+    // relay must not turn a successful reset into a 500 that skips the lockout
+    // clear below (the owner would then still be locked out by junk passwords).
+    try {
+      await sendPasswordChangedEmail(user.email);
+    } catch (e) {
+      captureError(e, { scope: "reset-password-notice" });
+    }
     // Proof of mailbox ownership is also the documented recovery path out of a
     // brute-force lockout: without this, junk passwords from a few sources
     // would keep the real owner out even after they rotated their password.
