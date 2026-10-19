@@ -402,10 +402,17 @@ describe("pass 22 — the reset-mail ceiling is reported, not swallowed", () => 
       madeEmails.push(email);
       await prisma.user.create({ data: { email, passwordHash: "x", name: "Reset" } });
 
-      // Control: with the budget intact the request does its job.
+      // Control: with the budget intact the request does its job. The token is
+      // created AFTER the response (pass 40 moved it off the address-shaped
+      // response path), so poll instead of racing the deferred write.
       const first = await forgotPOST(forgotReq(email));
       expect(first.status).toBe(200);
-      expect(await prisma.verificationToken.count({ where: { email, purpose: "reset-password" } })).toBe(1);
+      const tokenCount = async () =>
+        prisma.verificationToken.count({ where: { email, purpose: "reset-password" } });
+      for (let i = 0; i < 100 && (await tokenCount()) === 0; i++) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      expect(await tokenCount()).toBe(1);
 
       // Spend the stream: with the total at 1 the reset share is 1.
       for (let i = 0; i < 5 && (await reserveAuthMailSend("reset")); i++) {
