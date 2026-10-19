@@ -18,16 +18,42 @@ import { prisma } from "../lib/prisma";
 
 const mailDir = process.env.MAIL_DEV_DIR;
 
-function mailLink(email: string, marker: string): string {
+// WAIT for the mail; do not assume it is already on disk.
+//
+// Delivery of the reset link is deliberately deferred PAST the response (pass
+// 40): the token transaction and the SMTP exchange used to sit on the response
+// path, which made a known address answer a few milliseconds slower than an
+// invented one — one request per address read account existence off the clock.
+// The handler now answers first and reserves the mail budget, rotates the
+// token and sends in a detached follow-up, so the dev mailer's file appears
+// AFTER /api/auth/forgot-password has already answered.
+//
+// This spec read the file exactly once, immediately, and under the e2e stage's
+// load (6 workers sharing one app) it lost that race every time: ENOENT on
+// both the attempt and its retry in ci-local, and on two standalone full-suite
+// re-runs — while the file itself landed milliseconds later. Polling is also
+// what a user does (they wait for the mail); 15s is far below the test timeout.
+async function mailLink(email: string, marker: string): Promise<string> {
   const file = path.join(mailDir!, `${email}.txt`);
-  const line = fs
-    .readFileSync(file, "utf8")
-    .split("\n")
-    .find((l) => l.includes(marker));
-  if (!line) throw new Error(`no ${marker} link in mail: ${file}`);
-  const url = line.match(/https?:\/\/\S+/)?.[0];
-  if (!url) throw new Error(`no url in mail line: ${line}`);
-  return url;
+  const deadline = Date.now() + 15_000;
+  let reason = `no ${marker} link in mail: ${file}`;
+  for (;;) {
+    try {
+      const line = fs
+        .readFileSync(file, "utf8")
+        .split("\n")
+        .find((l) => l.includes(marker));
+      if (line) {
+        const url = line.match(/https?:\/\/\S+/)?.[0];
+        if (url) return url;
+        reason = `no url in mail line: ${line}`;
+      }
+    } catch (e) {
+      reason = `mail not delivered yet (${(e as Error).message})`;
+    }
+    if (Date.now() >= deadline) throw new Error(`${reason} — waited 15s`);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
 }
 
 async function register(page: Page, email: string, password: string) {
@@ -122,8 +148,9 @@ test("password reset: the emailed link rotates the credential and kills sessions
   await page.click('button[type="submit"]');
   await expect(page.locator("p", { hasText: "a reset link is on its way" })).toBeVisible();
 
-  // Follow the link from the mail, exactly as a user would.
-  const link = mailLink(email, "/reset-password?token=");
+  // Follow the link from the mail, exactly as a user would — which means
+  // waiting for it (delivery is deferred past the response; see mailLink).
+  const link = await mailLink(email, "/reset-password?token=");
   expect(link.startsWith(new URL(page.url()).origin)).toBe(true);
   await page.goto(link);
   await page.fill("#password", newPassword);
