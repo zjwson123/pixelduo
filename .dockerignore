@@ -14,11 +14,17 @@ backups
 *.db-journal
 prisma/*.db
 prisma/*.db-journal
-# Every dotenv flavour, not just the literal ".env": Docker patterns are exact,
-# so `.env.local`/`.env.production` were in the build context and landed in the
-# worker image layer via `COPY . .` — baking real provider/payment/SMTP keys
-# into any image that leaves the registry.
+# Every dotenv flavour, at ANY DEPTH. A pattern without `/` is anchored to the
+# context root and `*` does not cross directories, so `.env*` alone left
+# `prisma/.env` (a supported Prisma convention, and the place an operator may
+# keep DATABASE_URL) in the build context — `next build` traced it into the
+# standalone tree and the web stage's `cp prisma/` re-added it AFTER the prune,
+# while the worker's `COPY` carried it too. `**/` is what makes this rule
+# recursive; the explicit unignore keeps the sanitized example. Both forms are
+# listed deliberately: `.env*` pins the root, `**/.env*` reaches every nested
+# copy, and neither depends on how `**` treats the zero-directory case.
 .env*
+**/.env*
 !.env.example
 test-results
 playwright-report

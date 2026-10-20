@@ -85,12 +85,27 @@ docker run --rm \
     STAMP=$(date +%Y%m%d-%H%M%S)
     rm -rf /backups/objects/.*.partial
     mc mirror --overwrite --remove "src/$SRC_BUCKET" "/backups/objects/.$STAMP.partial"
+    # `mc mirror` exits 0 on an EMPTY source. Without this test a recreated or
+    # emptied bucket produced a valid-looking empty snapshot, the rotation below
+    # deleted the oldest COMPLETE snapshot, and the off-site leg then wiped its
+    # target too (`--remove` from an empty source). The bucket being empty is
+    # exactly what a compromised or misconfigured endpoint looks like, so it is
+    # a failure, not a backup.
+    COUNT=$(find "/backups/objects/.$STAMP.partial" -type f | wc -l | tr -d " ")
+    if [ "$COUNT" -eq 0 ]; then
+      echo "[backup-objects] FAILED: $SRC_BUCKET produced 0 objects — refusing to rotate or mirror an empty snapshot (previous snapshots are untouched)" >&2
+      rm -rf "/backups/objects/.$STAMP.partial"
+      exit 1
+    fi
     mv "/backups/objects/.$STAMP.partial" "/backups/objects/$STAMP"
     ls -1t /backups/objects/ | tail -n +$((KEEP + 1)) | while read -r f; do rm -rf "/backups/objects/$f"; done
-    echo "[backup-objects] $STAMP mirrored from $SRC_BUCKET (keeping $KEEP snapshots)"
+    echo "[backup-objects] $STAMP mirrored from $SRC_BUCKET ($COUNT objects, keeping $KEEP snapshots)"
     if [ -n "$TARGET_ENDPOINT" ]; then
       mc alias set tgt "$TARGET_ENDPOINT" "$TARGET_ACCESS" "$TARGET_SECRET" >/dev/null
-      mc mirror --overwrite --remove "src/$SRC_BUCKET" "tgt/$TARGET_BUCKET"
+      # Mirror the SNAPSHOT, not the live bucket: the source can be emptied
+      # between the two legs, and `--remove` would then erase the off-site
+      # copy as well. The validated snapshot is the thing being backed up.
+      mc mirror --overwrite --remove "/backups/objects/$STAMP" "tgt/$TARGET_BUCKET"
       echo "[backup-objects] off-site mirror to $TARGET_BUCKET done"
     fi
   '

@@ -37,6 +37,23 @@ export async function POST(req: Request) {
     if (body.kind === "plan" && item.price === 0) {
       return fail(new Error("invalid-input: the free plan is not purchasable"));
     }
+    // Every call inserts an Order row AND opens a provider-side checkout
+    // session; nothing sweeps pending rows, so one verified account could mint
+    // them at the rate limit indefinitely. A short rolling cap keeps ordinary
+    // retries (a closed tab, a declined card) working while bounding the
+    // accumulation. The row is NOT deleted: a provider session may still settle
+    // later, and deleting its order would leave the paid webhook unable to
+    // resolve it (money kept, no credits).
+    const recentPending = await prisma.order.count({
+      where: {
+        userId,
+        status: "pending",
+        createdAt: { gte: new Date(Date.now() - 60 * 60 * 1000) },
+      },
+    });
+    if (recentPending >= 5) {
+      return fail(new Error("too-many-pending-orders: finish or abandon a recent checkout before starting another"));
+    }
 
     const idempotencyKey = `${userId}:${body.kind}:${body.itemId}:${randomUUID()}`;
     const order = await prisma.order.create({

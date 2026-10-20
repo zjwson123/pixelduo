@@ -42,9 +42,22 @@ export function assertProductionConfig(env: NodeJS.ProcessEnv = process.env): vo
   // JWT) lets anyone mint a session for any account, admin included.
   const secret = env.NEXTAUTH_SECRET ?? "";
   const lower = secret.toLowerCase();
-  if (secret.length < 32 || PLACEHOLDER_SECRETS.some((p) => lower.includes(p)) || lower === "secret") {
+  // Length and placeholder matching are not entropy: a 32-character repeated
+  // pattern ("abcabc…", "0123456789…") passed both while carrying a handful of
+  // bits. Reject a short period and a tiny alphabet outright; a real
+  // `openssl rand` value (hex or base64) has neither.
+  const periodic = Array.from({ length: 16 }, (_, i) => i + 1).some(
+    (p) => secret.length % p === 0 && secret === secret.slice(0, p).repeat(secret.length / p),
+  );
+  if (
+    secret.length < 32 ||
+    PLACEHOLDER_SECRETS.some((p) => lower.includes(p)) ||
+    lower === "secret" ||
+    periodic ||
+    new Set(secret).size < 8
+  ) {
     throw new Error(
-      "NEXTAUTH_SECRET is missing, shorter than 32 characters, or still a placeholder — generate one with `openssl rand -base64 32`",
+      "NEXTAUTH_SECRET is missing, shorter than 32 characters, still a placeholder, or carries too little entropy — generate one with `openssl rand -base64 32`",
     );
   }
 

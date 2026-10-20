@@ -130,6 +130,7 @@ describe("pass 38 — an aborted request body is a client condition", () => {
     });
     return new Request("http://test.local/abort", {
       method: "POST",
+      headers: { "content-type": "application/json" },
       body: stream,
       // undici requires half-duplex for a stream body; the DOM type has no
       // such field.

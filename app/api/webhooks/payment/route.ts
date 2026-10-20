@@ -68,7 +68,7 @@ export async function POST(req: Request) {
     // also counts bytes rather than UTF-16 code units, so a multibyte body
     // can't slip ~3x past the cap. Every other body-reading route already
     // goes through this helper.
-    const bodyRaw = await readBodyCapped(req, WEBHOOK_MAX_BYTES);
+    const bodyRaw = await readBodyCapped(req, WEBHOOK_MAX_BYTES, { allowNonJson: true });
     if ("tooLarge" in bodyRaw) return tooLarge();
     const raw = bodyRaw.raw;
     // The signature's timestamp window is judged on the DATABASE's clock — the

@@ -345,7 +345,7 @@ jobs:
             # __NEXT_PROCESSED_ENV to server.js, which makes @next/env skip
             # populating from files.
             grep -q "__NEXT_PROCESSED_ENV" /app/server.js
-            for f in /app/.env /app/.env.local /app/.env.production; do
+            for f in /app/.env /app/.env.local /app/.env.production /app/prisma/.env /app/prisma/.env.local /app/prisma/.env.production; do
               if [ -e "$f" ]; then echo "dotenv in image: $f"; exit 1; fi
             done
             echo "web image shape OK"
@@ -454,9 +454,15 @@ jobs:
             test ! -e /app/.claude
             test ! -e /app/.cursor
             for f in /app/*.swp; do if [ -e "$f" ]; then echo "editor swap file in image: $f"; exit 1; fi; done
-            for f in /app/.env /app/.env.local /app/.env.production; do
+            for f in /app/.env /app/.env.local /app/.env.production /app/prisma/.env /app/prisma/.env.local /app/prisma/.env.production; do
               if [ -e "$f" ]; then echo "dotenv in image: $f"; exit 1; fi
             done
+            # The recursive rule in .dockerignore is the primary control; this
+            # catches any nested dotenv a future COPY/prune path re-introduces.
+            if find /app -path /app/node_modules -prune -o -name ".env*" -print | grep -q .; then
+              find /app -path /app/node_modules -prune -o -name ".env*" -print
+              echo "nested dotenv in image"; exit 1
+            fi
             # The worker regenerates its Prisma client AFTER the .env prune, so
             # it needs the pass-38 rewrite too (pass 39) — and the source/config
             # names the web stage refuses must not ride along in the image a

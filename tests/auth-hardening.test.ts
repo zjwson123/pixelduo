@@ -43,8 +43,9 @@ describe("production config assertions", () => {
     expect(() =>
       assertProductionConfig({ ...base, NEXTAUTH_SECRET: "change-me-to-a-long-random-string" }),
     ).toThrow(/NEXTAUTH_SECRET/);
-    // Low entropy but long enough — still brute-forceable offline.
-    expect(() => assertProductionConfig({ ...base, NEXTAUTH_SECRET: "a".repeat(40) })).not.toThrow();
+    // Low entropy but long enough — brute-forceable offline, and pass 42 now
+    // refuses it instead of only checking length.
+    expect(() => assertProductionConfig({ ...base, NEXTAUTH_SECRET: "a".repeat(40) })).toThrow(/entropy/);
   });
 
   it("accepts a fully configured deployment and ignores development/test environments", () => {

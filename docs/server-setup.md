@@ -22,7 +22,12 @@ sudo usermod -aG docker $USER
 
 ```bash
 git clone git@github.com:zjwson123/pixelduo.git && cd pixelduo
+# .env.production holds every production secret (NEXTAUTH_SECRET, DB/MinIO/SMTP
+# credentials, payment and provider keys). The default umask creates it 0644 —
+# readable by every other account on the host — so create it owner-only.
+umask 077
 cp .env.example .env.production
+chmod 600 .env.production
 # 编辑 .env.production，必须填：
 #   CADDY_DOMAIN=pixelduo.ai
 #   NEXTAUTH_URL=https://pixelduo.ai
@@ -42,6 +47,9 @@ cp .env.example .env.production
 #     等于把存储服务的 admin API 也交出去了。改为桶级 service account 需要
 #     init-storage 供应 + 两个新变量，见 docker-compose.single.yml 里
 #     S3_ACCESS_KEY_ID 处的说明——对外提供此栈之前应补上）
+# `source` EXECUTES the file as shell; only do this with a file you wrote. For
+# compose commands prefer `docker compose --env-file .env.production …` so the
+# values are read, not evaluated.
 set -a; source .env.production; set +a
 
 # 备份目录必须先建好并属于当前用户（pass 34）：backups/ 不在 git 里，全新 clone

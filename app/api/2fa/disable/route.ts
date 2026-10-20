@@ -1,6 +1,6 @@
 import bcrypt from "bcryptjs";
 import { z } from "zod";
-import { ApiError, enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, requireVerifiedUser, zodMessage, tooLarge } from "@/lib/api";
+import { ApiError, enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, requireVerifiedUserSession, zodMessage, tooLarge } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { passwordReauthRefusal } from "@/lib/auth";
 import {
@@ -30,7 +30,7 @@ const schema = z.object({
 // downgrade to its co-tenants (and vice versa).
 export async function POST(req: Request) {
   try {
-    const userId = await requireVerifiedUser();
+    const { id: userId, sv } = await requireVerifiedUserSession();
     const limited = await enforceUserRateLimit(userId, "2fa-disable", 5, 60_000);
     if (limited) return fail(limited);
     // Cumulative brake (lib/twofa.ts) before any comparison: turning the second
@@ -67,9 +67,12 @@ export async function POST(req: Request) {
       return fail(new Error("invalid-code"));
     }
     await clearTwoFactorFailures(userId);
-    await prisma.$transaction([
-      prisma.user.update({
-        where: { id: userId },
+    const disabled = await prisma.$transaction(async (tx) => {
+      // The session version is part of the commit, not only of the check at
+      // the top of the request: a downgrade that straddled the owner's
+      // reset/revoke-sessions must not land after the remediation.
+      const claim = await tx.user.updateMany({
+        where: { id: userId, sessionVersion: sv },
         data: {
           totpSecret: null,
           totpPendingSecret: null,
@@ -86,13 +89,18 @@ export async function POST(req: Request) {
           // revoke-sessions.
           sessionVersion: { increment: 1 },
         },
-      }),
-      prisma.apiKey.updateMany({
+      });
+      if (claim.count !== 1) return false;
+      await tx.apiKey.updateMany({
         where: { userId, revokedAt: null },
         data: { revokedAt: new Date() },
-      }),
-      prisma.backupCode.deleteMany({ where: { userId } }),
-    ]);
+      });
+      await tx.backupCode.deleteMany({ where: { userId } });
+      return true;
+    });
+    // A superseded session cannot disable the second factor; report the
+    // revocation rather than a success the account does not reflect.
+    if (!disabled) return fail(new ApiError(401, "unauthorized"));
     // Silent state changes are indistinguishable from a hostile one — see
     // sendTwoFactorStateEmail.
     await sendTwoFactorStateEmail(user.email, false);

@@ -48,6 +48,16 @@ export async function requirePartialSession(): Promise<{ id: string; totpPending
 }
 
 export async function requireUserId(): Promise<string> {
+  return (await requireUserIdSession()).id;
+}
+
+// Same check, but hands back the session version the request was authorized
+// with. A route whose transaction can spend seconds (account erasure reaches
+// storage) must re-read it inside that transaction: the version checked at the
+// top of the request can be revoked by a password reset arriving mid-flight,
+// and without the predicate the in-flight action commits after the revocation
+// the owner just performed.
+export async function requireUserIdSession(): Promise<{ id: string; sv: number }> {
   const { id, sv, totpPending } = await sessionUser();
   // Partial 2FA sessions must not touch protected resources.
   if (totpPending) throw new ApiError(403, "2fa-required");
@@ -55,7 +65,7 @@ export async function requireUserId(): Promise<string> {
   // older JWTs carry a stale version and are rejected here.
   const user = await prisma.user.findUnique({ where: { id }, select: { sessionVersion: true } });
   if (!user || user.sessionVersion !== sv) throw new ApiError(401, "unauthorized");
-  return id;
+  return { id, sv };
 }
 
 // Account gate for credit-consuming actions: email must be verified first
@@ -305,7 +315,25 @@ export function clampPage(raw: string | null, max = PAGE_MAX): number {
 export async function readBodyCapped(
   req: Request,
   maxBytes: number,
+  opts?: { allowNonJson?: boolean },
 ): Promise<{ tooLarge: true } | { raw: string }> {
+  // A cross-site HTML form cannot set `application/json` (that needs a CORS
+  // preflight the app never grants), so requiring it is what stops a
+  // `enctype="text/plain"` form from synthesising a JSON body against every
+  // custom mutating route — NextAuth's CSRF token covers only
+  // /api/auth/[...nextauth]. SameSite=Lax does not help the unauthenticated
+  // routes at all, and a same-site sibling origin still sends Lax cookies.
+  // The two deliberate exceptions are the NextAuth wrapper (form-encoded) and
+  // the payment webhook (a provider's own content type).
+  if (!opts?.allowNonJson) {
+    const mediaType = (req.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
+    if (mediaType !== "application/json") {
+      throw new ApiError(
+        415,
+        "unsupported-media-type: this endpoint accepts application/json only",
+      );
+    }
+  }
   const declared = Number(req.headers.get("content-length") ?? NaN);
   if (Number.isFinite(declared) && declared > maxBytes) {
     return { tooLarge: true };

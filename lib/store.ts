@@ -28,7 +28,15 @@ export async function saveBase64Image(base64: string, ext = "png"): Promise<stri
 // meant to prevent.
 export async function readBodyCapped(res: Response, maxBytes: number): Promise<Buffer> {
   const declared = Number(res.headers.get("content-length") ?? NaN);
-  if (Number.isFinite(declared) && declared > maxBytes) throw new Error("download-too-large");
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    // The streaming branch below cancels on the same refusal, and the 3xx/4xx
+    // branches of fetchPublicBuffer cancel explicitly: an undici response whose
+    // body is never read keeps its socket out of the pool until GC, so a
+    // hostile declared length would pin a connection per job in the worker's
+    // single tick loop.
+    await res.body?.cancel().catch(() => undefined);
+    throw new Error("download-too-large");
+  }
   if (!res.body) {
     const buf = Buffer.from(await res.arrayBuffer());
     if (buf.length > maxBytes) throw new Error("download-too-large");

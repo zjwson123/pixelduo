@@ -80,10 +80,28 @@ for forbidden in pixelduo "${BACKUP_S3_BUCKET:-}" "${S3_BUCKET:-}" "${BACKUP_TAR
   fi
 done
 
+# A stamp is a snapshot NAME, not a path. `..`, `../..` or an absolute value
+# resolved through $PWD would mount (and mirror) the repo root or anything else
+# into the target bucket — the same argv-boundary rule the target name gets.
+case "$STAMP" in
+  [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+  *)
+    echo "refusing stamp '$STAMP': expected YYYYMMDD-HHMMSS" >&2
+    exit 1
+    ;;
+esac
+
 SNAPSHOT="$PWD/backups/objects/$STAMP"
 [ -d "$SNAPSHOT" ] || { echo "snapshot not found: $SNAPSHOT"; exit 1; }
 
 SRC_COUNT=$(find "$SNAPSHOT" -type f | wc -l | tr -d " ")
+# An empty snapshot is what a failed/emptied-source backup used to leave behind
+# (and its drill then "passed" by mirroring 0 objects and comparing 0 == 0).
+# A real drill needs objects; forcing an empty one is an explicit opt-in.
+if [ "$SRC_COUNT" -eq 0 ] && [ "${RESTORE_DRILL_ALLOW_EMPTY:-0}" != "1" ]; then
+  echo "refusing an EMPTY snapshot ($SNAPSHOT): restore drill would prove nothing. Set RESTORE_DRILL_ALLOW_EMPTY=1 if this is intentional." >&2
+  exit 1
+fi
 
 if [ "${RESTORE_DRILL_CONFIRM:-0}" != "1" ]; then
   echo "DRY RUN (nothing written). This would mirror $SRC_COUNT object(s) from"

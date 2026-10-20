@@ -58,7 +58,10 @@ const CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g;
 // sanitized — it cannot be refused, and dropping recon over a stray byte would
 // cost more than it protects.
 export function singleLine(value: string): string {
-  return value.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ");
+  // Cf (format controls) too: U+202E/U+2066-U+2069 reorder what follows,
+  // U+200B/U+FEFF hide a separator boundary. The User-Agent header cannot be
+  // refused, so it is sanitized here like every other renderer instruction.
+  return value.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]|\p{Cf}/gu, " ");
 }
 
 // Bound a string to `max` UTF-16 code units WITHOUT ever splitting a surrogate

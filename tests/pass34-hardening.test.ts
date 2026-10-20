@@ -505,7 +505,9 @@ describe("pass 34 — the published-secret gate normalises before comparing", ()
     expect(() => assertProductionConfig(productionEnv(` ${PUBLISHED}`))).toThrow(/published/i);
     // Controls: a real secret boots, and the CI runtime may still use the
     // published one (testDeployment escape hatch).
-    expect(() => assertProductionConfig(productionEnv("z9".repeat(24)))).not.toThrow();
+    expect(() =>
+      assertProductionConfig(productionEnv("Zq7pR2vX9mK4tL8wN3cB6hJ1yF5dG0aS7eU2iO4kM9nP")),
+    ).not.toThrow();
     const ciEnv = productionEnv(PUBLISHED);
     ciEnv.PAYMENT_ALLOW_MOCK = "1";
     expect(() => assertProductionConfig(ciEnv)).not.toThrow();

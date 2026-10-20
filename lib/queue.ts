@@ -1,7 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "./prisma";
 import { estimateGenerationCost, estimateModelCost, type ModelId, type Quality } from "./cost";
-import { addCreditsTx, spendCreditsTx, refundCreditsTx, dbNow, type SpendConsumption } from "./ledger";
+import { addCreditsTx, spendCreditsTx, refundCreditsTx, dbNow, resolveRolloverCycleOrders, type SpendConsumption } from "./ledger";
 import { captureError } from "./observability";
 import { getModel } from "./model-registry";
 import { getStorage } from "./storage";
@@ -861,10 +861,20 @@ export async function completeJob(jobId: string, images: JobImage[], worker: str
     if (consumption?.length) {
       const grants = await tx.creditGrant.findMany({
         where: { id: { in: consumption.map((c) => c.grantId) } },
-        select: { refType: true, refId: true },
+        select: { id: true, refType: true, refId: true, source: true, expiresAt: true, cycleOrderId: true },
       });
+      // A ROLLOVER grant's refId names the cycle it was MEASURED from; the
+      // renewal whose cycle it is spent in is cycleOrderId (legacy rows:
+      // resolved by the shared deadline). Both orders must be checked: a
+      // refunded renewal whose carryover is being delivered would otherwise
+      // pass the gate because the old, still-paid order is the one refId names.
+      const cycleOrders = await resolveRolloverCycleOrders(tx, job.userId, grants);
       const orderIds = [
-        ...new Set(grants.filter((g) => g.refType === "order" && g.refId).map((g) => g.refId as string)),
+        ...new Set([
+          ...grants.filter((g) => g.refType === "order" && g.refId).map((g) => g.refId as string),
+          ...grants.filter((g) => g.cycleOrderId).map((g) => g.cycleOrderId as string),
+          ...cycleOrders.values(),
+        ]),
       ];
       if (orderIds.length) {
         // Lock the funding orders before reading their status. Unlocked, this

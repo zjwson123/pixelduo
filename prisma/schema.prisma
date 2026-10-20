@@ -150,12 +150,20 @@ model CreditGrant {
   expiresAt DateTime?
   refType   String? // order | none (source of the grant for audit/revocation)
   refId     String? // order.id when created from a paid order
+  // The order whose CYCLE this grant belongs to, when that is not the order it
+  // was measured from. A ROLLOVER is stamped with the previous cycle's order in
+  // refId (refunding that cycle must take the carryover back), but it is spent
+  // inside the NEW cycle — so refunding the renewal that minted it must also
+  // reach it. One refId cannot name both orders; this column names the second.
+  // REFUND replacements inherit it from the grant they replace.
+  cycleOrderId String?
   createdAt DateTime  @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, expiresAt])
   @@index([refId])
+  @@index([cycleOrderId])
 }
 
 model Job {

@@ -407,8 +407,17 @@ describe("published CI secret (pass 13)", () => {
     expect(() =>
       assertProductionConfig({ ...base, NEXTAUTH_SECRET: CI_SECRET, PAYMENT_ALLOW_MOCK: "1" } as NodeJS.ProcessEnv),
     ).not.toThrow();
+    // Pass 42: length was the only entropy check, so 48 copies of one
+    // character passed while carrying ~1 bit. A real `openssl rand` value has
+    // a broad alphabet and no short period.
     expect(() =>
       assertProductionConfig({ ...base, NEXTAUTH_SECRET: "s".repeat(48) } as NodeJS.ProcessEnv),
+    ).toThrow(/entropy/);
+    expect(() =>
+      assertProductionConfig({
+        ...base,
+        NEXTAUTH_SECRET: "Zq7pR2vX9mK4tL8wN3cB6hJ1yF5dG0aS7eU2iO4kM9nP",
+      } as NodeJS.ProcessEnv),
     ).not.toThrow();
   });
 });

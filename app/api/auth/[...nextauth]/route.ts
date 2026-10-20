@@ -118,7 +118,7 @@ async function limited(req: NextRequest, ctx: Parameters<typeof handler>[1]) {
   // mid-body client disconnect as a 400 (lib/api.ts) — both read the body here
   // rather than inside the dependency, so both are mapped through fail(), the
   // same way every other route maps them.
-  const bodyRaw = await readBodyCapped(req, MAX_BODY_BYTES).catch((e: unknown) => ({
+  const bodyRaw = await readBodyCapped(req, MAX_BODY_BYTES, { allowNonJson: true }).catch((e: unknown) => ({
     refused: fail(e),
   }));
   if ("refused" in bodyRaw) return bodyRaw.refused;

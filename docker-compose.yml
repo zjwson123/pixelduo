@@ -455,7 +455,7 @@ services:
         chmod 700 /backups/objects 2>/dev/null || true;
         rm -rf /backups/objects/.*.partial;
         STAMP=$$(date +%Y%m%d-%H%M%S);
-        if mc alias set src $${BACKUP_S3_ENDPOINT} $${BACKUP_S3_ACCESS_KEY_ID} $${BACKUP_S3_SECRET_ACCESS_KEY} >/dev/null 2>&1 && mc mirror --overwrite --remove src/$${BACKUP_S3_BUCKET} /backups/objects/.$${STAMP}.partial; then
+        if mc alias set src $${BACKUP_S3_ENDPOINT} $${BACKUP_S3_ACCESS_KEY_ID} $${BACKUP_S3_SECRET_ACCESS_KEY} >/dev/null 2>&1 && mc mirror --overwrite --remove src/$${BACKUP_S3_BUCKET} /backups/objects/.$${STAMP}.partial && [ "$$(find /backups/objects/.$${STAMP}.partial -type f | wc -l)" -gt 0 ]; then
           mv /backups/objects/.$${STAMP}.partial /backups/objects/$${STAMP};
           # Same clamp as the dump rotation above (pass 37): KEEP=0 must not
           # delete the snapshot this run just renamed into place.
@@ -463,10 +463,14 @@ services:
           echo "[backup-objects] $${STAMP} mirrored (keep $$((BACKUP_KEEP > 0 ? BACKUP_KEEP : 1)))";
         else
           rm -rf /backups/objects/.$${STAMP}.partial;
-          echo "[backup-objects] FAILED at $${STAMP} — no snapshot written, rotation skipped (the previous snapshots are untouched)" >&2;
+          # The count arm is what catches `mc mirror` exiting 0 on an EMPTY
+          # source (a recreated bucket, a wrong endpoint): that snapshot would
+          # rotate away the oldest complete one, and the off-site leg below
+          # would wipe its target with --remove.
+          echo "[backup-objects] FAILED at $${STAMP} — no snapshot written (empty or failed mirror), rotation skipped (the previous snapshots are untouched)" >&2;
         fi;
         if [ -n "$${BACKUP_TARGET_ENDPOINT}" ]; then
-          if mc alias set tgt $${BACKUP_TARGET_ENDPOINT} $${BACKUP_TARGET_ACCESS_KEY_ID} $${BACKUP_TARGET_SECRET_ACCESS_KEY} >/dev/null 2>&1 && mc mirror --overwrite --remove src/$${BACKUP_S3_BUCKET} tgt/$${BACKUP_TARGET_BUCKET}; then
+          if mc alias set tgt $${BACKUP_TARGET_ENDPOINT} $${BACKUP_TARGET_ACCESS_KEY_ID} $${BACKUP_TARGET_SECRET_ACCESS_KEY} >/dev/null 2>&1 && mc mirror --overwrite --remove /backups/objects/$${STAMP} tgt/$${BACKUP_TARGET_BUCKET}; then
             echo "[backup-objects] off-site mirror done";
           else
             echo "[backup-objects] off-site mirror FAILED at $${STAMP} (the local snapshot is complete)" >&2;

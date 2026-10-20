@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { Prisma } from "@prisma/client";
-import { ApiError, enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, requireUserId, zodMessage, tooLarge } from "@/lib/api";
+import { ApiError, enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, requireUserIdSession, zodMessage, tooLarge } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { passwordReauthRefusal } from "@/lib/auth";
 import { GRANT_LOCK_ORDER } from "@/lib/ledger";
@@ -35,7 +35,7 @@ const schema = z.object({
 // GDPR / PIPL erasure: deletes the account and all related data + stored image files.
 export async function POST(req: Request) {
   try {
-    const userId = await requireUserId();
+    const { id: userId, sv } = await requireUserIdSession();
     // Re-auth brute force (password + TOTP/backup-code guesses) gets the same
     // ACCOUNT-keyed limit as the dedicated 2FA endpoints. The per-IP leg this
     // used to charge first was pure collateral: five wrong-password bodies from
@@ -125,8 +125,16 @@ export async function POST(req: Request) {
           // (both admin routes refuse to target the caller, so recovery needs host
           // access to scripts/promote-admin.ts).
           await tx.$executeRaw`SELECT pg_advisory_xact_lock(${ADMIN_GUARD_LOCK})`;
-          const current = await tx.user.findUnique({ where: { id: userId }, select: { role: true } });
+          const current = await tx.user.findUnique({
+            where: { id: userId },
+            select: { role: true, sessionVersion: true },
+          });
           if (!current) throw new Error("user-not-found");
+          // Erasure is irreversible and its storage sweep can take seconds. A
+          // reset-password / revoke-sessions arriving after the top-of-request
+          // check but before this transaction must win: the owner who revoked
+          // the session did not also ask to delete the account.
+          if (current.sessionVersion !== sv) throw new ApiError(401, "unauthorized");
           if (current.role === "admin") await assertAnotherAdminRemains(tx, userId);
           // Lock what the cascade below will reach, in the order every writer that
           // can meet this transaction takes it: Order → Job → CreditGrant → User.

@@ -100,12 +100,64 @@ export async function grantCreditsTx(
   refType?: string | null,
   refId?: string | null,
   note?: string | null,
+  cycleOrderId?: string | null,
 ) {
   if (amount <= 0) return;
   await tx.creditGrant.create({
-    data: { userId, source, amount, remaining: amount, expiresAt, refType, refId },
+    data: { userId, source, amount, remaining: amount, expiresAt, refType, refId, cycleOrderId },
   });
   await addCreditsTx(tx, userId, source, amount, refType, refId, note);
+}
+
+// Resolve the order whose CYCLE each ROLLOVER grant was spent in.
+//
+// A carryover carries two provenances: refId names the cycle it was MEASURED
+// from (refunding that cycle must take it back), and the renewal order names
+// the cycle it is spent in (refunding the renewal must take it back too).
+// `cycleOrderId` stores the second. Rows written before that column existed
+// are resolved by the shared deadline: fulfillOrder creates the SUBSCRIPTION
+// grant and the ROLLOVER in one transaction with the same `renew`, so
+// (userId, expiresAt) identifies the renewal order exactly.
+//
+// Returns grantId → renewal order id for grants this function can resolve.
+export async function resolveRolloverCycleOrders(
+  tx: Prisma.TransactionClient,
+  userId: string,
+  grants: Array<{
+    id: string;
+    source: string;
+    expiresAt: Date | null;
+    cycleOrderId?: string | null;
+  }>,
+): Promise<Map<string, string>> {
+  const resolved = new Map<string, string>();
+  const legacyExpiries: Date[] = [];
+  for (const g of grants) {
+    if (g.source !== "ROLLOVER") continue;
+    if (g.cycleOrderId) resolved.set(g.id, g.cycleOrderId);
+    else if (g.expiresAt) legacyExpiries.push(g.expiresAt);
+  }
+  if (legacyExpiries.length === 0) return resolved;
+  const subscriptions = await tx.creditGrant.findMany({
+    where: {
+      userId,
+      source: "SUBSCRIPTION",
+      refType: "order",
+      refId: { not: null },
+      expiresAt: { in: legacyExpiries },
+    },
+    select: { refId: true, expiresAt: true },
+  });
+  const byExpiry = new Map<number, string>();
+  for (const s of subscriptions) {
+    if (s.refId && s.expiresAt) byExpiry.set(s.expiresAt.getTime(), s.refId);
+  }
+  for (const g of grants) {
+    if (g.source !== "ROLLOVER" || g.cycleOrderId || !g.expiresAt) continue;
+    const cycle = byExpiry.get(g.expiresAt.getTime());
+    if (cycle) resolved.set(g.id, cycle);
+  }
+  return resolved;
 }
 
 // One subscription month from `base`, clamped to the target month's last day.
@@ -614,6 +666,7 @@ export async function refundCreditsTx(
       expiresAt: Date | null;
       refType: string | null;
       refId: string | null;
+      cycleOrderId: string | null;
       source: string;
       amount: number;
       remaining: number;
@@ -621,7 +674,7 @@ export async function refundCreditsTx(
       graceExpired: boolean;
     }>
   >(
-    Prisma.sql`SELECT id, "expiresAt", "refType", "refId", source, amount, remaining,
+    Prisma.sql`SELECT id, "expiresAt", "refType", "refId", "cycleOrderId", source, amount, remaining,
         ("expiresAt" IS NOT NULL AND "expiresAt" <= now()) AS expired,
         -- A dead grant with no deadline (expiresAt IS NULL) is never past its
         -- grace: the replacement arithmetic falls back to the current time for
@@ -632,10 +685,16 @@ export async function refundCreditsTx(
       ${GRANT_LOCK_ORDER}
       FOR UPDATE`,
   );
+  // A carryover belongs to TWO orders: the one it was measured from (refId)
+  // and the renewal whose cycle it is spent in (cycleOrderId / the legacy
+  // shared-expiry resolution). A refund of either must stop the restore.
+  const cycleOrders = await resolveRolloverCycleOrders(tx, userId, rows);
   const orderRefs = [
-    ...new Set(
-      rows.filter((r) => r.refType === "order" && r.refId).map((r) => r.refId as string),
-    ),
+    ...new Set([
+      ...rows.filter((r) => r.refType === "order" && r.refId).map((r) => r.refId as string),
+      ...rows.filter((r) => r.cycleOrderId).map((r) => r.cycleOrderId as string),
+      ...cycleOrders.values(),
+    ]),
   ];
   const refundedOrders = new Set(
     orderRefs.length
@@ -683,7 +742,13 @@ export async function refundCreditsTx(
   //     already one grace period, and a grace is not renewable.
   const expiredByRef = new Map<
     string,
-    { refType: string | null; refId: string | null; amount: number; expiresAt: Date }
+    {
+      refType: string | null;
+      refId: string | null;
+      cycleOrderId: string | null;
+      amount: number;
+      expiresAt: Date;
+    }
   >();
   // Portions that are NOT given back: clawed back by a refunded order, or
   // lapsed past their grace. Both are deducted from the REFUND ledger entry,
@@ -708,10 +773,15 @@ export async function refundCreditsTx(
     const row = rows.find((r) => r.id === c.grantId);
     // A vanished grant has no provenance left to inherit — fall back to the
     // caller's ref (the job), which is all that is known.
+    const cycleOrderId = row ? (row.cycleOrderId ?? cycleOrders.get(row.id) ?? null) : null;
     const ref = row
-      ? { refType: row.refType ?? null, refId: row.refId ?? null }
-      : { refType: refType ?? null, refId: refId ?? null };
-    if (row && row.refType === "order" && row.refId && refundedOrders.has(row.refId)) {
+      ? { refType: row.refType ?? null, refId: row.refId ?? null, cycleOrderId }
+      : { refType: refType ?? null, refId: refId ?? null, cycleOrderId: null };
+    const fundedByRefundedOrder =
+      row !== undefined &&
+      ((row.refType === "order" && !!row.refId && refundedOrders.has(row.refId)) ||
+        (!!cycleOrderId && refundedOrders.has(cycleOrderId)));
+    if (fundedByRefundedOrder) {
       notRestored += c.amount;
       continue;
     }
@@ -750,7 +820,7 @@ export async function refundCreditsTx(
       // cover grants with different deadlines (a job that drew on both a
       // replacement and the pack grant behind it), and collapsing them would
       // give the earlier one the later one's life.
-      const key = `${ref.refType ?? ""}|${ref.refId ?? ""}|${deadline?.getTime() ?? "none"}`;
+      const key = `${ref.refType ?? ""}|${ref.refId ?? ""}|${ref.cycleOrderId ?? ""}|${deadline?.getTime() ?? "none"}`;
       const bucket = expiredByRef.get(key) ?? { ...ref, amount: 0, expiresAt };
       bucket.amount += c.amount;
       expiredByRef.set(key, bucket);
@@ -858,6 +928,7 @@ export async function refundCreditsTx(
         expiresAt: bucket.expiresAt,
         refType: bucket.refType,
         refId: bucket.refId,
+        cycleOrderId: bucket.cycleOrderId,
       },
     });
   }
@@ -1129,6 +1200,9 @@ export async function fulfillOrder(
           "order",
           rolloverRef,
           `30% of ${unused} unused quota${rolloverRef === orderId ? "" : " (previous cycle)"}`,
+          // The renewal order whose cycle this carryover is spent in — the
+          // other half of its provenance (refId names the cycle it came from).
+          orderId,
         );
       }
     } else {
@@ -1194,7 +1268,8 @@ export async function revokeOrderCreditsTx(
   for (;;) {
     const grants = await tx.$queryRaw<Array<{ id: string; remaining: number }>>(
       Prisma.sql`SELECT id, remaining FROM "CreditGrant"
-        WHERE "refId" = ${order.id} AND "refType" = 'order'
+        WHERE ("refId" = ${order.id} AND "refType" = 'order')
+           OR "cycleOrderId" = ${order.id}
         ${GRANT_LOCK_ORDER}
         FOR UPDATE`,
     );
@@ -1207,16 +1282,14 @@ export async function revokeOrderCreditsTx(
       revoked += g.remaining;
     }
   }
-  // The renewal that minted a carryover stamps it with the PREVIOUS cycle's
-  // funding order (see fulfillOrder) so refunding that previous order revokes
-  // it. The other half was missing (pass 41): refunding the RENEWAL itself left
-  // the carryover untouched, because its refId names the old order — a customer
-  // who bought a cycle and charged it back sat on the free tier holding up to
-  // 30% of the previous cycle's quota until the end of the cycle they had just
-  // refunded. The carryover expires with this order's SUBSCRIPTION grant (both
-  // are written with `renew` in the same transaction), so that shared deadline
-  // names exactly the grants this fulfillment minted; an earlier or later
-  // fulfillment's `renew` is a different instant.
+  // The renewal that minted a carryover also records the renewal order in
+  // cycleOrderId, which the revoke scan above now matches; this block remains
+  // for rows written before that column existed (and for any operator-created
+  // carryover whose cycleOrderId is null). The carryover expires with this
+  // order's SUBSCRIPTION grant (both are written with `renew` in the same
+  // transaction), so that shared deadline names exactly the grants this
+  // fulfillment minted; an earlier or later fulfillment's `renew` is a
+  // different instant.
   const subscription = await tx.$queryRaw<Array<{ expiresAt: Date }>>(Prisma.sql`
     SELECT "expiresAt" FROM "CreditGrant"
     WHERE "refId" = ${order.id} AND "refType" = 'order' AND "source" = 'SUBSCRIPTION'
@@ -1226,6 +1299,7 @@ export async function revokeOrderCreditsTx(
     const rollovers = await tx.$queryRaw<Array<{ id: string; remaining: number }>>(
       Prisma.sql`SELECT id, remaining FROM "CreditGrant"
         WHERE "userId" = ${order.userId} AND "source" = 'ROLLOVER'
+          AND "cycleOrderId" IS NULL
           AND "expiresAt" = ${subscription[0].expiresAt}
         ${GRANT_LOCK_ORDER}
         FOR UPDATE`,
@@ -1385,10 +1459,25 @@ export async function adminClawbackTx(
       ${GRANT_LOCK_ORDER}
       FOR UPDATE`,
   );
+  // Clawbacks are fraud recovery: the operator is taking back value the
+  // account can still spend. Ordering purely by expiry did the opposite when
+  // the sweep had not yet collected an expired grant — it drained the dead
+  // grant first (its deadline is earliest), reported success and moved
+  // User.credits, while every SPENDABLE credit stayed put. A user could keep
+  // generating on live credits after an operator had clawed back their whole
+  // displayed balance. Take unexpired rows first (free sources still lead, as
+  // before), then the expired remainder so the raw balance the admin console
+  // shows still falls by the full amount. `now` is the database's clock, the
+  // one spendCreditsTx and the sweep judge deadlines by.
+  const now = await dbNow(tx);
   const freeFirst = (s: string) => (s === "SIGNUP_BONUS" || s === "CHECKIN" || s === "ADMIN" ? 0 : 1);
+  const isExpired = (r: { expiresAt: Date | null }) =>
+    r.expiresAt !== null && r.expiresAt.getTime() <= now.getTime() ? 1 : 0;
   const takeOrder = [...rows].sort((a, b) => {
     const fa = freeFirst(a.source) - freeFirst(b.source);
     if (fa !== 0) return fa;
+    const xa = isExpired(a) - isExpired(b);
+    if (xa !== 0) return xa;
     const ea = a.expiresAt?.getTime() ?? Number.POSITIVE_INFINITY;
     const eb = b.expiresAt?.getTime() ?? Number.POSITIVE_INFINITY;
     if (ea !== eb) return ea - eb;

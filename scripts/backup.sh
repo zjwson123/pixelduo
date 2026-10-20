@@ -62,16 +62,30 @@ esac
 # and the compose file makes it configurable) — a hardcoded `-U pixelduo` fails
 # on a stack that followed that advice.
 if [ -z "$CONTAINER" ]; then
-  CONTAINER="${DB_CONTAINER:-pixelduo-db}"
-  if ! docker inspect "$CONTAINER" >/dev/null 2>&1; then
-    FOUND="$(docker ps --filter label=com.docker.compose.service=db --format '{{.Names}}' | head -n1)"
-    if [ -n "$FOUND" ]; then
-      echo "[backup] no container '$CONTAINER' — using '$FOUND' (the running compose 'db' service)" >&2
-      CONTAINER="$FOUND"
-    else
-      echo "[backup] no container '$CONTAINER' and no running compose 'db' service — pass one explicitly: ./scripts/backup.sh <container> [database]" >&2
+  if [ -n "${DB_CONTAINER:-}" ]; then
+    CONTAINER="$DB_CONTAINER"
+    echo "[backup] using DB_CONTAINER='$CONTAINER'" >&2
+  else
+    # NO default container name. The dev compose pins `pixelduo-db`; a host
+    # that also runs the single-VPS stack therefore used to find it silently,
+    # dump the DEV database into the production checkout's backups/ dir, print
+    # success and rotate the oldest PRODUCTION dumps out. Exactly one running
+    # compose db service is the only unambiguous answer; anything else is the
+    # operator's to name.
+    FOUND="$(docker ps --filter label=com.docker.compose.service=db --format '{{.Names}}')"
+    COUNT="$(printf '%s\n' "$FOUND" | sed '/^$/d' | wc -l | tr -d ' ')"
+    if [ "$COUNT" -ne 1 ]; then
+      echo "[backup] expected exactly one running compose 'db' service, found $COUNT:" >&2
+      printf '%s\n' "$FOUND" | sed '/^$/d' | sed 's/^/  /' >&2
+      echo "[backup] pass the intended container explicitly: ./scripts/backup.sh <container> [database]" >&2
       exit 1
     fi
+    CONTAINER="$(printf '%s\n' "$FOUND" | sed '/^$/d' | head -n1)"
+    echo "[backup] using '$CONTAINER' (the only running compose 'db' service)" >&2
+  fi
+  if ! docker inspect "$CONTAINER" >/dev/null 2>&1; then
+    echo "[backup] container '$CONTAINER' does not exist — pass the intended container explicitly: ./scripts/backup.sh <container> [database]" >&2
+    exit 1
   fi
 fi
 
@@ -101,6 +115,16 @@ find "$BACKUP_DIR" -maxdepth 1 -name ".*.partial" -type f -mtime +1 -delete 2>/d
 # restoring that file gets a half database and no warning. `set -o pipefail`
 # makes the failure loud, but only the rename can keep the directory honest.
 docker exec "$CONTAINER" pg_dump -U "$DB_USER" -d "$DB" | gzip > "$TMP"
+# A dump that is valid gzip but empty is not a backup. `pg_dump` of a dropped
+# or wrong database can exit 0 with a header-only stream; rotating that in and
+# deleting yesterday's complete dump is the same destructive pattern the object
+# backup guards against. 1 KiB is below any real schema-only dump.
+gzip -t "$TMP"
+BYTES="$(wc -c < "$TMP" | tr -d ' ')"
+if [ "$BYTES" -lt 1024 ]; then
+  echo "[backup] refusing a $BYTES-byte dump from '$CONTAINER' database '$DB' — is this the right container/database? The previous dumps were left untouched." >&2
+  exit 1
+fi
 mv "$TMP" "$OUT"
 echo "backup written: $OUT ($(du -h "$OUT" | cut -f1))"
 

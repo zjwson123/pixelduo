@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ApiError, enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, requireVerifiedUser, zodMessage, tooLarge } from "@/lib/api";
+import { ApiError, enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, requireVerifiedUserSession, zodMessage, tooLarge } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { passwordReauthRefusal } from "@/lib/auth";
 import {
@@ -30,7 +30,7 @@ const schema = z.object({ token: z.string().min(6).max(20), password: z.string()
 // back in with password + TOTP.
 export async function POST(req: Request) {
   try {
-    const userId = await requireVerifiedUser();
+    const { id: userId, sv } = await requireVerifiedUserSession();
     // Account-keyed only: see the note on enforceUserRateLimit. The per-IP leg
     // let one account refuse 2FA enrolment to a whole shared egress.
     const limited = await enforceUserRateLimit(userId, "2fa-confirm", 5, 60_000);
@@ -81,7 +81,7 @@ export async function POST(req: Request) {
     // the moment they needed them.
     const claimed = await prisma.$transaction(async (tx) => {
       const claim = await tx.user.updateMany({
-        where: { id: userId, totpEnabled: false },
+        where: { id: userId, totpEnabled: false, sessionVersion: sv },
         data: {
           totpSecret: user.totpPendingSecret,
           totpPendingSecret: null,
@@ -89,7 +89,15 @@ export async function POST(req: Request) {
           sessionVersion: { increment: 1 },
         },
       });
-      if (claim.count !== 1) return false;
+      if (claim.count !== 1) {
+        // Either another confirm won the totpEnabled CAS, or THIS session was
+        // revoked while the password/code checks ran. The second case must not
+        // answer `alreadyEnabled` — nothing is enabled, and the caller's
+        // credential has been retired.
+        const current = await tx.user.findUnique({ where: { id: userId }, select: { totpEnabled: true } });
+        if (current?.totpEnabled) return false;
+        throw new ApiError(401, "unauthorized");
+      }
       // Revoke API keys alongside the session bump. An attacker who trialled
       // the password before 2FA was on could mint a pd_live_ key that survived
       // the very remediation the alert tells the owner to perform ("enable

@@ -231,9 +231,10 @@ docker compose -f docker-compose.prod.yml up -d
 
 - 托管 Postgres：开启自动备份 + PITR，按需 `pg_restore`（恢复演练已通过，见 `progress.md`）
 - 自托管 Postgres：`docker compose up -d backup` 每日 dump 到 `./backups/`；手动 `./scripts/backup.sh`
-- 恢复（两种格式，**不要混用**）：
-  - compose `backup` 服务的 `backups/pixelduo-<stamp>.dump.gz` 是 `pg_dump -Fc` **自定义格式**（文件名带 `.gz` 只是命名习惯，内容没有再 gzip）：`pg_restore -d $DATABASE_URL backups/pixelduo-<stamp>.dump.gz`
-  - 手动 `./scripts/backup.sh` 的 `backups/<db>-<stamp>.sql.gz` 是 gzip 压缩的**纯 SQL**，`pg_restore` 读不了：`gunzip -c backups/<db>-<stamp>.sql.gz | docker exec -i pixelduo-db psql -U pixelduo -d pixelduo`
+- 恢复（两种格式，**不要混用**）。先停掉 `web`/`worker`，并先做一份当前库的 dump：
+  - compose `backup` 服务的 `backups/pixelduo-<stamp>.dump.gz` 是 `pg_dump -Fc` **自定义格式**（文件名带 `.gz` 只是命名习惯，内容没有再 gzip）：`pg_restore --single-transaction --exit-on-error -d $DATABASE_URL backups/pixelduo-<stamp>.dump.gz`
+  - 手动 `./scripts/backup.sh` 的 `backups/<db>-<stamp>.sql.gz` 是 gzip 压缩的**纯 SQL**，`pg_restore` 读不了：`gunzip -c backups/<db>-<stamp>.sql.gz | docker exec -i pixelduo-db psql -v ON_ERROR_STOP=1 --single-transaction -U pixelduo -d pixelduo`
+  - 两条都必须**失败即整体回滚**：没有 `--single-transaction --exit-on-error`（`psql` 还要 `ON_ERROR_STOP=1`）时，`psql` 默认遇错继续并以 0 退出，`pg_restore` 也会留下恢复了一半的库——运维看到成功，实际数据是拼接状态。
 - **对象存储（用户图片）**：托管 R2/S3 开启**版本控制 + 跨区域复制**（DR 首选）；自托管 MinIO 用 `backup-objects` 服务每日镜像到 `./backups/objects/`（保留 7 份，`BACKUP_TARGET_*` 可同步第二桶异地）；恢复演练 `RESTORE_DRILL_CONFIRM=1 ./scripts/restore-objects.sh <stamp> <scratch-bucket>`（脚本默认 dry run：只打印将写入的对象并以 1 退出，必须显式确认；目标桶名必须是**裸桶名**——带 `/` 的写法（`pixelduo/`、`s3://…`）会被拒绝，因为 `mc` 把参数读作 `alias/bucket/prefix`，字符串比较看不见这种写法；目标等于正式桶同样被拒绝）
 - **备份文件只在成功时出现**：`backup` 服务先写隐藏的 `.partial` 再改名，失败则删掉临时文件并打印 `FAILED`，**不轮转**（此前 `;` 串联的循环在 `pg_dump` 失败时仍会删掉一份好备份并打印 "written"，`docker compose ps` 照样显示 `Up`）。`scripts/backup.sh` 同理（写 `.partial` 再 `mv`），避免半截文件顶替正式名字被恢复回去
 

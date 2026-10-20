@@ -144,15 +144,19 @@ describe("pass 24 — the manual object backup cannot leave a partial snapshot a
     const sh = fs.readFileSync(path.join(REPO, "scripts", "backup-objects.sh"), "utf8");
     // Mirror into a dot-prefixed working name...
     expect(sh).toMatch(/mc mirror[^\n]*"\/backups\/objects\/\.\$STAMP\.partial"/);
-    // ...publish it with an atomic rename only after the mirror succeeded (the
-    // container script runs under `set -e`, so a failure never reaches the mv)...
+    // ...publish it with an atomic rename only after the mirror succeeded AND
+    // the snapshot is non-empty (pass 42: `mc mirror` exits 0 on an empty
+    // source, so a bare success gate rotated the last good snapshot away)...
+    expect(sh).toMatch(/COUNT=\$\(find "\/backups\/objects\/\.\$STAMP\.partial" -type f \| wc -l/);
     expect(sh).toMatch(/mv "\/backups\/objects\/\.\$STAMP\.partial" "\/backups\/objects\/\$STAMP"/);
     // ...and never leave a stale one behind for the next run to trip over.
     expect(sh).toMatch(/rm -rf \/backups\/objects\/\.\*\.partial/);
     // The host umask does not cross into the mirroring container.
     expect(sh).toMatch(/set -e\n\s+umask 077/);
-    // The pre-fix shape: mirroring straight into the final name.
-    expect(sh).not.toMatch(/mc mirror[^\n]*"\/backups\/objects\/\$STAMP"/);
+    // The pre-fix shape: the SOURCE mirror going straight into the final name.
+    // (A later leg may legitimately mirror the validated SNAPSHOT off-site —
+    // pass 42 — so this must name the source bucket.)
+    expect(sh).not.toMatch(/mc mirror[^\n]*"src\/\$SRC_BUCKET" "\/backups\/objects\/\$STAMP"/);
   });
 });
 

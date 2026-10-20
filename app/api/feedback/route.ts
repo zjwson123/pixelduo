@@ -36,7 +36,11 @@ const schema = z.object({
     .string()
     .max(120)
     .refine(
-      (v) => !/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(v),
+      // Format controls (Cf) are not line breaks but they ARE renderer
+      // instructions: U+202E reorders everything after it, so an unquoted
+      // `page:` line in the operator mail could be made to read as a different
+      // path/source while the bytes still pass a control-character check.
+      (v) => !/[\u0000-\u001f\u007f-\u009f\u2028\u2029]|\p{Cf}/u.test(v),
       "page must be a single line",
     )
     .optional(),

@@ -127,7 +127,7 @@ RUN --mount=type=bind,from=builder,source=/app,target=/b \
  && cp -a /b/public/. ./public \
  && cp -a /b/prisma/. ./prisma \
  && rm -rf \
-      .env .env.* \
+      .env .env.* prisma/.env prisma/.env.* \
       docs tests e2e designs data backups public/generated perf \
       lib scripts app components \
       instrumentation.ts instrumentation-client.ts \
@@ -159,7 +159,7 @@ COPY --from=deps --chown=node:node /app/node_modules ./node_modules
 RUN --mount=type=bind,source=.,target=/ctx \
     cp -a /ctx/. /app/ \
  && rm -rf \
-      .env .env.* \
+      .env .env.* prisma/.env prisma/.env.* \
       docs tests e2e designs data backups public perf \
       ./*.md docker-compose*.yml Caddyfile Dockerfile \
       .github .npmrc .gitignore .dockerignore \

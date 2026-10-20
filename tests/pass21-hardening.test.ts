@@ -454,7 +454,7 @@ describe("a set-but-unusable value is not a configuration", () => {
   it("refuses to boot on a whitespace SMTP_URL or a hostless NEXTAUTH_URL", () => {
     const base = {
       NODE_ENV: "production",
-      NEXTAUTH_SECRET: "a".repeat(48),
+      NEXTAUTH_SECRET: "Zq7pR2vX9mK4tL8wN3cB6hJ1yF5dG0aS7eU2iO4kM9nP",
       PAYMENT_PROVIDER: "stripe",
       STRIPE_SECRET_KEY: "sk_live_x",
       STRIPE_WEBHOOK_SECRET: "whsec_x",

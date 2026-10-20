@@ -55,7 +55,13 @@ describe("fail() error classification", () => {
 
 describe("readBodyCap", () => {
   const fakeReq = (contentLength: string | null, text: string): Request =>
-    ({ headers: new Headers(contentLength ? { "content-length": contentLength } : {}), text: async () => text }) as unknown as Request;
+    ({
+      headers: new Headers({
+        "content-type": "application/json",
+        ...(contentLength ? { "content-length": contentLength } : {}),
+      }),
+      text: async () => text,
+    }) as unknown as Request;
 
   // A real Request over a ReadableStream body — exactly what a chunked
   // transfer-encoding request looks like to the route handler (no
@@ -63,6 +69,7 @@ describe("readBodyCap", () => {
   const streamReq = (chunks: string[]): Request =>
     new Request("http://localhost/x", {
       method: "POST",
+      headers: { "content-type": "application/json" },
       body: new ReadableStream<Uint8Array>({
         start(controller) {
           for (const c of chunks) controller.enqueue(new TextEncoder().encode(c));
@@ -101,6 +108,7 @@ describe("readBodyCap", () => {
     const chunk = "x".repeat(1024);
     const req = new Request("http://localhost/x", {
       method: "POST",
+      headers: { "content-type": "application/json" },
       body: new ReadableStream<Uint8Array>({
         pull(controller) {
           enqueued += 1;
