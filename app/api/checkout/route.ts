@@ -1,8 +1,8 @@
 import { z } from "zod";
-import { enforceRateLimit, enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, requireVerifiedUser, zodMessage, tooLarge } from "@/lib/api";
+import { ApiError, enforceRateLimit, enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, requireVerifiedUser, zodMessage, tooLarge } from "@/lib/api";
 import { getPlan, getPack } from "@/lib/catalog";
 import { prisma } from "@/lib/prisma";
-import { fulfillOrder } from "@/lib/ledger";
+import { dbNow, fulfillOrder } from "@/lib/ledger";
 import { randomUUID } from "crypto";
 import { getPaymentProvider } from "@/lib/payments";
 
@@ -44,15 +44,48 @@ export async function POST(req: Request) {
     // accumulation. The row is NOT deleted: a provider session may still settle
     // later, and deleting its order would leave the paid webhook unable to
     // resolve it (money kept, no credits).
+    //
+    // The window is measured on the DATABASE's clock. `createdAt` is stamped by
+    // the column default (`now()`), and this was the only place in app/lib that
+    // compared an app-clock `Date.now()` window to a database timestamp — every
+    // other deadline (spend, expiry, refund, paidAt) is judged by dbNow/now()
+    // for exactly this reason. With the app clock ahead of the database the
+    // window start lands in the future, the pending rows stop being counted and
+    // the cap silently disappears; the skew this host has produced (~15 min)
+    // already shifted a one-hour window by a quarter of its length, and a badly
+    // skewed container removes it entirely.
+    const pendingSince = new Date((await dbNow(prisma)).getTime() - 60 * 60 * 1000);
     const recentPending = await prisma.order.count({
-      where: {
-        userId,
-        status: "pending",
-        createdAt: { gte: new Date(Date.now() - 60 * 60 * 1000) },
-      },
+      where: { userId, status: "pending", createdAt: { gte: pendingSince } },
     });
     if (recentPending >= 5) {
-      return fail(new Error("too-many-pending-orders: finish or abandon a recent checkout before starting another"));
+      // ApiError(429), not a bare Error: `too-many-pending-orders` matched no
+      // expectedStatus branch, so `fail()` treated this cap — an expected
+      // business refusal — as an unexpected 500: the client got a masked
+      // `internal-error` telling it nothing, and every refusal filed a Sentry
+      // incident. It is the same mistake the free-plan check above documents.
+      // The window is rolling, so the refusal tells the caller when the oldest
+      // counted order leaves it (the 429 contract this repo checks for).
+      const oldest = await prisma.order.findFirst({
+        where: { userId, status: "pending", createdAt: { gte: pendingSince } },
+        orderBy: { createdAt: "asc" },
+        select: { createdAt: true },
+      });
+      const retryAfterSec = oldest
+        ? Math.max(
+            1,
+            Math.ceil(
+              (oldest.createdAt.getTime() + 60 * 60 * 1000 - (await dbNow(prisma)).getTime()) / 1000,
+            ),
+          )
+        : 60;
+      return fail(
+        new ApiError(
+          429,
+          "too-many-pending-orders: finish or abandon a recent checkout before starting another",
+          retryAfterSec,
+        ),
+      );
     }
 
     const idempotencyKey = `${userId}:${body.kind}:${body.itemId}:${randomUUID()}`;

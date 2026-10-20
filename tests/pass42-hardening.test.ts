@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -8,6 +8,18 @@ import { adminClawbackTx, fulfillOrder, revokeOrderCreditsTx } from "../lib/ledg
 import { completeJob, createGenerationJob, failJob } from "../lib/queue";
 import { readBodyCapped } from "../lib/api";
 import { singleLine } from "../lib/untrusted-text";
+
+// The pending-order cap probe calls the real route, so the session is mocked
+// the way every other route test in this suite does it (tests/feedback.test.ts).
+// vi.hoisted: lib/api imports next-auth, so the factory can run while the
+// static imports above are still being evaluated — a plain `const` would be in
+// its temporal dead zone there.
+const { getServerSession } = vi.hoisted(() => ({ getServerSession: vi.fn() }));
+vi.mock("next-auth", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("next-auth")>();
+  return { ...actual, getServerSession: (...args: unknown[]) => getServerSession(...args) };
+});
+const { POST: createCheckout } = await import("../app/api/checkout/route");
 
 // Pass 42: a renewal's carryover belongs to two orders — the cycle it was
 // MEASURED from (refId) and the renewal whose cycle it is spent in
@@ -271,5 +283,69 @@ describe("pass 42 — operator context lines cannot be reordered", () => {
   it("strips format controls from an unquoted page/User-Agent value", () => {
     expect(singleLine("studio\u202Eevil")).toBe("studio evil");
     expect(singleLine("a\u2066b\u2069c\u200Bd")).toBe("a b c d");
+  });
+});
+
+describe("pass 42 — the pending-order cap counts on the database's clock", () => {
+  // `createdAt` is stamped by the column default (the database's now()), so the
+  // rolling window it is compared against must come from the same clock. It was
+  // the only `Date.now()` window in app/lib compared to a database timestamp —
+  // every other deadline in this codebase (spend, expiry, refund, paidAt) is
+  // judged by `dbNow`/`now()` for exactly this reason. With the app clock ahead
+  // of the database the window start lands in the future, the five rows just
+  // written are not counted, and the cap silently stops existing; the skew this
+  // host has actually produced (~15 min) already shifted the window by a
+  // quarter of its length.
+  //
+  // The refusal is asserted as a 429 with its documented headers, not just a
+  // non-2xx: the bare `too-many-pending-orders` message matched no
+  // expectedStatus branch, so the cap answered a masked 500 (`internal-error`)
+  // and filed a Sentry incident on every refusal — an expected business rule
+  // reported as an unexpected fault, and the client told nothing.
+  it("refuses a sixth pending order with a retryable 429 when the app clock runs ahead", async () => {
+    const user = await prisma.user.create({
+      data: {
+        email: `${tag}-clock-${seq++}@test.dev`,
+        passwordHash: "x",
+        name: "P42 clock",
+        emailVerified: new Date(),
+      },
+    });
+    for (let i = 0; i < 5; i += 1) {
+      await prisma.order.create({
+        data: {
+          userId: user.id,
+          kind: "pack",
+          provider: "mock",
+          amountUsd: 4.99,
+          credits: 400,
+          idempotencyKey: `${tag}-pending-${seq++}`,
+        },
+      });
+    }
+    getServerSession.mockResolvedValue({ user: { id: user.id, sv: user.sessionVersion, totpPending: false } });
+    const spy = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 2 * 60 * 60 * 1000);
+    try {
+      const res = await createCheckout(
+        new Request("http://localhost/api/checkout", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ kind: "pack", itemId: "p1" }),
+        }),
+      );
+      expect(res.status).toBe(429);
+      // The documented 429 shape: a backoff hint and the no-store every /api
+      // response carries, not the masked `internal-error` 500 this used to be.
+      expect(res.headers.get("retry-after")).toMatch(/^\d+$/);
+      expect(res.headers.get("cache-control")).toBe("private, no-store");
+      const body = (await res.json()) as { error?: string };
+      expect(body.error).toContain("too-many-pending-orders");
+    } finally {
+      spy.mockRestore();
+      getServerSession.mockReset();
+    }
+    // The refused call created nothing: the cap counted the rows it was meant
+    // to count instead of being lifted by the clock offset.
+    expect(await prisma.order.count({ where: { userId: user.id } })).toBe(5);
   });
 });
