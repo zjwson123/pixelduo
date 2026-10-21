@@ -47,6 +47,14 @@ export interface PaymentWebhookEvent {
   // it. The route sums the two columns when deciding whether the order was
   // returned in full (pass 41).
   disputedAmountUsd?: number;
+  // For "refunded": the provider's id for the dispute a `disputedAmountUsd`
+  // delivery describes. Stripe does not guarantee event ORDER — a retried
+  // `charge.dispute.created` can be delivered after the same dispute was won
+  // and its funds reinstated — so the route checks this id against
+  // Order.disputeReinstatements and refuses to re-add a dispute whose money
+  // already came back (pass 43 follow-up). Undefined (a relay-stripped payload)
+  // keeps the unconditional write.
+  disputeId?: string;
   // For "refunded": a dispute that was WON or had its funds reinstated. The
   // amount leaves Order.disputedAmountUsd (floor 0) instead of entering it, so
   // a won chargeback cannot poison the refund accumulator into a later full

@@ -283,10 +283,27 @@ export async function POST(req: Request) {
             `);
           }
           if (event.disputedAmountUsd !== undefined) {
+            // A dispute whose reinstatement was already recorded must not come
+            // back into the accumulator. Stripe does not guarantee event ORDER:
+            // a retried `charge.dispute.created` can be delivered after the same
+            // dispute was won (`funds_reinstated` / `closed/won`), and the
+            // marker then says the money already returned. Without the guard the
+            // lost dispute re-entered the total and the next genuine partial
+            // refund promoted the order to a full revoke — credits and tier gone
+            // for money the merchant kept (pass 43 follow-up, probed with the
+            // deliveries reversed). No marker / no id keeps the unconditional
+            // write, as before.
+            const alreadyReturned =
+              event.disputeId !== undefined ? `reinstated:${event.disputeId}` : null;
             await tx.$queryRaw(Prisma.sql`
               UPDATE "Order"
               SET "disputedAmountUsd" = GREATEST("disputedAmountUsd", ${event.disputedAmountUsd})
               WHERE id = ${order.id}
+              ${
+                alreadyReturned
+                  ? Prisma.sql`AND NOT (${alreadyReturned} = ANY("disputeReinstatements"))`
+                  : Prisma.empty
+              }
             `);
           }
           // A won dispute (or reinstated funds) gives the money back, and its

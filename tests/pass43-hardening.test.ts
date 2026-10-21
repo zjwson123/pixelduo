@@ -234,6 +234,60 @@ describe("pass 43 — a won dispute leaves the order's accumulator", () => {
     expect(row.refundedAmountUsd).toBe(5);
     expect((await prisma.user.findUniqueOrThrow({ where: { id: user.id } })).credits).toBe(6000);
   });
+
+  // Stripe does not guarantee event ORDER ("events are not guaranteed to be
+  // delivered in the order they occur"), and a retried delivery can therefore
+  // land after a later one: `charge.dispute.created` can arrive AFTER the same
+  // dispute was won and its funds reinstated. The reinstatement marker was
+  // written but nothing consulted it when a chargeback amount was added, so the
+  // won dispute re-entered the accumulator and the next genuine $5 refund summed
+  // to the price and revoked everything — over a dispute whose money never left
+  // the merchant.
+  it("does not re-add a dispute whose reinstatement arrived first", async () => {
+    const user = await makeUser();
+    const order = await prisma.order.create({
+      data: {
+        userId: user.id,
+        kind: "pack",
+        status: "paid",
+        amountUsd: 49.99,
+        credits: 6000,
+        provider: "mock",
+        idempotencyKey: `${tag}-order-${seq++}`,
+      },
+    });
+    await prisma.$transaction((tx) =>
+      grantCreditsTx(tx, user.id, "PURCHASE", 6000, null, "order", order.id),
+    );
+    const send = (body: Record<string, unknown>) =>
+      webhookPOST(
+        new Request("http://localhost/api/webhooks/payment", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ status: "refunded", orderId: order.id, ...body }),
+        }),
+      );
+
+    // Reinstatement first (the out-of-order half), then the chargeback it
+    // undoes. The marker must stop the late chargeback from being re-counted.
+    expect(
+      (await send({ eventId: `${tag}-won-early`, reinstatedAmountUsd: 44.99, reinstatedDisputeId: "dp_3" }))
+        .status,
+    ).toBe(200);
+    expect(
+      (await send({ eventId: `${tag}-created-late`, disputedAmountUsd: 44.99, disputeId: "dp_3" })).status,
+    ).toBe(200);
+    let row = await prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(row.disputedAmountUsd).toBe(0);
+
+    // A genuine $5 refund is 10% of the price, not the full return the stale
+    // disputed total would have made it.
+    expect((await send({ eventId: `${tag}-r-after`, refundCumulativeUsd: 5 })).status).toBe(200);
+    row = await prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(row.status).toBe("paid");
+    expect(row.refundedAmountUsd).toBe(5);
+    expect((await prisma.user.findUniqueOrThrow({ where: { id: user.id } })).credits).toBe(6000);
+  });
 });
 
 describe("pass 43 — erasure authorizes before it deletes storage", () => {

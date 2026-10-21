@@ -154,6 +154,11 @@ export class StripeProvider implements PaymentProvider {
       // fired. Both feed the order row; the route adds them when deciding.
       let refundCumulativeUsd: number | undefined;
       let disputedAmountUsd: number | undefined;
+      // The dispute's id travels with the counted amount so the route can check
+      // it against the reinstatement markers: Stripe does not guarantee event
+      // order, and a retried `charge.dispute.created` delivered after the same
+      // dispute was won must not re-enter the accumulator (pass 43 follow-up).
+      let disputeId: string | undefined;
       // A dispute that was WON (or had its funds reinstated) gives the money
       // back, and its amount must leave the order's disputed total — otherwise
       // a $44.99 won dispute stayed in the accumulator and a later $5 genuine
@@ -250,6 +255,7 @@ export class StripeProvider implements PaymentProvider {
         orderId = undefined;
         if (typeof obj.amount === "number") {
           disputedAmountUsd = obj.amount / 100;
+          disputeId = typeof obj.id === "string" ? obj.id : undefined;
           fullRefund = undefined;
         } else {
           fullRefund = true;
@@ -267,6 +273,7 @@ export class StripeProvider implements PaymentProvider {
         refundAmountUsd,
         refundCumulativeUsd,
         disputedAmountUsd,
+        disputeId,
         reinstatedAmountUsd,
         reinstatedDisputeId,
         paidAmountUsd,

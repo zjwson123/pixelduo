@@ -36,6 +36,7 @@ export class MockProvider implements PaymentProvider {
         refundAmountUsd?: number;
         refundCumulativeUsd?: number;
         disputedAmountUsd?: number;
+        disputeId?: string;
         reinstatedAmountUsd?: number;
         reinstatedDisputeId?: string;
         // Carried through so the route's amount/currency binding is reachable
@@ -54,6 +55,7 @@ export class MockProvider implements PaymentProvider {
         refundAmountUsd: typeof body.refundAmountUsd === "number" ? body.refundAmountUsd : undefined,
         refundCumulativeUsd: typeof body.refundCumulativeUsd === "number" ? body.refundCumulativeUsd : undefined,
         disputedAmountUsd: typeof body.disputedAmountUsd === "number" ? body.disputedAmountUsd : undefined,
+        disputeId: typeof body.disputeId === "string" ? body.disputeId : undefined,
         reinstatedAmountUsd:
           typeof body.reinstatedAmountUsd === "number" ? body.reinstatedAmountUsd : undefined,
         reinstatedDisputeId:
