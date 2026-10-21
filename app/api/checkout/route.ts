@@ -5,6 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { dbNow, fulfillOrder } from "@/lib/ledger";
 import { randomUUID } from "crypto";
 import { getPaymentProvider } from "@/lib/payments";
+import { siteBase } from "@/lib/site";
 
 const schema = z.object({
   kind: z.enum(["pack", "plan"]),
@@ -54,51 +55,61 @@ export async function POST(req: Request) {
     // the cap silently disappears; the skew this host has produced (~15 min)
     // already shifted a one-hour window by a quarter of its length, and a badly
     // skewed container removes it entirely.
-    const pendingSince = new Date((await dbNow(prisma)).getTime() - 60 * 60 * 1000);
-    const recentPending = await prisma.order.count({
-      where: { userId, status: "pending", createdAt: { gte: pendingSince } },
-    });
-    if (recentPending >= 5) {
-      // ApiError(429), not a bare Error: `too-many-pending-orders` matched no
-      // expectedStatus branch, so `fail()` treated this cap — an expected
-      // business refusal — as an unexpected 500: the client got a masked
-      // `internal-error` telling it nothing, and every refusal filed a Sentry
-      // incident. It is the same mistake the free-plan check above documents.
-      // The window is rolling, so the refusal tells the caller when the oldest
-      // counted order leaves it (the 429 contract this repo checks for).
-      const oldest = await prisma.order.findFirst({
+    // The count and the insert are ONE atomic step under a per-account
+    // advisory lock (pass 43). They used to be two statements: N concurrent
+    // requests all read 4 pending and all inserted, so a burst created up to
+    // the per-minute limiter's worth of provider checkout sessions and order
+    // rows past a cap whose whole purpose is to bound exactly that. The lock is
+    // released at commit; hashtext collisions with another user only serialize
+    // the two, never share the count.
+    const idempotencyKey = `${userId}:${body.kind}:${body.itemId}:${randomUUID()}`;
+    const order = await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`checkout:${userId}`}))`;
+      const pendingSince = new Date((await dbNow(tx)).getTime() - 60 * 60 * 1000);
+      const recentPending = await tx.order.count({
         where: { userId, status: "pending", createdAt: { gte: pendingSince } },
-        orderBy: { createdAt: "asc" },
-        select: { createdAt: true },
       });
-      const retryAfterSec = oldest
-        ? Math.max(
-            1,
-            Math.ceil(
-              (oldest.createdAt.getTime() + 60 * 60 * 1000 - (await dbNow(prisma)).getTime()) / 1000,
-            ),
-          )
-        : 60;
-      return fail(
-        new ApiError(
+      if (recentPending >= 5) {
+        // ApiError(429), not a bare Error: `too-many-pending-orders` matched no
+        // expectedStatus branch, so `fail()` treated this cap — an expected
+        // business refusal — as an unexpected 500: the client got a masked
+        // `internal-error` telling it nothing, and every refusal filed a Sentry
+        // incident. It is the same mistake the free-plan check above documents.
+        // The window is rolling, so the refusal tells the caller when the oldest
+        // counted order leaves it (the 429 contract this repo checks for).
+        const oldest = await tx.order.findFirst({
+          where: { userId, status: "pending", createdAt: { gte: pendingSince } },
+          orderBy: { createdAt: "asc" },
+          select: { createdAt: true },
+        });
+        const retryAfterSec = oldest
+          ? Math.max(
+              1,
+              Math.ceil(
+                (oldest.createdAt.getTime() +
+                  60 * 60 * 1000 -
+                  (await dbNow(tx)).getTime()) /
+                  1000,
+              ),
+            )
+          : 60;
+        throw new ApiError(
           429,
           "too-many-pending-orders: finish or abandon a recent checkout before starting another",
           retryAfterSec,
-        ),
-      );
-    }
-
-    const idempotencyKey = `${userId}:${body.kind}:${body.itemId}:${randomUUID()}`;
-    const order = await prisma.order.create({
-      data: {
-        userId,
-        kind: body.kind,
-        provider: getPaymentProvider().name,
-        amountUsd: item.price,
-        credits: item.credits,
-        planId: body.kind === "plan" ? item.id : null,
-        idempotencyKey,
-      },
+        );
+      }
+      return tx.order.create({
+        data: {
+          userId,
+          kind: body.kind,
+          provider: getPaymentProvider().name,
+          amountUsd: item.price,
+          credits: item.credits,
+          planId: body.kind === "plan" ? item.id : null,
+          idempotencyKey,
+        },
+      });
     });
 
     const provider = getPaymentProvider();
@@ -107,7 +118,10 @@ export async function POST(req: Request) {
       await fulfillOrder(userId, order.id, body.kind, item.credits, body.kind === "plan" ? item.id : null);
       return ok({ orderId: order.id, status: "paid", mock: true });
     }
-    const base = process.env.NEXTAUTH_URL ?? "http://localhost:3000";
+    // Same origin helper as every mail/sitemap path: trims a padded env value
+    // and strips trailing slashes, so a valid-but-padded NEXTAUTH_URL does not
+    // send the buyer back to an invalid success URL (pass 43).
+    const base = siteBase();
     const session = await provider.createCheckout({
       orderId: order.id,
       amountUsd: item.price,

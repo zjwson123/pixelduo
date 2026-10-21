@@ -43,8 +43,13 @@ const LINE_SEPARATORS = /\r\n|[\n\r\u0085\u2028\u2029]/;
 
 // C0 minus \t, \n and \r — the line breaks are handled by the split above, and
 // a tab cannot move a cursor — plus DEL (some terminals map it to backspace)
-// and the whole C1 block.
-const CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g;
+// and the whole C1 block. Cf (format controls) too (pass 43): U+202E/U+200F
+// reorder what follows, so a message line beginning with one can visually move
+// the `> ` quote prefix to the other end and make attacker text read as
+// machine-generated context beside it. `singleLine` already strips Cf; the
+// multi-line message path, which is the one quoted above the operator's
+// triage block, did not.
+const CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]|\p{Cf}/gu;
 
 // For a value interpolated UNQUOTED into a machine-generated line (`page:` in
 // the operator mail's context block, `agent:` beside it, `from <page>` in the

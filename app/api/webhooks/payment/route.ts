@@ -120,7 +120,11 @@ export async function POST(req: Request) {
       //     retries are bounded: past the bound the event is persisted, acked
       //     and reported, because a permanently failing endpoint stops the paid
       //     events we do need from arriving at all.
-      if (event.type === "refunded" && !order) {
+      // A reinstatement (a dispute WON or its funds returned) has nothing to
+      // restore on an order that no longer exists, and retrying it forever
+      // would be the same permanent loop as the deleted-order refund below.
+      // The event is still persisted so a replay is deduped.
+      if (event.type === "refunded" && !order && event.reinstatedAmountUsd === undefined) {
         const reason = event.orderId ? "refund-for-deleted-order" : "refund-webhook-order-unresolved";
         if (event.orderId) {
           console.warn(
@@ -285,6 +289,21 @@ export async function POST(req: Request) {
               WHERE id = ${order.id}
             `);
           }
+          // A won dispute (or reinstated funds) gives the money back, and its
+          // amount must leave the disputed total or a later small refund looks
+          // like a full return (pass 43). Stripe delivers the same movement as
+          // both `funds_reinstated` and `closed/won`; the marker makes the
+          // subtraction happen once, or the total would go artificially low and
+          // hide a genuine full refund.
+          if (event.reinstatedAmountUsd !== undefined) {
+            const marker = `reinstated:${event.reinstatedDisputeId ?? event.eventId}`;
+            await tx.$queryRaw(Prisma.sql`
+              UPDATE "Order"
+              SET "disputedAmountUsd" = GREATEST("disputedAmountUsd" - ${event.reinstatedAmountUsd}, 0),
+                  "disputeReinstatements" = array_append("disputeReinstatements", ${marker})
+              WHERE id = ${order.id} AND NOT (${marker} = ANY("disputeReinstatements"))
+            `);
+          }
           // Paddle's per-delivery deltas (positive approvals, negative
           // reversals) keep the marker-guarded accumulation below.
           if (event.refundAmountUsd !== undefined) {
@@ -321,6 +340,7 @@ export async function POST(req: Request) {
           });
           if (
             fullRefund !== true &&
+            event.reinstatedAmountUsd === undefined &&
             totals &&
             totals.refundedAmountUsd + totals.disputedAmountUsd >= order.amountUsd - 0.005
           ) {
@@ -331,7 +351,7 @@ export async function POST(req: Request) {
         // cannot measure against the order counts as full (a skipped
         // revocation is a fraud win; an over-broad revoke is an admin-fixable
         // overreaction).
-        if (fullRefund === undefined) {
+        if (fullRefund === undefined && event.reinstatedAmountUsd === undefined) {
           fullRefund =
             !order ||
             (event.refundAmountUsd === undefined &&

@@ -272,8 +272,10 @@ describe("feedback submission", () => {
     }
     expect(limited).toBeGreaterThan(0);
 
-    // A signed-in account is capped on its own axis too: one account, many IPs.
-    const user = await makeUser("per-account", { credits: 10 });
+    // A VERIFIED signed-in account is capped on its own axis too: one account,
+    // many IPs. An unverified session is free to mint, so it shares the
+    // anonymous IP bucket instead (pass 43).
+    const user = await makeUser("per-account", { credits: 10, emailVerified: new Date() });
     getServerSession.mockResolvedValue({ user: { id: user.id, sv: 0, totpPending: false } });
     let userLimited = 0;
     for (let i = 0; i < 7; i++) {
@@ -281,6 +283,23 @@ describe("feedback submission", () => {
       if (res.status === 429) userLimited += 1;
     }
     expect(userLimited).toBeGreaterThan(0);
+
+    // An unverified account gets no account bucket at all: registration mints
+    // one for free, so it is charged to the IP it posts from.
+    const unverified = await makeUser("unverified-bucket", { credits: 10 });
+    getServerSession.mockResolvedValue({ user: { id: unverified.id, sv: 0, totpPending: false } });
+    const unverifiedIp = ip();
+    let unverifiedLimited = 0;
+    for (let i = 0; i < 7; i++) {
+      const res = await submitFeedback(
+        request(
+          { category: "idea", message: `unverified flood number ${i}` },
+          { "x-forwarded-for": unverifiedIp },
+        ),
+      );
+      if (res.status === 429) unverifiedLimited += 1;
+    }
+    expect(unverifiedLimited).toBeGreaterThan(0);
   });
 });
 

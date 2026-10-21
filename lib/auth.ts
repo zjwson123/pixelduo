@@ -192,7 +192,7 @@ export const authOptions: NextAuthOptions = {
         if (user.totpEnabled) {
           const pre = (credentials as Record<string, string>).preAuthToken;
           // Second step: password + valid one-time 2FA ticket → real session.
-          if (pre && (await verifyPreAuthToken(pre, email))) {
+          if (pre && (await verifyPreAuthToken(pre, email, user.sessionVersion))) {
             return {
               id: user.id,
               email: user.email,

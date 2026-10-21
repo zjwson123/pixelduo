@@ -37,6 +37,8 @@ export interface NotifyInput {
   plan?: string | null;
   page?: string | null;
   locale?: string | null;
+  // null/undefined = anonymous; false = signed in but unverified.
+  verified?: boolean | null;
 }
 
 // Webhook bodies are small and each provider names its fields differently.
@@ -72,7 +74,9 @@ export function neutraliseMentions(text: string): string {
 }
 
 export function buildWebhookText(input: NotifyInput): string {
-  const who = input.userId ? `${input.email} (user ${input.userId})` : `${input.email} (not signed in)`;
+  const who = input.userId
+    ? `${input.email} (user ${input.userId}${input.verified === false ? ", unverified" : ""})`
+    : `${input.email} (not signed in)`;
   // `page` is caller-controlled and lands unquoted on the context LINE, which
   // is joined with " · " and read as one line: a CR, NEL or U+2028 would start
   // a new one inside the machine-generated block the operator triages from

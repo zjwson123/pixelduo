@@ -1,7 +1,44 @@
+import { NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/admin";
 import { ok, fail, enforceUserRateLimit, refuseNul } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { getStorage } from "@/lib/storage";
+import { contentTypeFromKey, sniffContentType } from "@/lib/media-type";
+
+// Preview one image for moderation. The admin console used to list id/user/
+// model/prompt without rendering the image, and /api/files only authorizes its
+// OWNER (or a template), so an operator could neither see what a report was
+// about nor inspect what a Delete button would remove. This route answers the
+// same bytes to an admin, never caches them, and is rate-limited per operator.
+export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  try {
+    refuseNul(id);
+    const adminId = await requireAdmin();
+    const limited = await enforceUserRateLimit(adminId, "admin-image-preview", 120, 60_000);
+    if (limited) return fail(limited);
+    const image = await prisma.image.findUnique({ where: { id: id }, select: { url: true } });
+    if (!image) return fail(new Error("image-not-found"));
+    const bytes = await getStorage().get(image.url);
+    if (!bytes) return fail(new Error("image-not-found"));
+    // Buffer's ArrayBufferLike is not a BodyInit in this TS lib; a copied
+    // Uint8Array over a plain ArrayBuffer is.
+    const body = new Uint8Array(bytes.byteLength);
+    body.set(bytes);
+    return new NextResponse(body.buffer, {
+      headers: {
+        "Content-Type": sniffContentType(bytes) ?? contentTypeFromKey(image.url) ?? "application/octet-stream",
+        // Moderation content must never be reused from a shared admin browser's
+        // cache after a takedown.
+        "Cache-Control": "private, no-store",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Length": String(bytes.length),
+      },
+    });
+  } catch (e) {
+    return fail(e);
+  }
+}
 
 // Remove a generated image (moderation / ToS removal). Delivered content is
 // not refunded — credit refunds are handled separately via user credits.

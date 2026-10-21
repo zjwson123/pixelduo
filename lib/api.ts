@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { authOptions } from "./auth";
 import { prisma } from "./prisma";
-import { rateLimit, clientIp } from "./rate-limit";
+import { rateLimit, clientIp, envLimit } from "./rate-limit";
 import { captureError } from "./observability";
 import { sliceCodePoints } from "./untrusted-text";
 
@@ -40,11 +40,14 @@ export async function sessionUser(): Promise<{ id: string; sv: number; totpPendi
 // the revocation check themselves — otherwise a stolen password-only session
 // keeps working after the owner resets their password or revokes sessions, and
 // retains a live TOTP/backup-code oracle.
-export async function requirePartialSession(): Promise<{ id: string; totpPending: boolean }> {
+export async function requirePartialSession(): Promise<{ id: string; totpPending: boolean; sv: number }> {
   const { id, sv, totpPending } = await sessionUser();
   const user = await prisma.user.findUnique({ where: { id }, select: { sessionVersion: true } });
   if (!user || user.sessionVersion !== sv) throw new ApiError(401, "unauthorized");
-  return { id, totpPending };
+  // sv travels with the result so the 2FA ticket can be stamped with the
+  // version the request was authorized under (pass 43) — a ticket that does
+  // not carry it survives a revoke-sessions for its whole 5-minute life.
+  return { id, totpPending, sv };
 }
 
 export async function requireUserId(): Promise<string> {
@@ -87,6 +90,27 @@ export async function requireVerifiedUserSession(): Promise<{ id: string; sv: nu
   if (!user || user.sessionVersion !== sv) throw new ApiError(401, "unauthorized");
   if (!user.emailVerified) throw new ApiError(403, "verify-email-required");
   return { id, sv };
+}
+
+// Daily ceiling for the provider-LLM routes (/api/assistant, /api/route).
+//
+// Those calls cost real money and are not charged credits, so the per-minute
+// bucket was the ONLY bound: a verified account (registration is free, and the
+// routes accept a catch-all mailbox) could drive 30 calls a minute forever at
+// the operator's DeepSeek key. One shared account-keyed bucket, so alternating
+// the two endpoints cannot double it. The window is a rolling limiter window
+// (24h from the first call); LLM_DAILY_LIMIT overrides the default.
+export async function enforceLlmDailyLimit(userId: string): Promise<ApiError | null> {
+  const limit = envLimit(process.env.LLM_DAILY_LIMIT, 50);
+  const r = await rateLimit(`llm:daily:${userId}`, limit, 24 * 60 * 60 * 1000);
+  if (r.ok) return null;
+  return new ApiError(
+    429,
+    "llm-daily-limit: the daily assistant allowance is used up",
+    r.retryAfterSec,
+    limit,
+    r.remaining,
+  );
 }
 
 export class ApiError extends Error {

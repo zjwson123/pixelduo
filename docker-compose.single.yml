@@ -124,6 +124,7 @@ x-appenv: &appenv
   CHECKIN_TIMEZONE: ${CHECKIN_TIMEZONE:-}
   FEEDBACK_NOTIFY_LIMIT: ${FEEDBACK_NOTIFY_LIMIT:-}
   AUTH_MAIL_HOURLY_LIMIT: ${AUTH_MAIL_HOURLY_LIMIT:-}
+  LLM_DAILY_LIMIT: ${LLM_DAILY_LIMIT:-}
   SENTRY_TRACES_SAMPLE_RATE: ${SENTRY_TRACES_SAMPLE_RATE:-}
   # Only for a deployment whose ingress sets X-Real-IP; with nothing setting it,
   # trusting the header hands every per-IP limiter a client-chosen bucket.

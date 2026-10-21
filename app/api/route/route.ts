@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, requireVerifiedUser, zodMessage, tooLarge } from "@/lib/api";
+import { enforceLlmDailyLimit, enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, requireVerifiedUser, zodMessage, tooLarge } from "@/lib/api";
 import { routePrompt } from "@/lib/router";
 
 const schema = z.object({
@@ -22,6 +22,10 @@ export async function POST(req: Request) {
     const bodyRaw = await readBodyCapped(req, 64 * 1024);
     if ("tooLarge" in bodyRaw) return tooLarge();
     const body = schema.parse(parseJsonBody(bodyRaw.raw));
+    // Shared with /api/assistant: alternating the two cannot double the budget,
+    // and a malformed request is rejected before it spends a call.
+    const dailyLimited = await enforceLlmDailyLimit(userId);
+    if (dailyLimited) return fail(dailyLimited);
     const result = await routePrompt(body.prompt);
     return ok(result);
   } catch (e) {

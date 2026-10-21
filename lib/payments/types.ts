@@ -47,6 +47,13 @@ export interface PaymentWebhookEvent {
   // it. The route sums the two columns when deciding whether the order was
   // returned in full (pass 41).
   disputedAmountUsd?: number;
+  // For "refunded": a dispute that was WON or had its funds reinstated. The
+  // amount leaves Order.disputedAmountUsd (floor 0) instead of entering it, so
+  // a won chargeback cannot poison the refund accumulator into a later full
+  // revoke (pass 43). Providers deliver this movement twice (`funds_reinstated`
+  // and `closed/won`), hence the id: the route applies it once.
+  reinstatedAmountUsd?: number;
+  reinstatedDisputeId?: string;
   // For "refunded": the provider's id for the adjustment/refund this delivery
   // describes, when it has one (Paddle's adjustment `data.id`). Two deliveries
   // of the SAME adjustment can carry different notification ids — that is

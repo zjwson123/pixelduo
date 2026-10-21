@@ -5,6 +5,7 @@ import { captureError } from "./observability";
 import { quoteUntrusted, singleLine } from "./untrusted-text";
 import { isProductionRuntime, usableUrl } from "./runtime-env";
 import { rateLimit, peekRateLimit, envLimit } from "./rate-limit";
+import { siteBase } from "./site";
 import {
   verificationHtml,
   resetHtml,
@@ -180,7 +181,13 @@ async function deliver(
 }
 
 function baseUrl(): string {
-  return process.env.NEXTAUTH_URL ?? "http://localhost:3000";
+  // siteBase trims: the boot gate accepts `"https://host "` (usableUrl trims
+  // it too, and next-auth's URL parser ignores surrounding whitespace), but
+  // this raw read produced `https://host /verify-email?...` — an invalid link
+  // in every mail, killing verification and recovery on a deployment that
+  // started fine (pass 43). One helper answers the origin for both web and
+  // mail, so they cannot disagree.
+  return siteBase();
 }
 
 // An absolute URL on THIS deployment. Every link a mail carries must go through
@@ -517,6 +524,10 @@ export interface FeedbackNotificationInput {
   page?: string | null;
   locale?: string | null;
   userAgent?: string | null;
+  // null/undefined = anonymous. A signed-in but unverified account is labelled
+  // so the operator does not read a pre-registered address as the account's
+  // verified mailbox (pass 43).
+  verified?: boolean | null;
 }
 
 // One place builds the notification, so the pre-flight check below sends byte
@@ -541,7 +552,11 @@ function buildFeedbackNotification(input: FeedbackNotificationInput) {
   const context = [
     `ref:      ${input.ref}`,
     `category: ${input.category}`,
-    `from:     ${input.email}${input.userId ? ` (user ${input.userId})` : " (not signed in)"}`,
+    `from:     ${input.email}${
+      input.userId
+        ? ` (user ${input.userId}${input.verified === false ? ", unverified" : ""})`
+        : " (not signed in)"
+    }`,
     `plan:     ${input.plan ?? "—"}`,
     `page:     ${page ?? "—"}`,
     `locale:   ${input.locale ?? "—"}`,

@@ -272,6 +272,13 @@ model Order {
   // whether the order was returned in full. Paddle's adjustments (including
   // chargebacks) stay in refundedAmountUsd, so this column is 0 for them.
   disputedAmountUsd Float    @default(0)
+  // Which dispute reinstatements have already been subtracted, as
+  // `reinstated:<disputeId>` markers (pass 43). Stripe reports a won dispute
+  // twice — `charge.dispute.funds_reinstated` and `charge.dispute.closed` with
+  // status `won` — and subtracting the amount on both deliveries would drive
+  // the accumulated disputed total too low, hiding a genuine partial refund
+  // that should have promoted to a full revoke.
+  disputeReinstatements String[] @default([])
   // Which provider adjustments have already been counted, as
   // `<adjustmentId>:approved` / `<adjustmentId>:reversed` markers (pass 36).
   // The accumulation above is per DELIVERY, and the only dedupe was

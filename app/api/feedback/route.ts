@@ -51,8 +51,18 @@ const schema = z.object({
 // reachable signed-out — someone who cannot sign in (a lockout, a broken
 // verification mail, a registration that never completed) has no other channel
 // and is exactly the person we need to hear from. Signed-in callers still go
-// through the full guard so the attached account context is trustworthy.
-async function optionalUser(): Promise<{ id: string; email: string; plan: string } | null> {
+// through the full guard, but an UNVERIFIED account is treated as anonymous for
+// the rate bucket and labelled as unverified in the operator context (pass 43):
+// a session alone is free to mint (register creates the account before sending
+// the mail), so keying the bucket on it let one IP post 5 reports per account
+// per 10 minutes indefinitely instead of the anonymous 5 per IP, and the
+// notification read as a verified address the operator could trust.
+async function optionalUser(): Promise<{
+  id: string;
+  email: string;
+  plan: string;
+  verified: boolean;
+} | null> {
   let userId: string;
   try {
     userId = await requireUserId();
@@ -62,9 +72,9 @@ async function optionalUser(): Promise<{ id: string; email: string; plan: string
   }
   const user = await prisma.user.findUnique({
     where: { id: userId },
-    select: { id: true, email: true, plan: true },
+    select: { id: true, email: true, plan: true, emailVerified: true },
   });
-  return user;
+  return user ? { ...user, verified: Boolean(user.emailVerified) } : null;
 }
 
 // The notification half of a submission is the expensive half: every one is a
@@ -137,10 +147,12 @@ export async function POST(req: Request) {
     // The limit still precedes the body read (pass 7): nothing buffers until the
     // caller has budget left.
     const user = await optionalUser();
-    if (user) {
+    if (user?.verified) {
       const userLimited = await enforceUserRateLimit(user.id, "feedback", 5, 10 * 60_000);
       if (userLimited) return fail(userLimited);
     } else {
+      // Unverified accounts share the anonymous IP bucket: the account is free
+      // to create, so it must not buy a second budget.
       const limited = await enforceRateLimit(req, "feedback", 5, 10 * 60_000);
       if (limited) return limited;
     }
@@ -194,6 +206,7 @@ export async function POST(req: Request) {
       page: body.page ?? null,
       locale: body.locale ?? null,
       userAgent,
+      verified: user?.verified ?? null,
     });
     // Second channel, for deployments where mail is not an option (a Feishu/
     // WeCom/DingTalk group bot is a URL, not an account with a verified domain).
@@ -207,6 +220,7 @@ export async function POST(req: Request) {
       plan: user?.plan ?? null,
       page: body.page ?? null,
       locale: body.locale ?? null,
+      verified: user?.verified ?? null,
     });
 
     // The id is returned so the sender can quote it; it is their own row and

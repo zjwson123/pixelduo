@@ -106,12 +106,21 @@ let connecting: Promise<void> | null = null;
 function getRedis(): Redis | null {
   if (redis) return redis;
   if (!process.env.REDIS_URL) return null;
-  redis = new Redis(process.env.REDIS_URL, {
-    enableOfflineQueue: false,
-    maxRetriesPerRequest: 0,
-    retryStrategy: (times) => Math.min(times * 500, 3000),
-    lazyConnect: true,
-  });
+  // See lib/login-guard.ts: the constructor parses the URL synchronously, and
+  // this call is outside withRedis's try. A typo in REDIS_URL threw from every
+  // 2FA check (login, key mint, erasure) instead of degrading to the local
+  // mirror (pass 43).
+  try {
+    redis = new Redis(process.env.REDIS_URL, {
+      enableOfflineQueue: false,
+      maxRetriesPerRequest: 0,
+      retryStrategy: (times) => Math.min(times * 500, 3000),
+      lazyConnect: true,
+    });
+  } catch {
+    redis = null;
+    return null;
+  }
   connecting = redis.connect().catch(() => undefined);
   return redis;
 }
@@ -126,9 +135,15 @@ async function reserveJti(jti: string, ttlSec: number): Promise<boolean> {
   return claimOnce(seenJtis, `2fa:jti:${jti}`, ttlSec);
 }
 
-export async function createPreAuthToken(email: string): Promise<string> {
+// `sv` binds the ticket to the session version it was earned under (pass 43).
+// Without it, a ticket minted just before the owner called /revoke-sessions
+// stayed valid for its full 5 minutes and minted a session at the NEW version,
+// i.e. the revocation did not revoke the one credential an attacker had already
+// started using. A version bump (revoke-sessions, reset-password, 2FA
+// enable/disable) now retires every outstanding ticket.
+export async function createPreAuthToken(email: string, sessionVersion: number): Promise<string> {
   const jti = randomBytes(16).toString("hex");
-  const token = await new SignJWT({ purpose: "2fa" })
+  const token = await new SignJWT({ purpose: "2fa", sv: sessionVersion })
     .setProtectedHeader({ alg: "HS256" })
     .setSubject(email.toLowerCase())
     .setJti(jti)
@@ -139,10 +154,15 @@ export async function createPreAuthToken(email: string): Promise<string> {
   return token;
 }
 
-export async function verifyPreAuthToken(token: string, email: string): Promise<boolean> {
+export async function verifyPreAuthToken(
+  token: string,
+  email: string,
+  sessionVersion: number,
+): Promise<boolean> {
   try {
     const { payload } = await jwtVerify(token, secretKey(), { algorithms: ["HS256"] });
     if (payload.purpose !== "2fa" || payload.sub !== email.toLowerCase()) return false;
+    if (payload.sv !== sessionVersion) return false;
     const jti = payload.jti;
     if (typeof jti !== "string") return false;
     return await reserveJti(jti, 300);
@@ -232,7 +252,17 @@ export async function twoFactorLockStatus(
 ): Promise<{ locked: boolean; retryAfterSec: number }> {
   const r = await withRedis(async (c) => {
     const key = `2fa:fail:${userId}`;
-    const [count, ttl] = await Promise.all([c.get(key), c.ttl(key)]);
+    const [count, currentTtl] = await Promise.all([c.get(key), c.ttl(key)]);
+    let ttl = currentTtl;
+    // A key created by the pre-pass-34 INCR/EXPIRE pair whose EXPIRE was lost
+    // has no TTL. Repaired here on the read path: a successful 2FA check is
+    // impossible while the brake is tripped, so nothing else would ever touch
+    // it, and the account was locked out of 2FA forever while being told to
+    // retry in one second. The repair restarts the normal 24h window.
+    if (Number(count ?? 0) > 0 && ttl < 0) {
+      await c.expire(key, TWOFA_FAIL_WINDOW_SEC);
+      ttl = TWOFA_FAIL_WINDOW_SEC;
+    }
     return { count: Number(count ?? 0), ttl };
   });
   if (r.state === "ok") {
@@ -270,7 +300,9 @@ export async function isTwoFactorLocked(userId: string): Promise<boolean> {
 // the key.
 const FAIL_BUMP_SCRIPT = `
 local c = redis.call('INCR', KEYS[1])
-if c == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end
+-- c == 1 is a fresh key; TTL < 0 is a legacy key whose EXPIRE was lost. Both
+-- get the window, so a pre-fix counter is repaired on its next bump too.
+if c == 1 or redis.call('TTL', KEYS[1]) < 0 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end
 return c
 `;
 

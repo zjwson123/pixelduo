@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, requireVerifiedUser, zodMessage, tooLarge } from "@/lib/api";
+import { enforceLlmDailyLimit, enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, requireVerifiedUser, zodMessage, tooLarge } from "@/lib/api";
 import { improvePrompt } from "@/lib/assistant";
 
 const schema = z.object({
@@ -22,6 +22,11 @@ export async function POST(req: Request) {
     const bodyRaw = await readBodyCapped(req, 64 * 1024);
     if ("tooLarge" in bodyRaw) return tooLarge();
     const body = schema.parse(parseJsonBody(bodyRaw.raw));
+    // The per-minute bucket above bounds a burst; this bounds the campaign.
+    // Both LLM routes share one daily bucket (pass 43). Charged after validation
+    // so a malformed request does not spend a real call.
+    const dailyLimited = await enforceLlmDailyLimit(userId);
+    if (dailyLimited) return fail(dailyLimited);
     const result = await improvePrompt(body.prompt, body.mode);
     return ok(result);
   } catch (e) {

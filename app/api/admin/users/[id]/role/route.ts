@@ -29,9 +29,20 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     // and the install is left with no admin and no in-app way to mint one.
     const updated = await prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(${ADMIN_GUARD_LOCK})`;
-      const target = await tx.user.findUnique({ where: { id }, select: { id: true, role: true } });
+      const target = await tx.user.findUnique({
+        where: { id },
+        select: { id: true, role: true, emailVerified: true },
+      });
       // P2025 on the update below would 500; unknown ids are a plain 404.
       if (!target) throw new Error("user-not-found");
+      // Same pre-registration takeover the promote script refuses (pass 43):
+      // registration mints an account for any address before verification, and
+      // requireAdmin checks only `role`. Granting operator rights to an
+      // unverified account hands the console to whoever registered that
+      // address first.
+      if (body.role === "admin" && target.role !== "admin" && !target.emailVerified) {
+        throw new Error("cannot-promote-unverified: verify the account's email first");
+      }
       if (target.role === "admin" && body.role !== "admin") {
         await assertAnotherAdminRemains(tx, id);
       }

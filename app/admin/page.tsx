@@ -76,6 +76,11 @@ export default function AdminPage() {
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [orders, setOrders] = useState<OrderRow[]>([]);
   const [images, setImages] = useState<ImageRow[]>([]);
+  // Server-side pages: the listing used to be the newest 50 with no way to go
+  // further, so a report about an older image could not be located at all.
+  const [imagesPage, setImagesPage] = useState(1);
+  const [imagesTotal, setImagesTotal] = useState(0);
+  const [imagesPageSize, setImagesPageSize] = useState(50);
   const [feedback, setFeedback] = useState<FeedbackRow[]>([]);
   const [unhandled, setUnhandled] = useState(0);
   // The inbox is paginated server-side (PAGE_SIZE per page). Dropping `total`
@@ -111,12 +116,19 @@ export default function AdminPage() {
 
   const refreshImages = useCallback(async () => {
     try {
-      const data = await api<{ images: ImageRow[] }>("/api/admin/images");
+      const data = await api<{ images: ImageRow[]; total: number; page: number; pageSize: number }>(
+        `/api/admin/images?page=${imagesPage}`,
+      );
       setImages(data.images);
+      setImagesTotal(data.total);
+      setImagesPageSize(data.pageSize);
+      // Echoed back: the route clamps ?page=, so a stale number cannot leave the
+      // view pointing past the end after deletions.
+      setImagesPage(data.page);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "load failed");
     }
-  }, []);
+  }, [imagesPage]);
 
   const refreshFeedback = useCallback(async () => {
     try {
@@ -159,7 +171,7 @@ export default function AdminPage() {
     if (tab === "users") refreshUsers();
     if (tab === "orders") refreshOrders();
     if (tab === "images") refreshImages();
-  }, [tab, refreshUsers, refreshOrders, refreshImages]);
+  }, [tab, refreshUsers, refreshOrders, refreshImages, imagesPage]);
 
   const adjustCredits = async (u: AdminUser) => {
     const raw = prompt(`Adjust credits for ${u.email} (positive = grant, negative = clawback):`);
@@ -311,13 +323,47 @@ export default function AdminPage() {
         )}
 
         {tab === "images" && (
+          <>
+          {Math.ceil(imagesTotal / imagesPageSize) > 1 && (
+            <div className="row" style={{ gap: 8, marginTop: 12, alignItems: "center" }}>
+              <button
+                className="btn btn-ghost btn-sm"
+                disabled={imagesPage <= 1}
+                style={{ opacity: imagesPage <= 1 ? 0.5 : 1 }}
+                onClick={() => setImagesPage((p) => Math.max(1, p - 1))}
+              >
+                ‹ Newer
+              </button>
+              <button
+                className="btn btn-ghost btn-sm"
+                disabled={imagesPage >= Math.ceil(imagesTotal / imagesPageSize)}
+                style={{ opacity: imagesPage >= Math.ceil(imagesTotal / imagesPageSize) ? 0.5 : 1 }}
+                onClick={() => setImagesPage((p) => p + 1)}
+              >
+                Older ›
+              </button>
+              <span style={{ fontSize: 12, color: "#7c829a" }}>
+                page {imagesPage} of {Math.ceil(imagesTotal / imagesPageSize)} · {imagesTotal} images
+              </span>
+            </div>
+          )}
           <table className="ledger" style={{ width: "100%", marginTop: 16 }}>
             <thead>
-              <tr><th>Image</th><th>User</th><th>Model</th><th>Prompt</th><th>Created</th><th></th></tr>
+              <tr><th></th><th>Image</th><th>User</th><th>Model</th><th>Prompt</th><th>Created</th><th></th></tr>
             </thead>
             <tbody>
               {images.map((img) => (
                 <tr key={img.id}>
+                  <td>
+                    <img
+                      src={`/api/admin/images/${img.id}`}
+                      alt=""
+                      width={56}
+                      height={56}
+                      loading="lazy"
+                      style={{ objectFit: "cover", borderRadius: 6, display: "block" }}
+                    />
+                  </td>
                   <td style={{ fontSize: 12 }}>{img.id.slice(0, 10)}…</td>
                   <td style={{ fontSize: 12 }}>{img.userId.slice(0, 12)}…</td>
                   <td>{img.model}</td>
@@ -328,6 +374,7 @@ export default function AdminPage() {
               ))}
             </tbody>
           </table>
+          </>
         )}
         {tab === "feedback" && (
           <div style={{ marginTop: 16 }}>

@@ -74,7 +74,9 @@ export async function POST(req: Request) {
     }
     await clearTwoFactorFailures(su.id);
 
-    const preAuthToken = await createPreAuthToken(user.email);
+    // Stamped with the version this request was authorized under: a revoke or
+    // reset arriving before the ticket is redeemed retires it (pass 43).
+    const preAuthToken = await createPreAuthToken(user.email, su.sv);
     return ok({ preAuthToken });
   } catch (e) {
     if (e instanceof z.ZodError) return fail(zodMessage(e));

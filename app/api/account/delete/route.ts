@@ -127,14 +127,9 @@ export async function POST(req: Request) {
           await tx.$executeRaw`SELECT pg_advisory_xact_lock(${ADMIN_GUARD_LOCK})`;
           const current = await tx.user.findUnique({
             where: { id: userId },
-            select: { role: true, sessionVersion: true },
+            select: { role: true },
           });
           if (!current) throw new Error("user-not-found");
-          // Erasure is irreversible and its storage sweep can take seconds. A
-          // reset-password / revoke-sessions arriving after the top-of-request
-          // check but before this transaction must win: the owner who revoked
-          // the session did not also ask to delete the account.
-          if (current.sessionVersion !== sv) throw new ApiError(401, "unauthorized");
           if (current.role === "admin") await assertAnotherAdminRemains(tx, userId);
           // Lock what the cascade below will reach, in the order every writer that
           // can meet this transaction takes it: Order → Job → CreditGrant → User.
@@ -164,6 +159,22 @@ export async function POST(req: Request) {
           await tx.$queryRaw(
             Prisma.sql`SELECT id FROM "CreditGrant" WHERE "userId" = ${userId} ${GRANT_LOCK_ORDER} FOR UPDATE`,
           );
+          // The User row is locked LAST, the position every money writer uses.
+          // Erasure is irreversible and the storage sweep runs INSIDE this
+          // transaction (pass 43): a reset-password / revoke-sessions arriving
+          // after the top-of-request check must win, and it can only do that by
+          // blocking here until the sweep and row deletes commit — otherwise
+          // the owner's revocation abandoned the account but left its files
+          // already deleted. The version is re-read under this lock; the one
+          // observed at the top of the request authorized the password/2FA
+          // checks and may have been superseded since.
+          await tx.$queryRaw(Prisma.sql`SELECT id FROM "User" WHERE id = ${userId} FOR UPDATE`);
+          const locked = await tx.user.findUnique({
+            where: { id: userId },
+            select: { sessionVersion: true },
+          });
+          if (!locked) throw new Error("user-not-found");
+          if (locked.sessionVersion !== sv) throw new ApiError(401, "unauthorized");
         },
         deleteRows: async (tx) => {
           await tx.backupCode.deleteMany({ where: { userId } });

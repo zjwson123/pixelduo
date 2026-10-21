@@ -55,6 +55,10 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
           await tx.$queryRaw(
             Prisma.sql`SELECT id FROM "CreditGrant" WHERE "userId" = ${id} ${GRANT_LOCK_ORDER} FOR UPDATE`,
           );
+          // LAST, in the order every writer takes these rows. The storage sweep
+          // runs inside this transaction (pass 43); the lock keeps a concurrent
+          // credential write from racing the cascade.
+          await tx.$queryRaw(Prisma.sql`SELECT id FROM "User" WHERE id = ${id} FOR UPDATE`);
         },
         deleteRows: async (tx) => {
           await tx.backupCode.deleteMany({ where: { userId: id } });

@@ -1,6 +1,9 @@
 import { requireUserId, ApiError } from "./api";
 import { prisma } from "./prisma";
-import type { Prisma } from "@prisma/client";
+// Re-exported so every existing importer keeps its import site; the definitions
+// live in a leaf module so scripts/promote-admin.ts can share the same lock
+// without loading the request stack.
+export { ADMIN_GUARD_LOCK, assertAnotherAdminRemains } from "./admin-guard";
 
 // Operator gate for admin-only endpoints.
 export async function requireAdmin(): Promise<string> {
@@ -10,26 +13,3 @@ export async function requireAdmin(): Promise<string> {
   return userId;
 }
 
-// Serializes every mutation that could remove the last admin. A fixed
-// transaction-scoped advisory key, held until commit, so the count and the write
-// it guards are one atomic step.
-//
-// The per-actor guards ("cannot demote/delete yourself") do not add up to the
-// invariant: two admins demoting each other concurrently each pass a self-only
-// check and both writes land, leaving an install with no admin at all — and no
-// in-app way to mint one, since both admin routes refuse to target the caller.
-// Recovery would need host access to scripts/promote-admin.ts. A constant key
-// may collide with a hashtext() user id in pg_advisory_xact_lock's single-int
-// namespace; the only consequence is a little extra serialization.
-export const ADMIN_GUARD_LOCK = 987_654_321;
-
-// Rejects a mutation that would leave the install with no admin. Must run inside
-// the same transaction as the write it guards, with the lock above taken first,
-// and after the target's current role is known to be "admin".
-export async function assertAnotherAdminRemains(
-  tx: Prisma.TransactionClient,
-  excludeUserId: string,
-): Promise<void> {
-  const others = await tx.user.count({ where: { role: "admin", id: { not: excludeUserId } } });
-  if (others < 1) throw new Error("cannot-remove-last-admin: promote another admin first");
-}

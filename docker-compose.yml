@@ -104,6 +104,7 @@ services:
       CHECKIN_TIMEZONE: ${CHECKIN_TIMEZONE:-}
       FEEDBACK_NOTIFY_LIMIT: ${FEEDBACK_NOTIFY_LIMIT:-}
       AUTH_MAIL_HOURLY_LIMIT: ${AUTH_MAIL_HOURLY_LIMIT:-}
+      LLM_DAILY_LIMIT: ${LLM_DAILY_LIMIT:-}
       SENTRY_TRACES_SAMPLE_RATE: ${SENTRY_TRACES_SAMPLE_RATE:-}
       TRUST_X_REAL_IP: ${TRUST_X_REAL_IP:-0}
       # Social sign-in (all four, or lib/auth.ts registers nothing) and the

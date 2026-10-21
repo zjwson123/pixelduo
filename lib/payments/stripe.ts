@@ -118,6 +118,9 @@ export class StripeProvider implements PaymentProvider {
         // charge.refunded object shape
         amount_refunded?: number;
         amount?: number;
+        // dispute object shape
+        id?: string;
+        status?: string;
       };
       let orderId: string | undefined = obj?.client_reference_id ?? obj?.metadata?.orderId;
       let type: "paid" | "refunded" | null = null;
@@ -151,6 +154,14 @@ export class StripeProvider implements PaymentProvider {
       // fired. Both feed the order row; the route adds them when deciding.
       let refundCumulativeUsd: number | undefined;
       let disputedAmountUsd: number | undefined;
+      // A dispute that was WON (or had its funds reinstated) gives the money
+      // back, and its amount must leave the order's disputed total — otherwise
+      // a $44.99 won dispute stayed in the accumulator and a later $5 genuine
+      // refund promoted the order to a full revoke (pass 43). The provider
+      // reports reinstatement twice (`funds_reinstated` and `closed/won`), so
+      // the id travels with the amount and the route applies it once.
+      let reinstatedAmountUsd: number | undefined;
+      let reinstatedDisputeId: string | undefined;
       // async_payment_succeeded: delayed-notification methods (SEPA, Boleto…)
       // settle after checkout.session.completed arrived as unpaid.
       if (
@@ -190,7 +201,51 @@ export class StripeProvider implements PaymentProvider {
       // same accumulator as a refund; only a dispute that covers the order's
       // price promotes to a full revoke. An unmeasurable dispute (no `amount`)
       // keeps the fail-closed default: full.
-      if (event.type === "charge.dispute.created") {
+      //
+      // The dispute LIFECYCLE (pass 43). Stripe fires `charge.dispute.created`
+      // for an INQUIRY as well as a chargeback: statuses `warning_needs_response`
+      // / `warning_under_review` / `warning_closed` mean the issuer is asking
+      // for evidence and NO money has left the merchant's account. Mapping the
+      // inquiry to a refund revoked the order's credits and paid tier over money
+      // the customer still held (probed end to end). Only `needs_response`,
+      // `under_review` and `lost` are chargebacks with funds withdrawn; an
+      // inquiry that escalates arrives later as `charge.dispute.updated` with
+      // one of those statuses, so that event is counted too. `funds_withdrawn`
+      // is the provider's explicit fund-movement signal and is counted even if
+      // the status field is absent.
+      //
+      // `funds_reinstated` / `closed(won)` are the reverse movement: the
+      // disputed total comes back down (once — see the route's marker).
+      const DISPUTE_FUNDS_WITH_STATUS = new Set(["needs_response", "under_review", "lost"]);
+      const disputeMovesFunds = (status: unknown): boolean =>
+        // No status (an older API version, a relay-shaped payload) keeps the
+        // fail-closed behavior this path has always had.
+        status === undefined || (typeof status === "string" && DISPUTE_FUNDS_WITH_STATUS.has(status));
+      // The dispute object's `status` is a different union than the Checkout
+      // Session's, and the intersection above keeps the Session's narrow one.
+      const disputeStatus = (event.data.object as { status?: string }).status;
+      const reinstated =
+        event.type === "charge.dispute.funds_reinstated" ||
+        ((event.type === "charge.dispute.closed" || event.type === "charge.dispute.updated") &&
+          disputeStatus === "won");
+      if (reinstated) {
+        if (typeof obj.amount === "number") {
+          type = "refunded";
+          orderId = undefined;
+          reinstatedAmountUsd = obj.amount / 100;
+          reinstatedDisputeId = typeof obj.id === "string" ? obj.id : undefined;
+        }
+        // No measurable amount: there is nothing to subtract. ACK rather than
+        // leaving the provider retrying an event we will never act on.
+      } else if (
+        event.type === "charge.dispute.created" ||
+        event.type === "charge.dispute.updated" ||
+        event.type === "charge.dispute.funds_withdrawn"
+      ) {
+        if (!disputeMovesFunds(disputeStatus)) {
+          // An inquiry: signed, real, and deliberately not acted on.
+          return IGNORED_WEBHOOK;
+        }
         type = "refunded";
         orderId = undefined;
         if (typeof obj.amount === "number") {
@@ -212,6 +267,8 @@ export class StripeProvider implements PaymentProvider {
         refundAmountUsd,
         refundCumulativeUsd,
         disputedAmountUsd,
+        reinstatedAmountUsd,
+        reinstatedDisputeId,
         paidAmountUsd,
         currency,
         // Refund webhooks reference the payment intent, not our session id —

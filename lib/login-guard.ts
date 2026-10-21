@@ -80,12 +80,23 @@ function localBump(key: string): number {
 function getClient(): Redis | null {
   if (client) return client;
   if (!process.env.REDIS_URL) return null;
-  client = new Redis(process.env.REDIS_URL, {
-    enableOfflineQueue: false,
-    maxRetriesPerRequest: 0,
-    retryStrategy: (times) => Math.min(times * 500, 3000),
-    lazyConnect: true,
-  });
+  // ioredis parses the URL in its CONSTRUCTOR, and this call sits outside
+  // withFallback's try. A malformed REDIS_URL therefore threw from every login
+  // attempt: an unknown address still answered "credentials" while an existing
+  // one answered 500 (a login existence oracle), and every 2FA check, key mint
+  // and erasure became a 500 (pass 43). A configuration fault must degrade to
+  // the process-local counter, exactly like an unreachable server.
+  try {
+    client = new Redis(process.env.REDIS_URL, {
+      enableOfflineQueue: false,
+      maxRetriesPerRequest: 0,
+      retryStrategy: (times) => Math.min(times * 500, 3000),
+      lazyConnect: true,
+    });
+  } catch {
+    client = null;
+    return null;
+  }
   connecting = client.connect().catch(() => undefined);
   return client;
 }

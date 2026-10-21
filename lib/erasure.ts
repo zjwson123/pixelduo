@@ -34,33 +34,37 @@ export async function collectUserArtifactKeys(
   return [...keys];
 }
 
-// A worker committed an artifact between the pre-delete sweep and the locked
-// re-read. The caller deletes the new keys and tries again; the Job row locks
-// in that transaction stop any further completion from committing after the
-// re-read, so a second pass is the last one that can find anything.
-export class ErasureArtifactsAppeared extends Error {
-  constructor(public keys: string[]) {
-    super("erasure-artifacts-appeared");
-  }
-}
-
-// Delete every object the account names, then verify under the transaction's
-// locks that nothing new appeared before removing the rows. Returns only after
-// the transaction that deletes the account rows commits.
+// Delete every object the account names, then remove the rows — all inside ONE
+// transaction, after `lockRows` has proved the caller may still erase.
 //
-// Storage failures are NOT swallowed: the previous code ignored every
-// deleteObjectsBounded result while the drivers' delete() caught every error,
-// so a transient bucket fault produced `{deleted:true}` with the objects still
-// in the bucket and the rows that named them gone — permanently unretryable and
-// contrary to the privacy policy. A failure now aborts BEFORE the rows are
-// deleted, so the customer can retry the erasure.
+// Pass 43 inverted the order. The sweep used to run BEFORE the transaction, so
+// a request that passed the password/2FA checks deleted every stored artifact
+// and only then hit the sessionVersion CAS inside the transaction: a
+// revoke-sessions or password reset arriving during the (documented,
+// multi-second) sweep won the CAS, the account survived, and the files were
+// already gone with no way to restore them. A revoked session must not delete
+// anything, whether the revocation arrives before or during the sweep.
+//
+// Holding the row locks across the storage round trips serializes the sweep
+// against every writer that can still name an artifact (completeJob takes
+// Order → Job → …), and the caller locks the User row LAST — the position every
+// money writer already uses — so an sv bump blocks until this commits or aborts.
+//
+// Storage failures are NOT swallowed (pass 39): the drivers reject on every
+// real error and treat a missing key as success, so a transient bucket fault
+// aborts the transaction BEFORE the rows are deleted and the customer can
+// retry. The transaction timeout is generous because the sweep is network I/O;
+// 60s covers a large library at the bounded concurrency of
+// deleteObjectsBounded, and a timeout rolls the row deletes back, leaving the
+// account intact (only objects already deleted are unrecoverable — the
+// unavoidable residue of any external side effect).
 export interface ErasureSteps {
   // Take the row locks FIRST, in the order every writer uses (Order → Job →
-  // CreditGrant → User), and run the same presence/last-admin checks inside the
-  // transaction. The locked re-read below is only meaningful when nothing can
-  // commit a new artifact behind it.
+  // CreditGrant → User), re-check the authorization while holding them, and run
+  // the same presence/last-admin checks inside the transaction.
   lockRows: (tx: Prisma.TransactionClient) => Promise<void>;
-  // Remove the account's rows. Runs after the re-read, under the same locks.
+  // Remove the account's rows. Runs after the storage sweep, under the same
+  // locks.
   deleteRows: (tx: Prisma.TransactionClient) => Promise<void>;
 }
 
@@ -71,44 +75,38 @@ export async function eraseUserArtifacts(
     onStorageFailure: () => undefined,
   },
 ): Promise<void> {
-  const attempts = opts.attempts ?? 3;
-  let deletedKeys = new Set<string>();
-  for (let attempt = 1; attempt <= attempts; attempt++) {
-    const keys = await collectUserArtifactKeys(prisma, userId);
-    const outcome = await deleteObjectsBounded(keys);
-    if (outcome.failed > 0) {
-      opts.onStorageFailure(keys.filter((k) => !outcome.deletedKeys.has(k)));
-      throw new ApiError(
-        503,
-        "cannot-delete-storage: some stored files could not be deleted — nothing was erased, retry the request",
-      );
-    }
-    deletedKeys = new Set([...deletedKeys, ...keys]);
-    try {
-      await withDeadlockRetry(() =>
-        prisma.$transaction(async (tx) => {
-          // Locks BEFORE the verification read: a worker that committed its
-          // Image row before the Job lock is seen here (and forces one more
-          // sweep); one that tries after it blocks and then loses its own CAS
-          // because the row is gone.
-          await steps.lockRows(tx);
-          const appeared = (await collectUserArtifactKeys(tx, userId)).filter(
+  const rounds = opts.attempts ?? 3;
+  await withDeadlockRetry(() =>
+    prisma.$transaction(
+      async (tx) => {
+        await steps.lockRows(tx);
+        const deletedKeys = new Set<string>();
+        for (let round = 0; round < rounds; round++) {
+          const keys = (await collectUserArtifactKeys(tx, userId)).filter(
             (k) => !deletedKeys.has(k),
           );
-          if (appeared.length > 0) throw new ErasureArtifactsAppeared(appeared);
-          await steps.deleteRows(tx);
-        }),
-      );
-      return;
-    } catch (e) {
-      if (e instanceof ErasureArtifactsAppeared) {
-        if (attempt < attempts) continue;
+          if (keys.length === 0) {
+            await steps.deleteRows(tx);
+            return;
+          }
+          const outcome = await deleteObjectsBounded(keys);
+          if (outcome.failed > 0) {
+            opts.onStorageFailure(keys.filter((k) => !outcome.deletedKeys.has(k)));
+            throw new ApiError(
+              503,
+              "cannot-delete-storage: some stored files could not be deleted — nothing was erased, retry the request",
+            );
+          }
+          for (const k of outcome.deletedKeys) deletedKeys.add(k);
+        }
+        // The Job lock makes a new artifact impossible after lockRows, so this
+        // only fires if the sweep kept discovering keys for another reason.
         throw new ApiError(
           503,
           "cannot-delete-storage: new files kept appearing while the account was erased — retry the request",
         );
-      }
-      throw e;
-    }
-  }
+      },
+      { timeout: 60_000, maxWait: 15_000 },
+    ),
+  );
 }

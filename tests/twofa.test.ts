@@ -80,15 +80,19 @@ describe("two-factor helpers", () => {
     expect(await useBackupCode(userId, "WRONGCODE99")).toBe(false);
   });
 
-  it("issues single-use pre-auth tickets", async () => {
+  it("issues single-use pre-auth tickets bound to the session version", async () => {
     const email = "ticket@test.dev";
-    const token = await createPreAuthToken(email);
-    expect(await verifyPreAuthToken(token, email)).toBe(true);
+    const token = await createPreAuthToken(email, 7);
+    expect(await verifyPreAuthToken(token, email, 7)).toBe(true);
     if (redis) {
-      expect(await verifyPreAuthToken(token, email)).toBe(false); // replay rejected
+      expect(await verifyPreAuthToken(token, email, 7)).toBe(false); // replay rejected
     }
-    expect(await verifyPreAuthToken(token, "other@test.dev")).toBe(false);
-    expect(await verifyPreAuthToken("garbage.token.here", email)).toBe(false);
+    expect(await verifyPreAuthToken(token, "other@test.dev", 7)).toBe(false);
+    expect(await verifyPreAuthToken("garbage.token.here", email, 7)).toBe(false);
+    // A revoke/reset bumps the version; a ticket minted before it must not
+    // survive (pass 43 — it used to mint a session at the new version).
+    const beforeRevoke = await createPreAuthToken(email, 8);
+    expect(await verifyPreAuthToken(beforeRevoke, email, 9)).toBe(false);
   });
 
   // The ticket's signing key is the whole proof of the first factor. Keying the
@@ -117,17 +121,17 @@ describe("two-factor helpers", () => {
 
       for (const spelling of ["production", "staging", "prod", "Production", ""]) {
         env.NODE_ENV = spelling;
-        await expect(createPreAuthToken("victim@test.dev")).rejects.toThrow(/NEXTAUTH_SECRET/);
+        await expect(createPreAuthToken("victim@test.dev", 0)).rejects.toThrow(/NEXTAUTH_SECRET/);
         // Nor may a ticket forged with the public constant verify: verify()
         // swallows the signing failure and answers false.
-        expect(await verifyPreAuthToken(forged, "victim@test.dev")).toBe(false);
+        expect(await verifyPreAuthToken(forged, "victim@test.dev", 0)).toBe(false);
       }
 
       // The explicitly-declared development/test runtime keeps working.
       env.NODE_ENV = "test";
-      const dev = await createPreAuthToken("dev@test.dev");
+      const dev = await createPreAuthToken("dev@test.dev", 0);
       _resetTwoFaForTests();
-      expect(await verifyPreAuthToken(dev, "dev@test.dev")).toBe(true);
+      expect(await verifyPreAuthToken(dev, "dev@test.dev", 0)).toBe(true);
     } finally {
       if (origNodeEnv !== undefined) env.NODE_ENV = origNodeEnv;
       else delete env.NODE_ENV;
