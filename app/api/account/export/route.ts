@@ -26,19 +26,60 @@ export async function POST() {
     // Bounded take so a hoarded account cannot force an unbounded response —
     // one past the cap, so truncation is detectable.
     const take = EXPORT_ROW_LIMIT + 1;
-    const [user, ledger, images, jobs, orders, feedback] = await Promise.all([
+    const [user, ledgerRows, images, jobs, orders, feedback] = await Promise.all([
       prisma.user.findUnique({
         where: { id: userId },
         select: { id: true, email: true, name: true, credits: true, plan: true, planRenewsAt: true, createdAt: true },
       }),
-      prisma.ledgerEntry.findMany({ where: { userId }, orderBy: { createdAt: "asc" }, take }),
+      // Explicit select, and the operator columns are dropped for the same
+      // reason /api/ledger drops them (pass 43): `actorId` names the admin who
+      // performed a clawback, and an unattributed admin row's `refId` is that
+      // same operator id. The export returned every column, so the one view
+      // pass 43 cleaned up was not the only way a normal user could read
+      // another account's primary key (pass 44).
+      prisma.ledgerEntry.findMany({
+        where: { userId },
+        orderBy: { createdAt: "asc" },
+        take,
+        select: {
+          id: true,
+          type: true,
+          creditsDelta: true,
+          balanceAfter: true,
+          refType: true,
+          refId: true,
+          note: true,
+          createdAt: true,
+        },
+      }),
       prisma.image.findMany({ where: { userId }, orderBy: { createdAt: "asc" }, take }),
       prisma.job.findMany({ where: { userId }, orderBy: { createdAt: "asc" }, take }),
       prisma.order.findMany({ where: { userId }, orderBy: { createdAt: "asc" }, take }),
       // Messages the user sent while signed in. Anonymous reports carry no
       // userId and are therefore not attributable, so they cannot be included.
-      prisma.feedback.findMany({ where: { userId }, orderBy: { createdAt: "asc" }, take }),
+      // `handledBy` is the closing operator's User.id — the same cross-account
+      // identifier the ledger used to leak, so it is not part of the user's
+      // data export; `handledAt` still says when it was handled (pass 44).
+      prisma.feedback.findMany({
+        where: { userId },
+        orderBy: { createdAt: "asc" },
+        take,
+        select: {
+          id: true,
+          email: true,
+          category: true,
+          message: true,
+          status: true,
+          page: true,
+          locale: true,
+          plan: true,
+          userAgent: true,
+          createdAt: true,
+          handledAt: true,
+        },
+      }),
     ]);
+    const ledger = ledgerRows.map((e) => (e.refType === "admin" ? { ...e, refId: null } : e));
     const tables = { ledger, images, jobs, orders, feedback };
     const truncated = Object.values(tables).some((rows) => rows.length > EXPORT_ROW_LIMIT);
     const data = Object.fromEntries(

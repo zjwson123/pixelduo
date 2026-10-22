@@ -19,20 +19,56 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     if (limited) return fail(limited);
     const image = await prisma.image.findUnique({ where: { id: id }, select: { url: true } });
     if (!image) return fail(new Error("image-not-found"));
-    const bytes = await getStorage().get(image.url);
-    if (!bytes) return fail(new Error("image-not-found"));
-    // Buffer's ArrayBufferLike is not a BodyInit in this TS lib; a copied
-    // Uint8Array over a plain ArrayBuffer is.
-    const body = new Uint8Array(bytes.byteLength);
-    body.set(bytes);
-    return new NextResponse(body.buffer, {
+    // Streamed, not buffered (pass 44). `Image` rows include VIDEO outputs
+    // (the worker completes a video with model seedance), so one preview used
+    // to materialize up to the 100 MB download cap in the web process — twice,
+    // because a Buffer was copied into a Uint8Array view — and the console
+    // renders the page's whole page of thumbnails at once. 120/min of that is
+    // an OOM of the container serving every user, reachable by a stolen admin
+    // session. /api/files solved the same problem for user media with the
+    // driver's stream; this is the admin equivalent.
+    //
+    // The first chunk is pulled only to sniff the Content-Type from the bytes
+    // (a mid-file preview is not a thing here — there is no Range support), and
+    // is replayed ahead of the rest by the consumer-driven stream below.
+    const streamed = await getStorage().getStream(image.url);
+    if (!streamed) return fail(new Error("image-not-found"));
+    const reader = streamed.stream.getReader();
+    const first = await reader.read();
+    const head = first.done ? new Uint8Array(0) : first.value!;
+    let headSent = false;
+    const body = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        try {
+          if (!headSent) {
+            headSent = true;
+            if (head.byteLength > 0) {
+              controller.enqueue(head);
+              return;
+            }
+          }
+          const { done, value } = await reader.read();
+          if (done) {
+            controller.close();
+            return;
+          }
+          if (value) controller.enqueue(value);
+        } catch (e) {
+          controller.error(e);
+        }
+      },
+      cancel() {
+        reader.cancel().catch(() => undefined);
+      },
+    });
+    return new NextResponse(body, {
       headers: {
-        "Content-Type": sniffContentType(bytes) ?? contentTypeFromKey(image.url) ?? "application/octet-stream",
+        "Content-Type": sniffContentType(head) ?? contentTypeFromKey(image.url) ?? "application/octet-stream",
         // Moderation content must never be reused from a shared admin browser's
         // cache after a takedown.
         "Cache-Control": "private, no-store",
         "X-Content-Type-Options": "nosniff",
-        "Content-Length": String(bytes.length),
+        ...(streamed.length !== undefined ? { "Content-Length": String(streamed.length) } : {}),
       },
     });
   } catch (e) {

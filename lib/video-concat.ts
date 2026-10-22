@@ -85,7 +85,20 @@ export function concatFfmpegArgs(
 // store, the segment a Buffer from the provider). A refusal is a graceful
 // degradation here, not an error: the caller ships the segment alone, which is
 // exactly what the provider billed for.
-export const CONCAT_MAX_INPUT_BYTES = 320 * 1024 * 1024;
+//
+// Pass 44 tightened the pair: the old 320 MB input cap plus a 256 MB output
+// READ still reached ~576 MB in heap, because the output is materialized with
+// readFile (the `-fs` cap bounds the file, not the read). The budget is now
+// inputs (256 MB) + at most CONCAT_MAX_IN_HEAP_BYTES (64 MB) of output, i.e.
+// ~320 MB of Buffers plus Node/ffmpeg headroom — under the 512 MB container.
+// A 30 s 720p re-encode at CRF 20 is far below 64 MB; a larger output ships
+// the segment alone rather than risking the worker that serves every job.
+export const CONCAT_MAX_INPUT_BYTES = 256 * 1024 * 1024;
+
+// The most output this process will hold in heap. The file may legally be
+// larger on disk (CONCAT_MAX_OUTPUT_BYTES bounds it there); past this size it
+// is refused before readFile, so the peak is bounded by construction.
+export const CONCAT_MAX_IN_HEAP_BYTES = 64 * 1024 * 1024;
 
 export function concatInputsWithinBudget(aBytes: number, bBytes: number): boolean {
   return aBytes + bBytes <= CONCAT_MAX_INPUT_BYTES;
@@ -124,9 +137,12 @@ export async function concatVideos(a: Buffer, b: Buffer): Promise<Buffer | null>
     });
     // `-fs` stops ffmpeg mid-file, so an output at (or past) the cap is a
     // truncated clip, not a deliverable one: refuse it and let the caller ship
-    // the segment it was billed for.
+    // the segment it was billed for. The in-heap cap is separate and checked
+    // BEFORE readFile: the on-disk file may be up to 256 MB, but this process
+    // already holds both inputs (up to 256 MB together), so materializing the
+    // output here is what made the peak exceed the container (pass 44).
     const { size } = await fsp.stat(outPath);
-    if (size >= limit) return null;
+    if (size >= limit || size > CONCAT_MAX_IN_HEAP_BYTES) return null;
     return await fsp.readFile(outPath);
   } catch {
     return null;

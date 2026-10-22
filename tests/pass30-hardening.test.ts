@@ -290,7 +290,12 @@ describe("pass 30 — recoverStuckJobs carries its observation into the CAS", ()
       },
     });
     // What a concurrent sweep READ, before the peer's pass committed.
-    const observed = { status: job.status, heartbeatAt: job.heartbeatAt, startedAt: job.startedAt };
+    const observed = {
+      status: job.status,
+      heartbeatAt: job.heartbeatAt,
+      startedAt: job.startedAt,
+      images: job.images,
+    };
 
     // The sweep's batch is GLOBAL (ORDER BY id LIMIT 20) and the other suites
     // run in parallel against this database, holding their own running/polling
@@ -345,7 +350,12 @@ describe("pass 30 — recoverStuckJobs carries its observation into the CAS", ()
     });
     const fresh = await prisma.job.findUniqueOrThrow({ where: { id: job.id } });
     await failJob(job.id, "stuck-timeout: worker heartbeat expired", {
-      expect: { status: fresh.status, heartbeatAt: fresh.heartbeatAt, startedAt: fresh.startedAt },
+      expect: {
+        status: fresh.status,
+        heartbeatAt: fresh.heartbeatAt,
+        startedAt: fresh.startedAt,
+        images: fresh.images,
+      },
     } as unknown as FailOpts);
     const afterControl = await prisma.job.findUniqueOrThrow({ where: { id: job.id } });
     expect(afterControl.attempts).toBe(3);
@@ -564,10 +574,13 @@ describe("pass 30 — every cumulative-brake 429 carries its wait", () => {
   it("the concat budget bounds the inputs together, not each one", async () => {
     const { concatInputsWithinBudget, CONCAT_MAX_INPUT_BYTES } = await import("../lib/video-concat");
     const mb = 1024 * 1024;
-    expect(concatInputsWithinBudget(100 * mb, 200 * mb)).toBe(true);
+    expect(concatInputsWithinBudget(100 * mb, 100 * mb)).toBe(true);
     // Pre-fix: no such check existed — 100 MB source + 256 MB segment + a
-    // 256 MB output buffer (~600 MB) inside a 512 MB container.
+    // 256 MB output buffer (~600 MB) inside a 512 MB container. Pass 44
+    // tightened the number: the output is also held in heap, so 300 MB of
+    // inputs plus a 64 MB in-heap output is already past the container.
+    expect(concatInputsWithinBudget(100 * mb, 200 * mb)).toBe(false);
     expect(concatInputsWithinBudget(200 * mb, 200 * mb)).toBe(false);
-    expect(CONCAT_MAX_INPUT_BYTES).toBeLessThan(100 * mb + 256 * mb);
+    expect(CONCAT_MAX_INPUT_BYTES).toBeLessThanOrEqual(256 * mb);
   });
 });

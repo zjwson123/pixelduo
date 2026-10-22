@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { Prisma } from "@prisma/client";
 import { ApiError, enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, requireVerifiedUser, requireVerifiedUserSession, zodMessage, tooLarge } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { passwordReauthRefusal } from "@/lib/auth";
@@ -110,6 +111,20 @@ export async function POST(req: Request) {
     // count, all pass, and each mints a permanent credential.
     const key = await prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${userId}))`;
+      // Serialize with account erasure before minting (pass 44). ApiKey has no
+      // foreign key to User on purpose (it is a hash-only table), so this INSERT
+      // is invisible to the erasure transaction's locks: an erasure that has
+      // already deleted the account's keys but not yet the User row could commit
+      // without this one, leaving key metadata behind for an account that no
+      // longer exists — a GDPR/PIPL completeness hole. FOR KEY SHARE conflicts
+      // with the erasure's User FOR UPDATE (it waits, then sees no row and
+      // refuses) and deliberately does NOT conflict with the ordinary
+      // FOR NO KEY UPDATE taken by every credits/plan write, so the money path
+      // gains no contention.
+      const owner = await tx.$queryRaw<Array<{ id: string }>>(
+        Prisma.sql`SELECT id FROM "User" WHERE id = ${userId} FOR KEY SHARE`,
+      );
+      if (owner.length === 0) throw new ApiError(401, "unauthorized");
       // Re-read the version INSIDE the transaction and stamp it on the row. The
       // gate at the top of this handler cannot see a revocation that commits
       // while we are here, and a key minted by a session revoked mid-request

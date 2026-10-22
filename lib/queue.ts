@@ -414,6 +414,17 @@ export interface JobObservation {
   status: string;
   heartbeatAt: Date | null;
   startedAt: Date | null;
+  // The checkpoint at observation time (pass 44). A holder that was stalled
+  // past the sweep's read can still pass checkpointJobProgress (its worker id
+  // and in-flight status are unchanged) and commit a NEWER checkpoint between
+  // that read and the CAS; without this field the sweep failed the job anyway,
+  // reclaimed only the stale snapshot's keys, and the zombie's own cleanup then
+  // kept whatever Job.images now named (reclaimStoredArtifact treats the column
+  // as ownership) — a paid attempt's up-to-4 images or 100 MB video left in the
+  // bucket, named only by a failed job, until account erasure. Making the
+  // observation part of the CAS makes the sweep stand down and retry next tick,
+  // where it sees the new checkpoint and reclaims it.
+  images: string;
 }
 
 function sameInstant(a: Date | null, b: Date | null): boolean {
@@ -492,7 +503,8 @@ export async function failJob(
       const unchanged =
         job.status === seen.status &&
         sameInstant(job.heartbeatAt, seen.heartbeatAt) &&
-        sameInstant(job.startedAt, seen.startedAt);
+        sameInstant(job.startedAt, seen.startedAt) &&
+        job.images === seen.images;
       if (!unchanged) return false;
     }
     // Job.error is the one text column a PROVIDER shapes, and this write is the
@@ -519,7 +531,11 @@ export async function failJob(
     // status='polling', so a status-only predicate matched a row that had moved
     // on between the read and the write and requeued/failed a live attempt.
     const observed = opts?.expect
-      ? { heartbeatAt: opts.expect.heartbeatAt, startedAt: opts.expect.startedAt }
+      ? {
+          heartbeatAt: opts.expect.heartbeatAt,
+          startedAt: opts.expect.startedAt,
+          images: opts.expect.images,
+        }
       : {};
     const casWhere = {
       id: jobId,
@@ -806,9 +822,9 @@ export async function recoverStuckJobs(maxAgeMs = 180_000, pollMaxAgeMs = 600_00
   // job this batch saw but a peer already requeued or re-claimed stands down
   // instead of burning another attempt — see the comment on failJob's `expect`.
   const stuck = await prisma.$queryRaw<
-    Array<{ id: string; status: string; heartbeatAt: Date | null; startedAt: Date | null }>
+    Array<{ id: string; status: string; heartbeatAt: Date | null; startedAt: Date | null; images: string }>
   >(Prisma.sql`
-    SELECT id, status, "heartbeatAt", "startedAt" FROM "Job"
+    SELECT id, status, "heartbeatAt", "startedAt", images FROM "Job"
      WHERE (status = 'running'
             AND EXTRACT(EPOCH FROM (now() - COALESCE("heartbeatAt", "startedAt"))) * 1000 > ${maxAgeMs})
         OR (status = 'polling'
@@ -828,7 +844,12 @@ export async function recoverStuckJobs(maxAgeMs = 180_000, pollMaxAgeMs = 600_00
     // makes the sweep a sweep. The failure is reported, not swallowed.
     try {
       await failJob(job.id, "stuck-timeout: worker heartbeat expired", {
-        expect: { status: job.status, heartbeatAt: job.heartbeatAt, startedAt: job.startedAt },
+        expect: {
+          status: job.status,
+          heartbeatAt: job.heartbeatAt,
+          startedAt: job.startedAt,
+          images: job.images,
+        },
       });
     } catch (e) {
       captureError(e, { scope: "recover-stuck", jobId: job.id, status: job.status });

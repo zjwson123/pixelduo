@@ -216,6 +216,7 @@ describe("pass 39 — a stale recovery observation cannot requeue a claimed job"
       status: job.status,
       heartbeatAt: job.heartbeatAt,
       startedAt: job.startedAt,
+      images: job.images,
     };
 
     // The window between failJob's fresh read and its CAS: a peer poll claim

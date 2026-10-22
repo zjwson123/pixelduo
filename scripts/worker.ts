@@ -6,7 +6,7 @@ import { modelCost, videoCost } from "../lib/cost";
 import { analyzeAllImagesSequentially, moderationRequested } from "../lib/safety";
 import { getVisionConfig } from "../lib/keys";
 import { getStorage, newStorageKey } from "../lib/storage";
-import { concatVideos } from "../lib/video-concat";
+import { concatInputsWithinBudget, concatVideos } from "../lib/video-concat";
 import { initObservability, captureError } from "../lib/observability";
 import { bakeWatermark } from "../lib/watermark";
 import { storeContentType } from "../lib/media-type";
@@ -455,9 +455,17 @@ export async function processVideoJob(job: {
         // (Two reads at up to 90s each, then ffmpeg at up to 180s: one lease
         // extension before the reads, one before the merge.)
         await extendPollLease(job.id, workerId);
-        const [srcBuf, segBuf] = await Promise.all([
-          getStorage().get(job.sourceVideoKey),
-          getStorage().get(segmentKey),
+        // Size-check BEFORE reading both objects (pass 44). The reads below
+        // materialize the whole source and segment (up to 100 MB each from the
+        // provider; a chained source is a previous merge, which this same cap
+        // now holds to 64 MB in heap), which is exactly the heap the concat
+        // budget exists to bound: reading first and letting concatVideos refuse
+        // afterwards allocates the peak anyway. A stat/HEAD per object is cheap,
+        // and a refused merge degrades to the segment-only delivery the caller
+        // was billed for.
+        const [srcSize, segSize] = await Promise.all([
+          getStorage().size(job.sourceVideoKey),
+          getStorage().size(segmentKey),
         ]);
         // The two reads are NOT interchangeable, and treating them as one
         // condition charged the caller in full for a URL that 404s: when the
@@ -471,31 +479,51 @@ export async function processVideoJob(job: {
         // checkpointJobArtifact. Transient (not a "download failed"-class
         // message) is load-bearing — a permanent classification would fail the
         // job terminally and refund instead of retrying.
-        if (!segBuf) {
+        if (segSize === null) {
           throw new Error("segment-missing: the generated video could not be read back from storage");
         }
-        if (srcBuf) {
-          await extendPollLease(job.id, workerId);
-          const merged = await concatVideos(srcBuf, segBuf);
-          if (merged) {
-            const finalKey = newStorageKey("mp4");
-            await getStorage().put(finalKey, merged, "video/mp4");
-            videoKey = finalKey;
-            storedKey = finalKey;
-            await checkpointJobArtifact(job.id, segmentKey, finalKey, workerId);
-            console.log(`[worker ${workerId}] job ${job.id}: extended video assembled (${videoKey})`);
-          } else {
-            // A null result is a refusal, not just an ffmpeg failure: concatVideos
-            // returns null for non-ISO-BMFF inputs, for an ffmpeg failure, and —
-            // before spawning anything — when the two buffers exceed
-            // CONCAT_MAX_INPUT_BYTES (lib/video-concat.ts). The sizes tell an
-            // operator which of those happened.
-            console.warn(
-              `[worker ${workerId}] job ${job.id}: concat failed or declined (${srcBuf.length + segBuf.length} input bytes) — delivering segment only`,
-            );
-          }
-        } else {
+        if (srcSize !== null && !concatInputsWithinBudget(srcSize, segSize)) {
+          console.warn(
+            `[worker ${workerId}] job ${job.id}: concat declined — inputs ${srcSize} + ${segSize} bytes exceed the combined budget — delivering segment only`,
+          );
+        } else if (srcSize === null) {
           console.warn(`[worker ${workerId}] job ${job.id}: source video missing — delivering the segment alone`);
+        } else {
+          const [srcBuf, segBuf] = await Promise.all([
+            getStorage().get(job.sourceVideoKey),
+            getStorage().get(segmentKey),
+          ]);
+          if (!segBuf) {
+            // Vanished between the size probe and the read: the same transient
+            // storage fault, handled identically to the missing-size branch.
+            throw new Error("segment-missing: the generated video could not be read back from storage");
+          }
+          if (!srcBuf) {
+            // A read fault despite the size probe: the source cannot be used,
+            // so this is the same graceful degradation as a missing source —
+            // and it stays distinguishable in the logs from a heap refusal.
+            console.warn(`[worker ${workerId}] job ${job.id}: source video missing — delivering the segment alone`);
+          } else {
+            await extendPollLease(job.id, workerId);
+            const merged = await concatVideos(srcBuf, segBuf);
+            if (merged) {
+              const finalKey = newStorageKey("mp4");
+              await getStorage().put(finalKey, merged, "video/mp4");
+              videoKey = finalKey;
+              storedKey = finalKey;
+              await checkpointJobArtifact(job.id, segmentKey, finalKey, workerId);
+              console.log(`[worker ${workerId}] job ${job.id}: extended video assembled (${videoKey})`);
+            } else {
+              // A null result is a refusal, not just an ffmpeg failure: concatVideos
+              // returns null for non-ISO-BMFF inputs, for an ffmpeg failure, and —
+              // before spawning anything — when the two buffers exceed
+              // CONCAT_MAX_INPUT_BYTES or the output is too large to hold in heap
+              // (lib/video-concat.ts). The sizes tell an operator which happened.
+              console.warn(
+                `[worker ${workerId}] job ${job.id}: concat failed or declined (${srcBuf.length + segBuf.length} input bytes) — delivering segment only`,
+              );
+            }
+          }
         }
         // Only when the merge produced a DIFFERENT object. Deleting it
         // unconditionally deleted the file being delivered whenever the concat
