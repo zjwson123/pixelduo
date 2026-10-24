@@ -1,9 +1,12 @@
-import { requireVerifiedUser, ok, fail, enforceUserRateLimit } from "@/lib/api";
+import { requireVerifiedUser, ok, fail, enforceUserRateLimit, refuseCrossSiteRequest } from "@/lib/api";
 import { dailyCheckin } from "@/lib/ledger";
 import { spendableBalance } from "@/lib/credits";
 
-export async function POST() {
+export async function POST(req: Request) {
   try {
+    // No body, so readBodyCapped's media-type CSRF rule does not apply here;
+    // see refuseCrossSiteRequest (pass 45).
+    refuseCrossSiteRequest(req);
     const userId = await requireVerifiedUser();
     // Idempotent per day, so this is not a correctness guard — it keeps a
     // scripted loop from hammering the DB. Keyed on the ACCOUNT and nothing

@@ -1,4 +1,4 @@
-import { requireUserId, ok, fail, enforceUserRateLimit } from "@/lib/api";
+import { requireUserId, ok, fail, enforceUserRateLimit, refuseCrossSiteRequest } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 
 // Rows exported per table before the response is cut off. The bound itself is
@@ -13,8 +13,11 @@ import { prisma } from "@/lib/prisma";
 // can page through the API or ask the operator.
 const EXPORT_ROW_LIMIT = 5000;
 
-export async function POST() {
+export async function POST(req: Request) {
   try {
+    // Body-less route: the JSON media-type CSRF rule never ran here. See
+    // refuseCrossSiteRequest (pass 45).
+    refuseCrossSiteRequest(req);
     const userId = await requireUserId();
     // This is the most expensive read in the app (up to 25k rows serialized
     // into one unpaged body), so it needs a limit of its own — per ACCOUNT, and

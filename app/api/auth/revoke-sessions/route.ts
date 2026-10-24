@@ -1,9 +1,12 @@
-import { requireUserId, ok, fail, enforceUserRateLimit } from "@/lib/api";
+import { requireUserId, ok, fail, enforceUserRateLimit, refuseCrossSiteRequest } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 
 // Revoke every active session for the current user (including this one).
-export async function POST() {
+export async function POST(req: Request) {
   try {
+    // Body-less route: without this, a same-site page could log the owner out
+    // of every device. See refuseCrossSiteRequest (pass 45).
+    refuseCrossSiteRequest(req);
     const userId = await requireUserId();
     // Self-service at worst, but it writes two tables — bound the loop.
     const userLimited = await enforceUserRateLimit(userId, "revoke-sessions", 5, 60_000);

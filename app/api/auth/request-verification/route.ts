@@ -1,11 +1,13 @@
-import { requireUserId, ok, fail, enforceUserRateLimit } from "@/lib/api";
+import { requireUserId, ok, fail, enforceUserRateLimit, refuseCrossSiteRequest } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { createToken } from "@/lib/tokens";
 import { sendVerificationEmail, reserveAuthMailSend } from "@/lib/mail";
 
 // Resend the verification email for the current (unverified) user.
-export async function POST() {
+export async function POST(req: Request) {
   try {
+    // Body-less route: see refuseCrossSiteRequest (pass 45).
+    refuseCrossSiteRequest(req);
     const userId = await requireUserId();
     // Per-ACCOUNT cap, and the only leg. The per-IP one it used to carry first
     // refused the whole verify→activate funnel to every neighbour of whoever

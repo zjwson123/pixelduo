@@ -215,6 +215,36 @@ export function tooLarge() {
   return errorResponse({ ok: false, error: "payload-too-large" }, { status: 413 });
 }
 
+// Browser-CSRF guard for the mutating routes that take NO body.
+//
+// Every route that reads a JSON body is covered by readBodyCapped's media-type
+// requirement: a cross-site HTML form cannot send `application/json` (that
+// needs a CORS preflight this app never grants), so the only shape a hostile
+// page can produce is refused before the handler runs. Five state-changing
+// POSTs read no body — checkin, account/export, auth/request-verification,
+// auth/revoke-sessions and account/keys/[id]/revoke — and therefore never
+// reached that check, while their only credential is the session cookie.
+// SameSite=Lax stops a genuinely CROSS-site form POST, but "same-site" is
+// broader than "same-origin": a sibling subdomain of the registrable domain, or
+// any other port on the same host, is same-site and its form POST carries the
+// cookie. That is exactly the residual readBodyCapped's own comment names
+// ("a same-site sibling origin still sends Lax cookies"), so these five were
+// the routes where the stated rule was not enforced at all.
+//
+// Sec-Fetch-Site is the browser's own label for that relationship and cannot be
+// chosen by page script. A request that carries no Sec-Fetch-* header at all is
+// a non-browser client (curl, a script, Playwright's request context) and is
+// left alone: this is a browser-CSRF guard, not a new credential requirement,
+// and the endpoints it covers are documented for API/script use. Legacy
+// browsers that do not send the header fall back to SameSite, as before.
+export function refuseCrossSiteRequest(req: Request): void {
+  const site = req.headers.get("sec-fetch-site");
+  if (site === null || site === "same-origin" || site === "none") return;
+  // `same-site`, `cross-site` and anything unrecognised: the browser is telling
+  // us this request did not originate from one of our own pages.
+  throw new ApiError(403, "cross-site-request: this endpoint accepts same-origin requests only");
+}
+
 export function fail(error: unknown) {
   if (error instanceof ApiError) {
     // A 429 that carries no Retry-After is one a client can only guess at, and

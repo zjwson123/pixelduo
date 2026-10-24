@@ -128,7 +128,7 @@ describe("pass 44 — the data export does not carry the operator's id", () => {
       },
     });
     session(user);
-    const res = await exportPost();
+    const res = await exportPost(new Request("http://localhost/api/account/export", { method: "POST" }));
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       data: {

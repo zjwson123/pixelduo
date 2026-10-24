@@ -308,7 +308,10 @@ describe("pass 38 — check-in and /api/me report the same spendable balance", (
     await dailyCheckin(user.id);
 
     asUser(user.id);
-    const res = await postCheckin();
+    // The route now takes the Request for its Sec-Fetch-Site guard (pass 45);
+    // a request with no Sec-Fetch-* header is a non-browser client and is
+    // allowed, which is exactly the shape this test's intent needs.
+    const res = await postCheckin(new Request("http://localhost/api/checkin", { method: "POST" }));
     const body = (await res.json()) as { balance: number };
     const expected = await spendableBalance(user.id);
     // Pre-fix: body.balance === 142 (the raw column) while every generation
@@ -340,7 +343,7 @@ describe("pass 38 — a truncated data export says so", () => {
       })),
     });
     asUser(user.id);
-    const res = await postExport();
+    const res = await postExport(new Request("http://localhost/api/account/export", { method: "POST" }));
     const body = (await res.json()) as {
       truncated: boolean;
       rowLimit: number;
