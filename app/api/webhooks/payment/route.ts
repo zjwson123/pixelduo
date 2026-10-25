@@ -317,9 +317,30 @@ export async function POST(req: Request) {
             if (event.disputeId !== undefined) {
               const counted = `disputed:${event.disputeId}`;
               const reinstated = `reinstated:${event.disputeId}`;
+              // Migration (pass 46 follow-up): an order whose disputed total
+              // predates the marker column carries that total with an EMPTY
+              // marker array — the old GREATEST() path wrote it and the
+              // migration had no dispute ids to backfill. The first identified
+              // delivery for such an order cannot be told apart from a
+              // re-delivery of the dispute that total already represents, so it
+              // MIGRATES the aggregate instead of adding: the legacy value is a
+              // max over the disputes known then, and taking GREATEST once
+              // adopts the first of them without ever counting the same money
+              // twice. Everything after it adds, and an order that starts at 0
+              // (the normal case) is unaffected — GREATEST(0, amount) === amount.
+              //
+              // Without this, a post-deploy `charge.dispute.updated` for a
+              // dispute the pre-deploy accumulator already held would add its
+              // amount again; 25 + 25 reached the $49.99 basis and revoked 6000
+              // credits over the $24.99 the merchant never lost (probed in
+              // tests/pass46-hardening.test.ts).
               await tx.$queryRaw(Prisma.sql`
                 UPDATE "Order"
-                SET "disputedAmountUsd" = "disputedAmountUsd" + ${event.disputedAmountUsd},
+                SET "disputedAmountUsd" = CASE
+                      WHEN cardinality("disputedAdjustments") = 0
+                      THEN GREATEST("disputedAmountUsd", ${event.disputedAmountUsd})
+                      ELSE "disputedAmountUsd" + ${event.disputedAmountUsd}
+                    END,
                     "disputedAdjustments" = array_append("disputedAdjustments", ${counted})
                 WHERE id = ${order.id}
                   AND NOT (${counted} = ANY("disputedAdjustments"))

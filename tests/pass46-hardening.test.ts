@@ -171,6 +171,49 @@ describe("pass 46 — distinct Stripe disputes accumulate", () => {
     expect(row.disputedAdjustments).toEqual([]);
     expect(row.status).toBe("paid");
   });
+
+  it("does not double-count a dispute the legacy accumulator already holds", async () => {
+    const user = await makeUser();
+    const order = await paidOrder(user.id);
+    // The shape every order with an active dispute had at deploy time: the
+    // aggregate was written by the old GREATEST() path (one dispute's amount)
+    // and the marker column, added by this pass's migration with an empty
+    // DEFAULT, knows nothing about it. A post-deploy delivery for that same
+    // dispute — an `updated`/`funds_withdrawn` event, or an at-least-once retry
+    // under a fresh notification id — then finds no marker, and ADDING its
+    // amount counted the same dispute twice: 25 + 25 reached the $49.99 basis
+    // and revoked 6000 credits over the $24.99 the merchant never lost.
+    await prisma.order.update({ where: { id: order.id }, data: { disputedAmountUsd: 25 } });
+
+    expect(
+      (await send({
+        eventId: `${tag}-legacy-1`,
+        status: "refunded",
+        orderId: order.id,
+        disputedAmountUsd: 25,
+        disputeId: "dp_legacy",
+      })).status,
+    ).toBe(200);
+    let row = await prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(row.disputedAmountUsd).toBe(25);
+    expect(row.disputedAdjustments).toEqual(["disputed:dp_legacy"]);
+    expect(row.status).toBe("paid");
+    expect(await creditsOf(user.id)).toBe(6000);
+
+    // One-shot: a genuinely DIFFERENT dispute still adds to the migrated total.
+    expect(
+      (await send({
+        eventId: `${tag}-legacy-2`,
+        status: "refunded",
+        orderId: order.id,
+        disputedAmountUsd: 20,
+        disputeId: "dp_new",
+      })).status,
+    ).toBe(200);
+    row = await prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(row.disputedAmountUsd).toBe(45);
+    expect(row.status).toBe("paid");
+  });
 });
 
 describe("pass 46 — a full return is measured against what was collected", () => {
