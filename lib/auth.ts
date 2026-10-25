@@ -186,8 +186,12 @@ export const authOptions: NextAuthOptions = {
           return null;
         }
         // Correct password: refund this attempt from both counters. Not
-        // clearLoginFailures, which also clears the 2FA brake — a correct
-        // password must not buy a fresh budget of second-factor guesses.
+        // clearLoginFailures, which would also drop the account-keyed login
+        // counters this attempt is refunding — and a correct password must not
+        // buy a fresh budget of second-factor guesses (the brake is
+        // account-keyed and only a 2FA success or the operator script clears
+        // it; a password reset deliberately does not either — see
+        // lib/login-guard.ts's clearLoginFailures).
         await refundLoginFailures(email, ip);
         if (user.totpEnabled) {
           const pre = (credentials as Record<string, string>).preAuthToken;

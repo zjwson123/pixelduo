@@ -183,10 +183,12 @@ export async function verifyPreAuthToken(
 //
 // Redis-backed and keyed per ACCOUNT: spreading guesses over source addresses
 // must not dilute a counter whose whole purpose is to bound the total. Cleared
-// by a successful second-factor check and by the recovery paths
-// (reset-password → clearLoginFailures; scripts/reset-2fa.ts) — never by a
-// password login, or an attacker who knows the password could buy another 20
-// guesses by signing in with it.
+// by a successful second-factor check and by the operator script
+// (scripts/reset-2fa.ts) — never by a password login, and no longer by a
+// password reset (pass 46): forgot-password is self-service, so a mailbox
+// holder could otherwise buy a fresh 20 guesses per reset and turn this 24h
+// campaign bound back into the 5/min grind it exists to stop. The brake's own
+// window, or the operator script, is the exit.
 export const MAX_2FA_FAILURES = 20;
 export const TWOFA_FAIL_WINDOW_SEC = 24 * 60 * 60;
 

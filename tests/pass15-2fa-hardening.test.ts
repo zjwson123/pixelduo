@@ -213,7 +213,7 @@ describe("cumulative second-factor brake (pass 15)", () => {
     expect(await twofa.isTwoFactorLocked(user.id)).toBe(false);
   });
 
-  it("is not cleared by a password login, but is cleared by the recovery path", async () => {
+  it("is not cleared by a password login or a password reset; the operator script clears it", async () => {
     if (!redisUp) return;
     const user = await makeUser({ totpEnabled: true, totpSecret: SECRET });
     for (let i = 0; i < MAX; i++) await twofa.recordTwoFactorFailure(user.id);
@@ -236,14 +236,18 @@ describe("cumulative second-factor brake (pass 15)", () => {
     expect(authorized).not.toBeNull(); // the password was accepted
     expect(await twofa.isTwoFactorLocked(user.id)).toBe(true);
 
-    // Mailbox ownership (reset-password → clearLoginFailures) and the operator
-    // script (scripts/reset-2fa.ts → clearTwoFactorFailures) are the exits.
+    // A completed password reset clears the login counters and NOTHING else
+    // (pass 46). Forgot-password is self-service, so clearing the brake here
+    // bought a mailbox holder a fresh 20 guesses per reset — exactly the
+    // sustained 6-digit grind this counter exists to bound. The exit is the
+    // brake's own 24h window or the operator script.
     const { clearLoginFailures } = await import("../lib/login-guard");
     await clearLoginFailures(user.email);
-    expect(await twofa.isTwoFactorLocked(user.id)).toBe(false);
-
-    for (let i = 0; i < MAX; i++) await twofa.recordTwoFactorFailure(user.id);
     expect(await twofa.isTwoFactorLocked(user.id)).toBe(true);
+
+    // The operator script's clearing call is still the supported exit
+    // (scripts/reset-2fa.ts), and it also revokes sessions/keys and mails the
+    // owner.
     expect(await twofa.clearTwoFactorFailures(user.id)).toBe(true);
     expect(await twofa.isTwoFactorLocked(user.id)).toBe(false);
   });

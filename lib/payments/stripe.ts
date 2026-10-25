@@ -141,6 +141,12 @@ export class StripeProvider implements PaymentProvider {
       // proves the session was built for this order's price.
       let paidAmountUsd: number | undefined;
       let currency: string | undefined;
+      // What the charge actually collected, after a coupon/discount (and tax,
+      // which Stripe reports inside amount_total). This is the basis a later
+      // refund/dispute must reach to count as a FULL return — see
+      // PaymentWebhookEvent.collectedAmountUsd. amount_subtotal above is the
+      // list price and exists to prove the session was built for this order.
+      let collectedAmountUsd: number | undefined;
       // A per-delivery refund delta, for the route's accumulator. Stripe's own
       // charge.refunded reports CUMULATIVELY (amount_refunded) and is left to
       // fullRefund; a DISPUTE reports only the disputed amount, which can be
@@ -176,6 +182,8 @@ export class StripeProvider implements PaymentProvider {
         type = "paid";
         if (typeof obj.amount_subtotal === "number") paidAmountUsd = obj.amount_subtotal / 100;
         else if (typeof obj.amount_total === "number") paidAmountUsd = obj.amount_total / 100;
+        if (typeof obj.amount_total === "number") collectedAmountUsd = obj.amount_total / 100;
+        else collectedAmountUsd = paidAmountUsd;
         if (typeof obj.currency === "string") currency = obj.currency;
       }
       if (event.type === "charge.refunded") {
@@ -277,6 +285,7 @@ export class StripeProvider implements PaymentProvider {
         reinstatedAmountUsd,
         reinstatedDisputeId,
         paidAmountUsd,
+        collectedAmountUsd,
         currency,
         // Refund webhooks reference the payment intent, not our session id —
         // store the PI id so refunds can resolve the order via providerOrderId.

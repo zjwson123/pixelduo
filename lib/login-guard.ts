@@ -1,9 +1,7 @@
 import Redis from "ioredis";
 import { reserveAuthMailSend, sendSecurityNoticeEmail } from "./mail";
-import { prisma } from "./prisma";
 import { clientIp } from "./rate-limit";
 import { siteBase } from "./site";
-import { clearTwoFactorFailures } from "./twofa";
 
 // Per-account brute-force guard for the password login. Redis-backed; when
 // Redis is unavailable the guard falls back to a process-local counter so a
@@ -287,27 +285,30 @@ async function clearLoginCounters(email: string, ip?: string): Promise<void> {
 
 // Refund a reservation after a correct password: the login counters only.
 //
-// Deliberately NOT clearLoginFailures. That one also clears the cumulative
-// second-factor brake (lib/twofa.ts), and the login path must not: the brake
-// exists to bound a 6-digit grind by someone who already HAS the password, so
-// letting a password sign-in reset it would hand the attacker a fresh 20 guesses
-// whenever the budget ran out — the counter would bound nothing.
+// Nothing on this path may clear the cumulative second-factor brake
+// (lib/twofa.ts): it exists to bound a 6-digit grind by someone who already HAS
+// the password, so letting a password sign-in reset it would hand the attacker
+// a fresh 20 guesses whenever the budget ran out — the counter would bound
+// nothing. Only a successful second-factor check, the brake's own 24h window,
+// or scripts/reset-2fa.ts ends it.
 export async function refundLoginFailures(email: string, ip?: string): Promise<void> {
   await clearLoginCounters(email, ip);
 }
 
-// Clear the guard after a password reset — the account owner's recovery path
-// out of a block. Mailbox ownership is also the documented way out of the 2FA
-// brake, which is otherwise only time-bounded (24h) or clearable by the
-// operator script (scripts/reset-2fa.ts).
+// Clear the login counters after a completed password reset — the account
+// owner's recovery path out of a brute-force lockout.
+//
+// Deliberately does NOT clear the cumulative second-factor brake (pass 46).
+// Forgot-password is self-service, so a mailbox holder can reset the password
+// as often as they like; clearing the account-keyed brake there handed exactly
+// that attacker a fresh 20 guesses at the 6-digit code per reset, turning the
+// 24h campaign bound back into the 5/min grind it exists to stop (lib/twofa.ts).
+// The reset already revokes the attacker's sessions and API keys, so the account
+// is not left with them while the brake waits: recovery from the brake is its
+// own 24h window, or scripts/reset-2fa.ts (operator access, which mails the
+// owner).
 export async function clearLoginFailures(email: string, ip?: string): Promise<void> {
   await clearLoginCounters(email, ip);
-  // The brake is keyed by user id, so it takes one lookup to reach it from here.
-  // Best effort: an unreachable database must not fail the login refund above.
-  const user = await prisma.user
-    .findUnique({ where: { email: email.toLowerCase().trim() }, select: { id: true } })
-    .catch(() => null);
-  if (user) await clearTwoFactorFailures(user.id);
 }
 
 export async function isLoginBlocked(email: string, ip?: string): Promise<boolean> {

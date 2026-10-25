@@ -82,7 +82,21 @@ export interface PaymentWebhookEvent {
   // cheapest one. Undefined means the payload did not state it: recorded, not
   // treated as a mismatch, because refusing a legitimate fulfillment (money
   // taken, no credits) is the worse of the two failures.
+  //
+  // This is the PRE-DISCOUNT subtotal, deliberately: a coupon the operator
+  // applied is not an underpayment. The amount actually charged is
+  // `collectedAmountUsd` below, which is what a refund/dispute must be measured
+  // against.
   paidAmountUsd?: number;
+  // For "paid": the money the provider took for this order, after discounts
+  // (and including tax for Stripe), recorded on the order at fulfillment so the
+  // refund/dispute accumulator can measure a full return against what was
+  // CAPTURED rather than against the list price (pass 46). A fully discounted
+  // charge that is later disputed in full must revoke the credits and the tier;
+  // comparing against the list price left both alive. For Paddle the net
+  // subtotal is the merchant's own money and matches the net adjustment deltas,
+  // so it is the same number as paidAmountUsd; for Stripe it is amount_total.
+  collectedAmountUsd?: number;
   currency?: string;
   raw: unknown;
 }

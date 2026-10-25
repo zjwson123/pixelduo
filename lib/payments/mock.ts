@@ -42,6 +42,7 @@ export class MockProvider implements PaymentProvider {
         // Carried through so the route's amount/currency binding is reachable
         // in tests and demos, exactly as the real providers populate it.
         paidAmountUsd?: number;
+        collectedAmountUsd?: number;
         currency?: string;
         raw?: unknown;
       };
@@ -61,6 +62,8 @@ export class MockProvider implements PaymentProvider {
         reinstatedDisputeId:
           typeof body.reinstatedDisputeId === "string" ? body.reinstatedDisputeId : undefined,
         paidAmountUsd: typeof body.paidAmountUsd === "number" ? body.paidAmountUsd : undefined,
+        collectedAmountUsd:
+          typeof body.collectedAmountUsd === "number" ? body.collectedAmountUsd : undefined,
         currency: typeof body.currency === "string" ? body.currency : undefined,
         raw: body.raw ?? body,
       };

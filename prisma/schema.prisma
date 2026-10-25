@@ -263,15 +263,41 @@ model Order {
   // own amount here and promotes to a full revoke once the total reaches
   // amountUsd. Existing rows read 0, the correct starting value.
   refundedAmountUsd Float    @default(0)
-  // Money returned by a chargeback/dispute, cumulative per payment (pass 41).
-  // Stripe reports refunds and disputes independently — charge.refunded carries
-  // `amount_refunded` only, charge.dispute.created carries only the disputed
-  // amount — so keeping just one number let a partial refund plus a partial
-  // dispute of the remainder return the full price without either figure
-  // reaching it. The webhook sums this with refundedAmountUsd when deciding
-  // whether the order was returned in full. Paddle's adjustments (including
-  // chargebacks) stay in refundedAmountUsd, so this column is 0 for them.
+  // Money returned by chargebacks/disputes (pass 41). Stripe reports refunds and
+  // disputes independently — charge.refunded carries `amount_refunded` only,
+  // charge.dispute.created carries only the disputed amount — so keeping just one
+  // number let a partial refund plus a partial dispute of the remainder return
+  // the full price without either figure reaching it. The webhook sums this with
+  // refundedAmountUsd when deciding whether the order was returned in full.
+  // Paddle's adjustments (including chargebacks) stay in refundedAmountUsd, so
+  // this column is 0 for them.
+  //
+  // Each DISTINCT Stripe dispute is added once (pass 46): a dispute object's
+  // `amount` is that dispute's own amount, not a running total for the charge,
+  // and a charge may carry more than one dispute (the issuer refiles under a
+  // different reason code, or bundles several charges into one chargeback).
+  // GREATEST() kept only the largest, so two $25 disputes never reached a $49.99
+  // price and the credits/tier survived the full return.
   disputedAmountUsd Float    @default(0)
+  // Which disputes have already been added, as `disputed:<disputeId>` markers.
+  // A re-delivery of the same dispute (created/updated/funds_withdrawn, or an
+  // at-least-once retry) must not add its amount again; a DIFFERENT dispute id
+  // on the same charge must. Deliveries without an id keep the old
+  // GREATEST()-shaped, dedupe-less write (see app/api/webhooks/payment).
+  disputedAdjustments String[] @default([])
+  // What the provider actually collected for this order, when it differs from
+  // the list price (pass 46). A discounted checkout — the operator's own
+  // goodwill coupon, a customer credit — collects less than Order.amountUsd,
+  // while this app still grants the order's full credits. Promotion to a full
+  // return must compare against what was captured, not against the price tag:
+  // otherwise a dispute/refund of the ENTIRE charge stayed below the list price
+  // and left the customer with the credits and the paid tier for money that had
+  // all been returned. Stripe's `amount_total` (after discounts, incl. tax) is
+  // the charged amount; Paddle's net `subtotal`, which is what the merchant
+  // receives and what its adjustment deltas are measured in. Null for the mock
+  // provider and for orders fulfilled before this column existed; the webhook
+  // then falls back to Order.amountUsd.
+  collectedAmountUsd Float?
   // Which dispute reinstatements have already been subtracted, as
   // `reinstated:<disputeId>` markers (pass 43). Stripe reports a won dispute
   // twice — `charge.dispute.funds_reinstated` and `charge.dispute.closed` with

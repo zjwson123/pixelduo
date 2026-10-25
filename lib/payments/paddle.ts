@@ -176,12 +176,18 @@ export class PaddleProvider implements PaymentProvider {
         const details = data.details as { totals?: { subtotal?: string | number } } | undefined;
         const totals = (details?.totals ?? data.totals) as { subtotal?: string | number } | undefined;
         const subtotalNum = totals?.subtotal !== undefined ? Number(totals.subtotal) : NaN;
+        const paidAmountUsd = Number.isFinite(subtotalNum) ? subtotalNum / 100 : undefined;
         return {
           provider: this.name,
           eventId: parsed.event_id,
           type: "paid",
           orderId: typeof customData?.orderId === "string" ? customData.orderId : undefined,
-          paidAmountUsd: Number.isFinite(subtotalNum) ? subtotalNum / 100 : undefined,
+          paidAmountUsd,
+          // Paddle is the merchant of record: the net subtotal is what the
+          // seller receives and the unit the adjustment deltas below use, so it
+          // is the amount a full return must reach (see the event type's
+          // collectedAmountUsd note; tax is remitted by Paddle, never ours).
+          collectedAmountUsd: paidAmountUsd,
           currency: typeof data.currency_code === "string" ? data.currency_code : undefined,
           providerOrderId: typeof data.id === "string" ? data.id : undefined,
           raw: parsed,

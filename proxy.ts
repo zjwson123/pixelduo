@@ -111,12 +111,29 @@ async function bucketFor(req: NextRequest, ip: string, allowBearer: boolean): Pr
       // decode() is what next-auth itself uses to read the session cookie
       // (salt ""), and it returns null on a token that does not verify.
       const payload = await decode({ token: raw, secret });
-      const id = payload?.uid ?? payload?.sub;
-      if (typeof id === "string" && id) {
-        // A token whose sv is not a number is one no current version mints;
-        // "na" keeps it in a bucket of its own rather than the live session's.
-        const sv = typeof payload?.sv === "number" ? String(payload.sv) : "na";
-        return `u:${id}:${sv}`;
+      // A 2FA-PENDING cookie is authorized for NOTHING: every route guard
+      // refuses a `totpPending` session by design (lib/api.ts), so the only
+      // thing it can reach is the 2FA endpoints. It must therefore not be keyed
+      // to the account at all (pass 46). It is minted at the CURRENT
+      // sessionVersion, so it shared `u:<id>:<sv>` with the owner's live
+      // session: anyone who knew the password (no second factor needed) could
+      // sign in once to get a partial cookie and then spend the owner's whole
+      // 300/min API, 120/min page and 40/min auth budgets — the auth bucket is
+      // also what the owner's own TOTP completion and revoke-sessions calls are
+      // charged to, so the owner could not even finish logging in or revoke the
+      // password they had just leaked. A pending cookie falls through to the
+      // Bearer/address handling below: on an API path a real Bearer key still
+      // gets its own bucket, and otherwise the request is charged to the source
+      // address — which is all a pending session is: unauthenticated traffic
+      // that happens to carry a cookie.
+      if (payload?.totpPending !== true) {
+        const id = payload?.uid ?? payload?.sub;
+        if (typeof id === "string" && id) {
+          // A token whose sv is not a number is one no current version mints;
+          // "na" keeps it in a bucket of its own rather than the live session's.
+          const sv = typeof payload?.sv === "number" ? String(payload.sv) : "na";
+          return `u:${id}:${sv}`;
+        }
       }
     } catch {
       // fall through: an unverifiable cookie is an anonymous caller

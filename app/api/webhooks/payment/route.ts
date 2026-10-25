@@ -185,11 +185,22 @@ export async function POST(req: Request) {
           );
           if (!result.alreadyPaid) {
             const user = await tx.user.findUnique({ where: { id: order.userId }, select: { email: true } });
+            // Record what was actually captured while the order is still the
+            // one this event fulfilled (pass 46). The promotion below needs it:
+            // a discounted checkout collects less than the list price, and a
+            // dispute of the ENTIRE charge must still revoke the credits/tier
+            // rather than stopping short of a price tag nobody paid. Kept in
+            // the same transaction as the grant, so a paid event either lands
+            // with its basis or not at all.
+            const patch: { providerOrderId?: string; collectedAmountUsd?: number } = {};
             if (event.providerOrderId && order.providerOrderId !== event.providerOrderId) {
-              await tx.order.update({
-                where: { id: order.id },
-                data: { providerOrderId: event.providerOrderId },
-              });
+              patch.providerOrderId = event.providerOrderId;
+            }
+            if (event.collectedAmountUsd !== undefined) {
+              patch.collectedAmountUsd = event.collectedAmountUsd;
+            }
+            if (Object.keys(patch).length > 0) {
+              await tx.order.update({ where: { id: order.id }, data: patch });
             }
             return {
               kind: "receipt" as const,
@@ -270,11 +281,11 @@ export async function POST(req: Request) {
           // Stripe's ABSOLUTE measurements (pass 41). charge.refunded carries
           // the CUMULATIVE amount refunded on the charge (the same running
           // total on every re-delivery), and a dispute carries only its own
-          // amount; both are maxima, not deltas. They are kept in separate
-          // columns because Stripe reports them independently: a $5 goodwill
-          // refund followed by a $44.99 dispute of the remaining balance
-          // returned all $49.99 while neither number on its own reached the
-          // price — the accumulator stood at $44.99 and no revoke ever fired.
+          // amount; both are kept in separate columns because Stripe reports
+          // them independently: a $5 goodwill refund followed by a $44.99
+          // dispute of the remaining balance returned all $49.99 while neither
+          // number on its own reached the price — the accumulator stood at
+          // $44.99 and no revoke ever fired.
           if (event.refundCumulativeUsd !== undefined) {
             await tx.$queryRaw(Prisma.sql`
               UPDATE "Order"
@@ -283,28 +294,44 @@ export async function POST(req: Request) {
             `);
           }
           if (event.disputedAmountUsd !== undefined) {
-            // A dispute whose reinstatement was already recorded must not come
-            // back into the accumulator. Stripe does not guarantee event ORDER:
-            // a retried `charge.dispute.created` can be delivered after the same
-            // dispute was won (`funds_reinstated` / `closed/won`), and the
-            // marker then says the money already returned. Without the guard the
-            // lost dispute re-entered the total and the next genuine partial
-            // refund promoted the order to a full revoke — credits and tier gone
-            // for money the merchant kept (pass 43 follow-up, probed with the
-            // deliveries reversed). No marker / no id keeps the unconditional
-            // write, as before.
-            const alreadyReturned =
-              event.disputeId !== undefined ? `reinstated:${event.disputeId}` : null;
-            await tx.$queryRaw(Prisma.sql`
-              UPDATE "Order"
-              SET "disputedAmountUsd" = GREATEST("disputedAmountUsd", ${event.disputedAmountUsd})
-              WHERE id = ${order.id}
-              ${
-                alreadyReturned
-                  ? Prisma.sql`AND NOT (${alreadyReturned} = ANY("disputeReinstatements"))`
-                  : Prisma.empty
-              }
-            `);
+            // A dispute's `amount` is THAT dispute's own amount, not a running
+            // total for the charge (pass 46). A charge can carry more than one
+            // dispute — the issuer refiles under a different reason code, or
+            // bundles several charges into one chargeback — and the GREATEST()
+            // this used to do kept only the largest: two $25 disputes against a
+            // $49.99 order left the accumulator at $25, so a payment returned in
+            // full never promoted and the credits and paid tier survived.
+            //
+            // With a dispute id the marker makes each DISTINCT dispute count
+            // once while still absorbing a re-delivery of the same one
+            // (created/updated/funds_withdrawn, an at-least-once retry). A
+            // dispute whose reinstatement was already recorded must not come
+            // back into the accumulator at all: Stripe does not guarantee event
+            // ORDER, so a retried `charge.dispute.created` can arrive after the
+            // same dispute was won, and re-adding it made the next genuine
+            // partial refund look like a full return (pass 43 follow-up, probed
+            // with the deliveries reversed). Without an id — a relay-shaped
+            // payload — a re-delivery is indistinguishable from a second
+            // dispute, so the dedupe-less maximum stays; adding unconditionally
+            // would let one retry count twice and over-revoke.
+            if (event.disputeId !== undefined) {
+              const counted = `disputed:${event.disputeId}`;
+              const reinstated = `reinstated:${event.disputeId}`;
+              await tx.$queryRaw(Prisma.sql`
+                UPDATE "Order"
+                SET "disputedAmountUsd" = "disputedAmountUsd" + ${event.disputedAmountUsd},
+                    "disputedAdjustments" = array_append("disputedAdjustments", ${counted})
+                WHERE id = ${order.id}
+                  AND NOT (${counted} = ANY("disputedAdjustments"))
+                  AND NOT (${reinstated} = ANY("disputeReinstatements"))
+              `);
+            } else {
+              await tx.$queryRaw(Prisma.sql`
+                UPDATE "Order"
+                SET "disputedAmountUsd" = GREATEST("disputedAmountUsd", ${event.disputedAmountUsd})
+                WHERE id = ${order.id}
+              `);
+            }
           }
           // A won dispute (or reinstated funds) gives the money back, and its
           // amount must leave the disputed total or a later small refund looks
@@ -351,15 +378,39 @@ export async function POST(req: Request) {
           // One promotion decision, after every write above, over the sum of
           // both columns. A refund and a dispute on the same payment are two
           // halves of the money returned, not two competing totals.
+          //
+          // The basis is what was CAPTURED, not the list price (pass 46): a
+          // checkout the operator discounted (a Stripe coupon or customer
+          // credit — the documented goodwill flow) collects less than
+          // Order.amountUsd while this app still grants the order's full
+          // credits, so a dispute/refund of the ENTIRE charge stopped short of
+          // the price tag and left the customer holding both the credits and
+          // the paid tier. Read fresh here, under the row locks the statements
+          // above took: a paid event that committed while this delivery waited
+          // is exactly the case where the recorded basis matters.
+          //
+          // `Math.min` with the list price, because the two directions are not
+          // symmetric: a discount LOWERS what a full return must reach, while a
+          // tax-inclusive total RAISES it above the merchant's own revenue —
+          // promoting on the net-only refund of a tax-inclusive Stripe charge is
+          // the fraud-safe direction (the merchant kept nothing), and it cannot
+          // over-revoke on money we never booked as revenue.
           const totals = await tx.order.findUnique({
             where: { id: order.id },
-            select: { refundedAmountUsd: true, disputedAmountUsd: true },
+            select: {
+              refundedAmountUsd: true,
+              disputedAmountUsd: true,
+              amountUsd: true,
+              collectedAmountUsd: true,
+            },
           });
+          const listPrice = totals?.amountUsd ?? order.amountUsd;
+          const fullBasis = Math.min(totals?.collectedAmountUsd ?? listPrice, listPrice);
           if (
             fullRefund !== true &&
             event.reinstatedAmountUsd === undefined &&
             totals &&
-            totals.refundedAmountUsd + totals.disputedAmountUsd >= order.amountUsd - 0.005
+            totals.refundedAmountUsd + totals.disputedAmountUsd >= fullBasis - 0.005
           ) {
             fullRefund = true;
           }
