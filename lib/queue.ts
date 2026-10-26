@@ -2,7 +2,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "./prisma";
 import { estimateGenerationCost, estimateModelCost, type ModelId, type Quality } from "./cost";
 import { addCreditsTx, spendCreditsTx, refundCreditsTx, dbNow, resolveRolloverCycleOrders, type SpendConsumption } from "./ledger";
-import { captureError } from "./observability";
+import { captureError, redactSensitive } from "./observability";
 import { getModel } from "./model-registry";
 import { getStorage } from "./storage";
 
@@ -524,7 +524,18 @@ export async function failJob(
     // status flip, the refund and the reclaim. A provider can put one in an
     // error body; errText's code-point slice preserves it.
     const repaired = error.includes("\u0000") ? error.replaceAll("\u0000", "\uFFFD") : error;
-    const errorText = repaired.isWellFormed() ? repaired : `${repaired.toWellFormed()} [ill-formed text repaired]`;
+    // Provider-controlled text is what lands in this column, and /api/jobs and
+    // the v1 poll return it to the job's owner verbatim (pass 47). The worker
+    // sends its provider credential in the request's Authorization header; a
+    // gateway that echoes request material in a 4xx body — a debug page, a
+    // compromised relay — would otherwise put that credential in a customer's
+    // job history and in the container log. `redactSensitive` is the same mask
+    // captureError applies to Sentry (Bearer tokens, sk-… values, presigned
+    // params, addresses), applied here so the stored value is safe at every
+    // reader. The NUL/surrogate repair stays, and its marker is appended after
+    // — this is a diagnostic, not user input, so it must not throw.
+    const safe = redactSensitive(repaired);
+    const errorText = safe.isWellFormed() ? safe : `${safe.toWellFormed()} [ill-formed text repaired]`;
     const nextAttempts = job.attempts + 1;
     // The observation must be part of the CAS, not only of the read above (pass
     // 39): a peer poll claim rewrites worker/heartbeatAt but leaves

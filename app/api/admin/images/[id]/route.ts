@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/admin";
-import { ok, fail, enforceUserRateLimit, refuseNul } from "@/lib/api";
+import { ok, fail, enforceUserRateLimit, refuseNul, errorResponse } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { getStorage } from "@/lib/storage";
 import { contentTypeFromKey, sniffContentType } from "@/lib/media-type";
+import { acquireFileStreamSlot, createGuardedBody } from "@/lib/stream-limit";
 
 // Preview one image for moderation. The admin console used to list id/user/
 // model/prompt without rendering the image, and /api/files only authorizes its
@@ -12,6 +13,7 @@ import { contentTypeFromKey, sniffContentType } from "@/lib/media-type";
 // same bytes to an admin, never caches them, and is rate-limited per operator.
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
+  let releaseSlot: (() => void) | null = null;
   try {
     refuseNul(id);
     const adminId = await requireAdmin();
@@ -31,36 +33,29 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     // The first chunk is pulled only to sniff the Content-Type from the bytes
     // (a mid-file preview is not a thing here — there is no Range support), and
     // is replayed ahead of the rest by the consumer-driven stream below.
+    // The same concurrency ceiling as /api/files (pass 47): the preview
+    // streams a delivered object (a video can be up to 100 MB) and a stolen
+    // admin session could otherwise open responses and never read them until
+    // the web process runs out of descriptors. The console only needs a page of
+    // thumbnails at a time, far below the per-owner cap.
+    const acquired = acquireFileStreamSlot(`admin:${adminId}`);
+    if (!acquired) {
+      return errorResponse(
+        { ok: false, error: "too-many-streams" },
+        { status: 429, headers: { "Retry-After": "5" } },
+      );
+    }
+    releaseSlot = acquired;
     const streamed = await getStorage().getStream(image.url);
-    if (!streamed) return fail(new Error("image-not-found"));
+    if (!streamed) {
+      releaseSlot();
+      releaseSlot = null;
+      return fail(new Error("image-not-found"));
+    }
     const reader = streamed.stream.getReader();
     const first = await reader.read();
     const head = first.done ? new Uint8Array(0) : first.value!;
-    let headSent = false;
-    const body = new ReadableStream<Uint8Array>({
-      async pull(controller) {
-        try {
-          if (!headSent) {
-            headSent = true;
-            if (head.byteLength > 0) {
-              controller.enqueue(head);
-              return;
-            }
-          }
-          const { done, value } = await reader.read();
-          if (done) {
-            controller.close();
-            return;
-          }
-          if (value) controller.enqueue(value);
-        } catch (e) {
-          controller.error(e);
-        }
-      },
-      cancel() {
-        reader.cancel().catch(() => undefined);
-      },
-    });
+    const body = createGuardedBody(reader, head, acquired);
     return new NextResponse(body, {
       headers: {
         "Content-Type": sniffContentType(head) ?? contentTypeFromKey(image.url) ?? "application/octet-stream",
@@ -72,6 +67,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
       },
     });
   } catch (e) {
+    releaseSlot?.();
     return fail(e);
   }
 }

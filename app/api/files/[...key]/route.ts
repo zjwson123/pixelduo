@@ -1,9 +1,10 @@
-import { requireUserId, ApiError, enforceRateLimit, enforceUserRateLimit, fail, refuseNul } from "@/lib/api";
+import { requireUserId, ApiError, enforceRateLimit, enforceUserRateLimit, fail, refuseNul, errorResponse } from "@/lib/api";
 import { authenticateApiKey } from "@/lib/apikey";
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getStorage } from "@/lib/storage";
 import { sniffContentType, contentTypeFromKey } from "@/lib/media-type";
+import { acquireFileStreamSlot, createGuardedBody } from "@/lib/stream-limit";
 import type { StorageStream } from "@/lib/storage";
 
 // Error bodies need the same no-store as the success path, for the reason
@@ -151,6 +152,12 @@ export async function GET(req: Request, { params }: { params: Promise<{ key: str
   let obj!: StorageStream;
   let reader!: ReadableStreamDefaultReader<Uint8Array>;
   let head!: Uint8Array;
+  // The concurrency slot is acquired just before the storage handle is opened
+  // and handed to the response body, which releases it on completion, cancel,
+  // read error or the idle deadline. Any path that does not hand it over must
+  // release it here or in the catch.
+  let releaseSlot: (() => void) | null = null;
+  let slot!: () => void;
   let range: { start: number; end: number } | null = null;
   let total: number | undefined;
   try {
@@ -194,13 +201,35 @@ export async function GET(req: Request, { params }: { params: Promise<{ key: str
       if (parsed !== "ignore") range = parsed;
     }
 
+    // Bound concurrent streams BEFORE the object is opened (pass 47). Every
+    // response below holds a storage handle (a local fd or an S3 socket) and a
+    // client socket until the consumer finishes, cancels, or the idle deadline
+    // fires — the rate limiters count requests per minute, not streams in
+    // flight, so an account that sends requests and never reads the bodies
+    // could hold both until the process runs out of descriptors. The slot is
+    // per account and per process; a refusal is a retryable 429 before any
+    // storage work happens.
+    const acquired = acquireFileStreamSlot(uid);
+    if (!acquired) {
+      return errorResponse(
+        { ok: false, error: "too-many-streams" },
+        { status: 429, headers: { "Retry-After": "5" } },
+      );
+    }
+    releaseSlot = acquired;
+    slot = acquired;
     const streamed = await getStorage().getStream(key, range ?? undefined);
-    if (!streamed) return new NextResponse("not found", { status: 404, headers: NO_STORE });
+    if (!streamed) {
+      releaseSlot();
+      releaseSlot = null;
+      return new NextResponse("not found", { status: 404, headers: NO_STORE });
+    }
     obj = streamed;
     reader = obj.stream.getReader();
     const first = await reader.read();
     head = first.done ? new Uint8Array(0) : first.value!;
   } catch (e) {
+    releaseSlot?.();
     return fail(e);
   }
 
@@ -233,34 +262,10 @@ export async function GET(req: Request, { params }: { params: Promise<{ key: str
     headers["Content-Disposition"] = `attachment; filename="${baseName}"`;
   }
 
-  let headSent = false;
-  const body = new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      try {
-        // The sniffed first chunk is replayed first; every later pull hands out
-        // exactly one chunk, so at most one chunk plus the socket's own buffer
-        // is ever resident.
-        if (!headSent) {
-          headSent = true;
-          if (head.byteLength > 0) {
-            controller.enqueue(head);
-            return;
-          }
-        }
-        const { done, value } = await reader.read();
-        if (done) {
-          controller.close();
-          return;
-        }
-        if (value) controller.enqueue(value);
-      } catch (e) {
-        controller.error(e);
-      }
-    },
-    cancel() {
-      reader.cancel().catch(() => undefined);
-    },
-  });
+  // The guarded body replays the sniffed first chunk, releases the concurrency
+  // slot exactly once (completion, cancel, read error, or an idle deadline that
+  // retires a stream nobody is consuming), and cancels the upstream handle.
+  const body = createGuardedBody(reader, head, slot);
 
   return new NextResponse(body, {
     // 206 only when the bytes really are a slice: a range we chose to ignore

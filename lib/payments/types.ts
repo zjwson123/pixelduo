@@ -94,8 +94,10 @@ export interface PaymentWebhookEvent {
   // CAPTURED rather than against the list price (pass 46). A fully discounted
   // charge that is later disputed in full must revoke the credits and the tier;
   // comparing against the list price left both alive. For Paddle the net
-  // subtotal is the merchant's own money and matches the net adjustment deltas,
-  // so it is the same number as paidAmountUsd; for Stripe it is amount_total.
+  // subtotal (subtotal minus discount; tax is remitted by Paddle) is the
+  // merchant's own money and matches the net adjustment deltas — the raw
+  // `subtotal` is documented as pre-discount, so it is NOT this number when a
+  // discount applied (pass 47); for Stripe it is amount_total.
   collectedAmountUsd?: number;
   currency?: string;
   raw: unknown;

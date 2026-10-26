@@ -7,7 +7,7 @@ import { analyzeAllImagesSequentially, moderationRequested } from "../lib/safety
 import { getVisionConfig } from "../lib/keys";
 import { getStorage, newStorageKey } from "../lib/storage";
 import { concatInputsWithinBudget, concatVideos } from "../lib/video-concat";
-import { initObservability, captureError } from "../lib/observability";
+import { initObservability, captureError, redactSensitive } from "../lib/observability";
 import { bakeWatermark } from "../lib/watermark";
 import { storeContentType } from "../lib/media-type";
 import { getModel } from "../lib/model-registry";
@@ -305,7 +305,7 @@ export async function processImageJob(job: {
     // reclaimStoredArtifact: a checkpoint that still names a key belongs to the
     // retry that will resume from it, so nothing live is touched.
     for (const k of storedThisAttempt) await reclaimStoredArtifact(job.id, k);
-    console.error(`[worker ${workerId}] job ${job.id} failed: ${msg}`);
+    console.error(`[worker ${workerId}] job ${job.id} failed: ${redactSensitive(msg)}`);
     captureError(e, { jobId: job.id, model: job.model, quality: job.quality });
   } finally {
     clearInterval(hb);
@@ -557,7 +557,7 @@ export async function processVideoJob(job: {
       await failJob(job.id, "video generation succeeded without a video URL", { terminal: true, worker: workerId });
     } else if (status.status === "failed") {
       await failJob(job.id, `video generation failed: ${status.error ?? "unknown"}`, { terminal: true, worker: workerId });
-      console.error(`[worker ${workerId}] job ${job.id} video failed: ${status.error}`);
+      console.error(`[worker ${workerId}] job ${job.id} video failed: ${redactSensitive(status.error ?? "unknown")}`);
     } else {
       // Still pending/running (or a transient poll error) — re-arm the next poll.
       await schedulePoll(job.id, workerId);
@@ -579,7 +579,7 @@ export async function processVideoJob(job: {
       // reclaimStoredArtifact).
       await reclaimStoredArtifact(job.id, storedKey);
     }
-    console.error(`[worker ${workerId}] job ${job.id} failed: ${msg}`);
+    console.error(`[worker ${workerId}] job ${job.id} failed: ${redactSensitive(msg)}`);
     captureError(e, { jobId: job.id, model: job.model });
   } finally {
     clearInterval(hb);

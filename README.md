@@ -32,7 +32,7 @@
 - NextAuth v4（邮箱+密码 + **OAuth**，JWT 会话）、bcrypt；**邮箱验证 + 密码找回**（单次令牌存 SHA-256 哈希，24h/1h 过期；注册送 30 积分改为验证后发放，未验证账号禁止生图/签到/下单——防薅羊毛）；**登录防爆破**（Redis 按账号 10 次失败/15 分钟锁定）；**会话吊销**（`User.sessionVersion`，重置密码或 `POST /api/auth/revoke-sessions` 后旧 JWT 全部失效）；**TOTP 双因素认证**（otplib + QR，10 个一次性备用码，两步登录，部分会话被 API/页面级拦截，5 分钟单次预认证票据换真会话）；邮件走 `lib/mail.ts`：未配 `SMTP_URL` 时开发模式打印到服务日志，生产接 SES/SendGrid/Resend 等 SMTP
 - 支付壳子：`PaymentProvider` 接口 + MockProvider / **Stripe** / **Paddle**（支付宝/微信待主体接入）
 - **存储抽象**：`STORAGE_DRIVER=local`（私有目录 + 鉴权路由）或 `s3`（MinIO/R2/S3 + 预签名 URL）
-- **限流**：路由级权威限制走 **Redis 全局计数**（`REDIS_URL`，生成 20/min、注册 10/h、结账 10/min、助手 30/min；无 Redis 自动回退单机内存）；中间件内存粗筛（auth 40/min、API 300/min per IP —— 已登录请求按账号分桶，不再和同 IP 上未登录流量抢配额）
+- **限流**：路由级权威限制走 **Redis 全局计数**（`REDIS_URL`，生成 20/min、注册 10/h、结账 10/min、助手 30/min；无 Redis 自动回退单机内存）；中间件内存粗筛（auth 40/min、API 300/min per IP —— 已登录请求按账号分桶，不再和同 IP 上未登录流量抢配额）；**文件流并发上限**：`/api/files` 每账号 128 条、每实例 512 条并发响应，120 秒无读取自动回收（429 `too-many-streams` + `Retry-After`），防止“只发请求不读响应”耗尽进程的 fd/socket
 - **Worker 健壮性**：指数退避重试（默认 3 次）、心跳、卡死恢复、终态失败 = 死信 + 退款
 - **监控告警**：Sentry（`@sentry/nextjs`），DSN 未配置时 no-op；API 500 自动上报（业务性错误过滤），worker/cron 异常带上下文上报
 - **备份**：compose `backup` 服务每日 pg_dump（`-Fc` 自定义格式）到 `./backups/`，保留 14 份；`backup-objects` 服务每日把用户图片镜像到 `./backups/objects/`（保留 N 份，可配第二桶异地备份）；恢复演练脚本 `scripts/restore-objects.sh`；手动备份 `./scripts/backup.sh` / `./scripts/backup-objects.sh`

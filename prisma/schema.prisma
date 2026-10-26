@@ -293,10 +293,12 @@ model Order {
   // otherwise a dispute/refund of the ENTIRE charge stayed below the list price
   // and left the customer with the credits and the paid tier for money that had
   // all been returned. Stripe's `amount_total` (after discounts, incl. tax) is
-  // the charged amount; Paddle's net `subtotal`, which is what the merchant
-  // receives and what its adjustment deltas are measured in. Null for the mock
-  // provider and for orders fulfilled before this column existed; the webhook
-  // then falls back to Order.amountUsd.
+  // the charged amount; Paddle's `subtotal` MINUS its `discount` total, which is
+  // what the merchant receives net of tax and what its adjustment deltas are
+  // measured in (pass 47 — Paddle documents `subtotal` as "before discount,
+  // tax, and deductions", so the raw subtotal is the list price when a coupon
+  // applied). Null for the mock provider and for orders fulfilled before this
+  // column existed; the webhook then falls back to Order.amountUsd.
   collectedAmountUsd Float?
   // Which dispute reinstatements have already been subtracted, as
   // `reinstated:<disputeId>` markers (pass 43). Stripe reports a won dispute

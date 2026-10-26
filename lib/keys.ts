@@ -33,14 +33,52 @@ export function _resetKeysCacheForTests(): void {
   cached = undefined;
 }
 
-function firstKey(gatewayName: string): string | undefined {
-  const cfg = loadCcProxyConfig();
-  const gw = cfg?.gateways?.[gatewayName];
-  return gw?.api_keys?.find((k) => k.length > 0);
+const MODELVERSE_DEFAULT_BASE = "https://api.modelverse.cn/v1";
+
+// ModelVerse's credential and endpoint are ONE PAIR, from ONE source — the same
+// rule arkSource/aliyunSource below apply (passes 37/39).
+//
+// getModelVerseKey() used to return the env key OR the `modelverse` gateway's
+// key while both call sites in lib/providers sent it to the hard-coded vendor
+// host. For an operator whose `modelverse` gateway is a relay, that transmitted
+// the relay's own credential to api.modelverse.cn on every gpt generation/edit
+// — the exact mispairing the ark and aliyun sources document — and relay
+// deployments could not work at all. The env key always goes to the vendor
+// (that is the only endpoint its name claims); a gateway key borrows the
+// gateway's base_url, which is what the vision path already does.
+//
+// The base is the URL the provider appends `/images/generations` and
+// `/images/edits` to. The gateway's usual value is an OpenAI-compatible
+// `…/v1`; a bare origin gets `/v1`, while a value that already names a chat or
+// image ENDPOINT is refused rather than mangled into `…/chat/completions/images/
+// generations` (and, more importantly, rather than sent a key it never
+// accepts). A gateway that names no endpoint at all keeps the vendor default,
+// matching arkSource's handling of a gateway without base_url.
+function modelverseSource(): { key: string; baseUrl: string } | null {
+  const envKey = process.env.MODELVERSE_IMAGE_API_KEY || undefined;
+  if (envKey) return { key: envKey, baseUrl: MODELVERSE_DEFAULT_BASE };
+  const gw = loadCcProxyConfig()?.gateways?.modelverse;
+  const key = gw?.api_keys?.find((k) => k.length > 0);
+  if (!key) return null;
+  const raw = gw?.base_url?.trim();
+  if (!raw) return { key, baseUrl: MODELVERSE_DEFAULT_BASE };
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+    const path = url.pathname.replace(/\/+$/, "");
+    if (/\/(chat\/completions|images\/(generations|edits))$/.test(path)) return null;
+    return { key, baseUrl: `${url.origin}${path || "/v1"}` };
+  } catch {
+    return null;
+  }
 }
 
 export function getModelVerseKey(): string | undefined {
-  return process.env.MODELVERSE_IMAGE_API_KEY || firstKey("modelverse");
+  return modelverseSource()?.key;
+}
+
+export function getModelVerseConfig(): { key: string; baseUrl: string } | null {
+  return modelverseSource();
 }
 
 const ARK_DEFAULT_BASE = "https://ark.cn-beijing.volces.com/api/v3/images/generations";

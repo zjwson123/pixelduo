@@ -66,6 +66,11 @@ through `queued → polling → done` (async provider task, typically 1–3 min)
 ## Limits & errors
 
 - Rate limit: 20 requests/minute per key (HTTP 429 with `Retry-After`)
+- Fetching delivered files from `/api/files/…` is capped at 128 concurrent
+  responses per account and 512 per instance, with a 2-minute idle deadline
+  (HTTP 429 `too-many-streams` with `Retry-After`). Read each body; a client
+  that opens responses and never consumes them holds a storage handle until the
+  idle deadline retires it.
 - Credits are pre-authed at submit and refunded on failure
 - Content safety: prompts are filtered (400 `blocked:…`); images pass the same
   post-generation moderation as the web app

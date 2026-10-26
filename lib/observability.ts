@@ -6,6 +6,14 @@ import { numberFromEnv } from "./runtime-env";
 const SECRET_PATTERNS: Array<RegExp> = [
   /\bsk-[A-Za-z0-9_-]{8,}/g,
   /\bAKIA[0-9A-Z]{16}/g,
+  // Payment and first-party API keys in their bare form: Stripe's `sk_live_…`
+  // does not match the `sk-` pattern above (underscore, not hyphen), and
+  // Paddle's `pdl_live_…`/`pdl_sdbx_…` and this app's own `pd_live_…` match
+  // nothing at all. The Authorization form is covered by the Bearer rule, but a
+  // gateway/proxy error page that echoes a header value without the scheme
+  // (pass 47's Job.error case) would otherwise carry the credential into a
+  // customer's job history and the logs.
+  /\b(?:sk|pdl|pd)_(?:live|test|sdbx)_[A-Za-z0-9_]{8,}/g,
   /Bearer\s+[A-Za-z0-9._~+/=-]{12,}/gi,
   /x-amz-credential=[^&]{5,}/gi,
   /x-amz-signature=[^&]{5,}/gi,

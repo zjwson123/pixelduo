@@ -2,7 +2,7 @@
 // Supports: gpt-image-2, doubao-seedream, wan2.7-image(-pro) [image]
 //            doubao-seedance, wan2.7-t2v/i2v [video, async task-based]
 
-import { getModelVerseKey, getArkKey, getArkBaseUrl, getArkVideoConfig, getAliyunKey, getAliyunBaseUrl, getAliyunTaskUrl } from "../keys";
+import { getModelVerseConfig, getArkKey, getArkBaseUrl, getArkVideoConfig, getAliyunKey, getAliyunBaseUrl, getAliyunTaskUrl } from "../keys";
 import { isProductionRuntime } from "../runtime-env";
 import { saveBase64Image, saveRemoteImage, fetchPublicBuffer, readBodyCapped, outboundTimeoutMs } from "../store";
 import { getStorage } from "../storage";
@@ -207,14 +207,14 @@ export async function generateWithGpt(
   count: number,
   onImage?: ImageProgress,
 ): Promise<ProviderImage[]> {
-  const keys = [getModelVerseKey()].filter((k): k is string => Boolean(k));
-  if (!keys.length) throw new Error("modelverse key missing — set MODELVERSE_IMAGE_API_KEY or ensure ~/.cc-proxy/config.json has modelverse gateway");
+  const cfg = getModelVerseConfig();
+  if (!cfg) throw new Error("modelverse key missing — set MODELVERSE_IMAGE_API_KEY or ensure ~/.cc-proxy/config.json has modelverse gateway");
   const out: ProviderImage[] = [];
   for (let i = 0; i < count; i++) {
     const data = await callWithKeys(
-      "https://api.modelverse.cn/v1/images/generations",
+      `${cfg.baseUrl}/images/generations`,
       { model: "gpt-image-2", prompt, size: "1024x1024", quality, n: 1 },
-      keys,
+      [cfg.key],
     );
     const items = (data.data as Array<Record<string, unknown>> | undefined) ?? [];
     const b64 = items[0]?.b64_json as string | undefined;
@@ -233,8 +233,8 @@ export async function editWithGpt(
   quality: Quality,
   onImage?: ImageProgress,
 ): Promise<ProviderImage[]> {
-  const keys = [getModelVerseKey()].filter((k): k is string => Boolean(k));
-  if (!keys.length) throw new Error("modelverse key missing");
+  const cfg = getModelVerseConfig();
+  if (!cfg) throw new Error("modelverse key missing");
   // ModelVerse's edits endpoint only accepts multipart/form-data with an
   // `image` file field. JSON bodies are rejected ("use 'images' (array)")
   // and every JSON object shape fails their gateway unmarshal — verified by
@@ -243,7 +243,7 @@ export async function editWithGpt(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 300_000);
   try {
-    const key = keys[0];
+    const key = cfg.key;
     const fd = new FormData();
     fd.append("model", "gpt-image-2");
     fd.append("prompt", prompt);
@@ -258,7 +258,7 @@ export async function editWithGpt(
     const refBytes = Buffer.from(imageBase64, "base64");
     const refType = storeContentType(refBytes, "image/png");
     fd.append("image", new Blob([refBytes], { type: refType }), `input.${extensionForContentType(refType)}`);
-    const res = await fetch("https://api.modelverse.cn/v1/images/edits", {
+    const res = await fetch(`${cfg.baseUrl}/images/edits`, {
       method: "POST",
       headers: { Authorization: `Bearer ${key}` },
       body: fd,

@@ -173,21 +173,46 @@ export class PaddleProvider implements PaymentProvider {
         // full (probed end-to-end against the real route — the $1 was taken
         // and 6000 credits granted). The top-level read is kept as a fallback
         // for any relay that flattens the payload; it costs nothing.
-        const details = data.details as { totals?: { subtotal?: string | number } } | undefined;
-        const totals = (details?.totals ?? data.totals) as { subtotal?: string | number } | undefined;
+        const details = data.details as
+          | { totals?: { subtotal?: string | number; discount?: string | number } }
+          | undefined;
+        const totals = (details?.totals ?? data.totals) as
+          | { subtotal?: string | number; discount?: string | number }
+          | undefined;
         const subtotalNum = totals?.subtotal !== undefined ? Number(totals.subtotal) : NaN;
         const paidAmountUsd = Number.isFinite(subtotalNum) ? subtotalNum / 100 : undefined;
+        // What the customer actually paid, net of discount and tax (pass 47).
+        // Paddle's `subtotal` is documented as "before discount, tax, and
+        // deductions", so reusing it as the collected amount (as this did) is
+        // the LIST price whenever a discount applied: a 50%-off $49.99 checkout
+        // collected $24.99 while `collectedAmountUsd` said $49.99, and two
+        // partial returns totalling the $24.99 that was really taken never
+        // reached the recorded basis — the order stayed paid with its credits
+        // and tier. The underpayment check above keeps reading `subtotal` (it
+        // proves the session was built for the order's price; an authorized
+        // discount is not an underpayment); the refund basis must read what was
+        // collected. `discount` is a separate total in the same object and is
+        // absent on the pre-discount shape, where subtotal is already the
+        // collected net amount. Same unit as the adjustment deltas below
+        // (pre-tax), so a full return measured against this can still promote.
+        const discountNum = totals?.discount !== undefined ? Number(totals.discount) : 0;
+        const collectedCents =
+          Number.isFinite(subtotalNum) && Number.isFinite(discountNum)
+            ? Math.max(0, subtotalNum - discountNum)
+            : NaN;
+        const collectedAmountUsd = Number.isFinite(collectedCents) ? collectedCents / 100 : undefined;
         return {
           provider: this.name,
           eventId: parsed.event_id,
           type: "paid",
           orderId: typeof customData?.orderId === "string" ? customData.orderId : undefined,
           paidAmountUsd,
-          // Paddle is the merchant of record: the net subtotal is what the
-          // seller receives and the unit the adjustment deltas below use, so it
-          // is the amount a full return must reach (see the event type's
-          // collectedAmountUsd note; tax is remitted by Paddle, never ours).
-          collectedAmountUsd: paidAmountUsd,
+          // Paddle is the merchant of record: the subtotal net of discounts is
+          // what the seller receives and the unit the adjustment deltas below
+          // use, so it is the amount a full return must reach (see the event
+          // type's collectedAmountUsd note; tax is remitted by Paddle, never
+          // ours).
+          collectedAmountUsd,
           currency: typeof data.currency_code === "string" ? data.currency_code : undefined,
           providerOrderId: typeof data.id === "string" ? data.id : undefined,
           raw: parsed,

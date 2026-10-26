@@ -209,7 +209,12 @@ export async function POST(req: Request) {
                 order.kind === "plan"
                   ? `${order.planId ?? "plan"} plan`
                   : `${order.credits} credits pack`,
-              amountUsd: order.amountUsd,
+              // What the customer was actually charged, when the provider said
+              // so: a discounted checkout collects less than the list price, and
+              // the receipt is the record of a charge, not of a price tag (pass
+              // 47). Falls back to the order amount for the mock provider and
+              // for payloads that do not state it.
+              amountUsd: patch.collectedAmountUsd ?? order.collectedAmountUsd ?? order.amountUsd,
               credits: order.credits,
             };
           }
@@ -490,7 +495,11 @@ export async function POST(req: Request) {
                 order.kind === "plan"
                   ? `${order.planId ?? "plan"} plan`
                   : `${order.credits} credits pack`,
-              amountUsd: order.amountUsd,
+              // The money actually returned: for a discounted checkout the
+              // completed refund equals what was captured, not the list price
+              // (pass 47). Falls back to the order amount when no captured basis
+              // was recorded (mock, and orders fulfilled before pass 46).
+              amountUsd: order.collectedAmountUsd ?? order.amountUsd,
             };
           }
         }
