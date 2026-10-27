@@ -1081,6 +1081,23 @@ export async function deliveredVideoSeconds(jobId: string, maxHops = 10): Promis
   return total;
 }
 
+// The job's failure text as its OWNER may see it.
+//
+// Job.error is provider-controlled. Pass 47 masks credential-shaped material at
+// WRITE time (failJob), but that covers only the rows written after that deploy:
+// every failure recorded before it is still in the column, and three read paths
+// return the value verbatim to the job's owner — the jobs list, the job detail
+// and the v1 poll — plus the account export. A gateway that echoed the request's
+// Authorization header (the case pass 47 was written for) therefore still hands
+// the owner the operator's provider credential until the row ages out. The mask
+// belongs on the READ as well, where it also covers any future writer that
+// forgets it. Redacting already-redacted text is a no-op, so applying it twice is
+// safe.
+export function redactJobError(error: string | null | undefined): string | null {
+  if (typeof error !== "string") return null;
+  return redactSensitive(error);
+}
+
 // All not-yet-finished jobs for a user (queued/running/polling), newest
 // first. The workbench resumes tracking these on mount so navigation or a
 // page refresh doesn't lose in-flight generations — the jobs keep running

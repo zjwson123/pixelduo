@@ -3,6 +3,7 @@ import { rateLimit } from "@/lib/rate-limit";
 import { authenticateApiKey } from "@/lib/apikey";
 import { prisma } from "@/lib/prisma";
 import { serveUrl } from "@/lib/store";
+import { redactJobError } from "@/lib/queue";
 
 export const dynamic = "force-dynamic";
 
@@ -68,7 +69,9 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
         count: job.count,
         costCredits: job.costCredits,
         images: served,
-        error: job.error,
+        // Masked on read too — see redactJobError (pass 48): rows written
+        // before pass 47's write-time mask still carry provider text.
+        error: redactJobError(job.error),
         createdAt: job.createdAt,
         finishedAt: job.finishedAt,
       },

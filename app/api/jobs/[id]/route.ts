@@ -1,5 +1,5 @@
 import { requireUserId, ok, fail, enforceUserRateLimit, refuseNul } from "@/lib/api";
-import { deliveredVideoSeconds, getJobForUser } from "@/lib/queue";
+import { deliveredVideoSeconds, getJobForUser, redactJobError } from "@/lib/queue";
 import { serveUserUrl } from "@/lib/store";
 
 // See /api/jobs: 600/min per account clears several polling tabs, and bounds a
@@ -40,7 +40,8 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
         // client's 30s-cap arithmetic reads this field, not the segment length.
         durationSec: job.extendOfJobId ? await deliveredVideoSeconds(job.id) : job.durationSec,
         images: served,
-        error: job.error,
+        // Same read-time mask as /api/jobs — see redactJobError.
+        error: redactJobError(job.error),
         createdAt: job.createdAt,
         finishedAt: job.finishedAt,
       },

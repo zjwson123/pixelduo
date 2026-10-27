@@ -1,5 +1,5 @@
 import { requireUserId, ok, fail, enforceUserRateLimit } from "@/lib/api";
-import { deliveredVideoSeconds, getActiveJobsForUser } from "@/lib/queue";
+import { deliveredVideoSeconds, getActiveJobsForUser, redactJobError } from "@/lib/queue";
 import { serveUserUrl } from "@/lib/store";
 
 // The workbench polls this every 2.5s per open tab (24/min, plus one
@@ -35,7 +35,10 @@ async function serialize(job: Awaited<ReturnType<typeof getActiveJobsForUser>>[n
     // one extra query only for the jobs that actually are extend jobs.
     durationSec: job.extendOfJobId ? await deliveredVideoSeconds(job.id) : job.durationSec,
     images: images.map((k) => serveUserUrl(k)),
-    error: job.error,
+    // Masked on READ as well as at write time (see redactJobError): the column
+    // holds failures recorded before pass 47's write-time mask existed, and
+    // those rows are still provider-controlled text.
+    error: redactJobError(job.error),
     createdAt: job.createdAt,
     finishedAt: job.finishedAt,
   };
