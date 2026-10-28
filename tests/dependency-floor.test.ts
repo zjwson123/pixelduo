@@ -51,6 +51,25 @@ const FLOORS: Record<string, string> = {
   zod: "4.6.6",
 };
 
+/**
+ * Advisories in packages none of our direct dependencies declares.
+ *
+ * These cannot live in FLOORS: there is no manifest range to raise, so the
+ * floor is held by an `overrides` entry in package.json. `npm audit --omit=dev`
+ * also flags them the day the advisory lands (that is how qs was found in pass
+ * 49), but a lockfile regenerated against an older mirror — or a hand-edited
+ * pin — would float below the patched version with every gate green.
+ *
+ *   qs 6.7.0 - 6.16.0   GHSA-6pq8-jhm2-2vcw — qs.stringify with arrayFormat
+ *                       "comma" throws on an element carrying a non-callable
+ *                       own toString (CWE-248 uncaught exception, DoS).
+ *                       Reached through stripe@17.7.0 (its query encoder), not
+ *                       directly; 6.17.0 is the patch.
+ */
+const TRANSITIVE_FLOORS: Record<string, string> = {
+  qs: "6.17.0",
+};
+
 function numericParts(version: string): number[] {
   const cleaned = version.replace(/^[^\d]*/, "").split("-")[0];
   return cleaned.split(".").map((part) => Number(part) || 0);
@@ -75,7 +94,11 @@ function readJson<T>(path: string): T {
 }
 
 type Manifest = { version: string };
-type PackageJson = { dependencies: Record<string, string>; devDependencies?: Record<string, string> };
+type PackageJson = {
+  dependencies: Record<string, string>;
+  devDependencies?: Record<string, string>;
+  overrides?: Record<string, string>;
+};
 
 const root = process.cwd();
 
@@ -95,6 +118,18 @@ describe("dependency floors for published advisories", () => {
       expect(range, `${name} is not a dependency at all`).toBeTruthy();
       // ^16.4.3 / ~16.4.3 / >=16.4.1 / 16.4.3 all declare their own floor first.
       expect(compare(range as string, floor), `${name} range "${range}" < ${floor}`).toBeGreaterThanOrEqual(0);
+    }
+  });
+
+  it("holds transitive advisories above their floors through overrides", () => {
+    for (const [name, floor] of Object.entries(TRANSITIVE_FLOORS)) {
+      const manifest = readJson<Manifest>(join(root, "node_modules", name, "package.json"));
+      expect(compare(manifest.version, floor), `${name}@${manifest.version} < ${floor}`).toBeGreaterThanOrEqual(0);
+      // The installed tree being clean is not enough: the override is what keeps
+      // a regenerated lockfile from resolving back down to the advisory range.
+      const override = pkg.overrides?.[name];
+      expect(override, `${name} has no overrides entry, so a fresh resolve need not stay patched`).toBeTruthy();
+      expect(compare(override as string, floor), `${name} override "${override}" < ${floor}`).toBeGreaterThanOrEqual(0);
     }
   });
 });

@@ -12,6 +12,44 @@ WORKDIR /app
 COPY package.json package-lock.json .npmrc ./
 RUN npm ci
 
+# ---------- runtime-deps ----------
+# The dependency tree the WORKER artifact ships.
+#
+# The worker/scripts image cannot use a plain `npm ci --omit=dev` tree: its
+# entrypoint is `npx tsx scripts/worker.ts`, the maintenance loop runs
+# `npx tsx scripts/{rollover,expire,remind}.ts`, and the MIGRATE service runs
+# `npx prisma migrate deploy` — tsx and the Prisma CLI are RUNTIME tools here
+# (they are devDependencies only because the web image never needs them). So the
+# stage used to copy the deps stage's full install, test toolchain and all.
+#
+# That made the registry-pushed image the one place the tree's open advisories
+# actually lived: vitest + tinypool (2 critical, prototype-pollution → RCE) and
+# vite (8 advisories) are dev-only packages at these pins, and `npm audit
+# --omit=dev` — the gate that certifies "the runtime tree is clean" — measures
+# the LOCKFILE's production scope, in which they do not appear. "0 runtime
+# vulnerabilities" was therefore true of a tree nobody deploys, while the
+# artifact operators are told to keep old tags of carried the vulnerable one.
+#
+# What is removed below is exactly the test/report toolchain: nothing in lib/,
+# scripts/ or app/ imports any of it (tsx runs on esbuild, which stays; the
+# Prisma CLI stays for the migrate service). The removal happens in its OWN
+# stage, not in the worker stage, because deleting files after they were copied
+# leaves them in the earlier layer — the trap the web/worker comments below
+# describe for `docker save`. The worker stage copies THIS filesystem, so the
+# packages are in no layer of the shipped image.
+#
+# The worker image gate (ci.yml and scripts/ci-local.sh) asserts every name
+# here is absent, so a future dependency that reintroduces one of them as a
+# RUNTIME package fails the build loudly instead of silently re-bloating the
+# artifact with advisories no gate measures.
+FROM deps AS runtime-deps
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+RUN rm -rf \
+      node_modules/vitest node_modules/@vitest \
+      node_modules/vite node_modules/vite-node node_modules/tinypool \
+      node_modules/playwright node_modules/playwright-core node_modules/@playwright
+
 # ---------- builder ----------
 FROM node:24-alpine AS builder
 WORKDIR /app
@@ -151,7 +189,11 @@ WORKDIR /app
 ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1
 # CJK fonts so sharp/SVG text (baked "AI 生成" watermark) renders in containers
 RUN apk add --no-cache fontconfig font-noto-cjk ffmpeg
-COPY --from=deps --chown=node:node /app/node_modules ./node_modules
+# runtime-deps, not deps (pass 49): the test toolchain is stripped there so the
+# shipped artifact carries no package with an open advisory that
+# `npm audit --omit=dev` (a LOCKFILE-scope gate) cannot see. tsx and the Prisma
+# CLI survive that stage — they are what this image executes.
+COPY --from=runtime-deps --chown=node:node /app/node_modules ./node_modules
 # Same single-layer rule as the web stage: `COPY . .` + a separate `RUN rm -rf`
 # leaves everything the prune "removed" inside the copy layer, which is exactly
 # the artifact a registry push or `docker save` carries off the host. The bind

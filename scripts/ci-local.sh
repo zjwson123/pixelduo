@@ -238,6 +238,26 @@ docker run --rm --entrypoint sh pd-ci-worker -c '
   test -e /app/lib/queue.ts
   test -e /app/scripts/worker.ts
   test -x /app/node_modules/.bin/tsx
+  # Pass 49: the test/report toolchain must not ride along. The advisory gate
+  # measures the lockfile PRODUCTION scope (npm audit --omit=dev), so the dev
+  # tree advisories were invisible to it while this registry-pushed artifact
+  # carried them — vitest + tinypool (2 critical, prototype pollution to RCE)
+  # and vite (8). Dockerfile runtime-deps strips them; every name it removes is
+  # asserted here, so a dependency that reintroduces one as a RUNTIME package
+  # fails this gate instead of quietly re-bloating the image with advisories no
+  # gate measures. (No apostrophes in this block: one single-quoted string.)
+  test ! -e /app/node_modules/vitest
+  test ! -e /app/node_modules/@vitest
+  test ! -e /app/node_modules/vite
+  test ! -e /app/node_modules/vite-node
+  test ! -e /app/node_modules/tinypool
+  test ! -e /app/node_modules/playwright
+  test ! -e /app/node_modules/playwright-core
+  test ! -e /app/node_modules/@playwright
+  # ...while the two devDependencies this image EXECUTES must still be here:
+  # tsx (worker + maintenance loop) and the Prisma CLI (the migrate service).
+  test -e /app/node_modules/tsx
+  test -x /app/node_modules/.bin/prisma
   test ! -e /app/docs
   test ! -e /app/tests
   test ! -e /app/e2e
