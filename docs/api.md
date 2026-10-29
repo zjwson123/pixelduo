@@ -76,6 +76,9 @@ through `queued → polling → done` (async provider task, typically 1–3 min)
   post-generation moderation as the web app
 - Errors: `401 unauthorized` (bad/revoked key), `403 verify-email-required`,
   `400 invalid-input | blocked:…`, `404 job-not-found`
+- A request path that is not valid percent-encoded UTF-8 (for example a lone
+  `%`, or `%FF`) is refused with `400 invalid-path` before routing; escape
+  reserved and non-ASCII bytes in IDs and keys rather than sending them raw.
 
 ## Key management
 

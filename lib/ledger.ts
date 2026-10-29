@@ -1316,8 +1316,40 @@ export async function revokeOrderCreditsTx(
   // nothing to take, so no ledger entry either — a zero-delta REVOKE would
   // just be noise in the cycle-usage window.
   if (revoked <= 0) return 0;
-  await addCreditsTx(tx, order.userId, "REVOKE", -revoked, "order", order.id, "credits revoked on payment refund");
-  return revoked;
+  // The debit is clamped to what the BALANCE COLUMN holds, exactly like
+  // writeOffExcessTx's repair — because on a legacy-drifted account the two
+  // disagree. The invariant (User.credits == SUM(remaining)) is enforced on
+  // every write, but rows that predate it were never scanned (the CHECK is
+  // NOT VALID), so an account can hold FEWER credits than its own grants say.
+  // The unclamped debit then threw insufficient-credits from addCreditsTx and
+  // rolled back this whole webhook transaction: the order never left "paid"
+  // (every provider retry reproduced the 500), the credits stayed granted, and
+  // revokePlanEntitlementTx — which runs only after this returns — never ran,
+  // so a refunded subscription kept its paid tier. The refund has already
+  // happened at the provider; the app side must always be able to catch up,
+  // and scripts/repair-credit-invariant.ts is the report for the residue.
+  //
+  // A healthy account never hits this: its balance is the sum of its grant
+  // rows, so credits >= revoked by construction. Only the already-broken
+  // direction can clamp, and clamping there moves the account TOWARD
+  // consistency (the unbacked excess the balance never held is discarded with
+  // the grant rows) rather than minting or destroying backed credits. The read
+  // is a snapshot on purpose, for the same reason writeOffExcessTx documents:
+  // a User-row FOR UPDATE here would add a grant→user lock edge against
+  // erasure's user→grants cascade, and a concurrent commit that lowers the
+  // balance past the clamp simply makes addCreditsTx refuse and the provider's
+  // retry recompute — no state written.
+  const holder = await tx.user.findUnique({ where: { id: order.userId }, select: { credits: true } });
+  if (!holder) throw new Error("user-not-found");
+  const debit = Math.min(revoked, Math.max(0, holder.credits));
+  if (debit < revoked) {
+    console.warn(
+      `[ledger] refund revoke for order ${order.id} clamped from ${revoked} to ${debit}: the account balance (${holder.credits}) is below the credits the refunded order's grants still hold — a legacy invariant drift (run scripts/repair-credit-invariant.ts); the refund and the tier revocation still complete (user ${order.userId})`,
+    );
+  }
+  if (debit <= 0) return 0;
+  await addCreditsTx(tx, order.userId, "REVOKE", -debit, "order", order.id, "credits revoked on payment refund");
+  return debit;
 }
 
 // Revoke the PAID TIER itself when a plan order is refunded or charged back.

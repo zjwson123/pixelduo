@@ -189,6 +189,57 @@ function rateLimited(retry: number, limit: number) {
   );
 }
 
+// A path segment Next cannot decode is a CLIENT error, and until pass 50 it
+// was neither classified nor shown as anything but a server fault.
+//
+// The router decodes every dynamic segment with decodeURIComponent, and that
+// call throws URIError for an escape that is not valid UTF-8: `%FF`, the
+// overlong `%C0%AF`, the CESU-8 lone surrogate `%ED%A0%80`, and a bare `%`
+// that is not an escape at all. The throw happens while the router builds the
+// params, BEFORE the route handler runs — so `refuseNul`/`fail()` never see it
+// and the caller gets Next's bare text "Internal Server Error" with a 500
+// status (probed: /api/jobs/%FF, /api/files/img/%FF.png, every admin [id]
+// route, and the /api/auth/[...nextauth] catch-all). Two consequences, both
+// this file's subject: it is reachable WITHOUT a credential, so with
+// SENTRY_DSN configured an anonymous caller can mint one handled:false
+// incident per request (the faucet passes 25/30/38 closed for request bodies,
+// one layer below where those guards run), and the API answers a non-JSON 500
+// for what is plainly garbage input. The middleware is the only layer every
+// /api/* request passes through, so it is where the refusal belongs.
+//
+// Decoded, not matched: `%ED%A0%80` is three well-formed escapes whose bytes
+// are not well-formed UTF-8, so a regex over the escape spelling would miss
+// it, while decodeURIComponent throws on exactly the inputs the router throws
+// on. The check reads the RAW path out of the request URL, never
+// nextUrl.pathname, because a value the URL layer already decoded cannot be
+// re-decoded into the throw this exists to intercept.
+export function rawPathOf(url: string): string {
+  const scheme = url.indexOf("://");
+  const start = scheme >= 0 ? url.indexOf("/", scheme + 3) : 0;
+  const rest = start > 0 ? url.slice(start) : url;
+  const cut = rest.search(/[?#]/);
+  return cut >= 0 ? rest.slice(0, cut) : rest;
+}
+
+export function malformedPercentPath(url: string): boolean {
+  const path = rawPathOf(url);
+  if (!path.includes("%")) return false;
+  try {
+    // isWellFormed: a decoded payload can still be an unpaired surrogate on
+    // engines whose decodeURIComponent accepts WTF-8; no route param may be.
+    return !decodeURIComponent(path).isWellFormed();
+  } catch {
+    return true;
+  }
+}
+
+function invalidPath() {
+  return NextResponse.json(
+    { ok: false, error: "invalid-path: the request path is not valid percent-encoded UTF-8" },
+    { status: 400, headers: { "Cache-Control": "private, no-store" } },
+  );
+}
+
 export async function proxy(req: NextRequest) {
   // Last XFF entry = client IP appended by the trusted edge proxy; earlier
   // entries are client-spoofable (see lib/rate-limit.ts clientIp).
@@ -287,6 +338,11 @@ export async function proxy(req: NextRequest) {
     const claimRetry = hitAll([`ip:${ip}:claim`], claimLimit, 60_000);
     if (claimRetry !== null) return rateLimited(claimRetry, claimLimit);
   }
+  // Last, after every bucket above has been charged: a refusal here still
+  // spends the caller's budget (it is a request), and it saves the router the
+  // param decode that would otherwise throw past every route guard. See
+  // malformedPercentPath.
+  if (malformedPercentPath(req.url)) return invalidPath();
   return NextResponse.next();
 }
 
