@@ -42,6 +42,21 @@ import { join } from "node:path";
  *                                  now on v4 (tsc + the full suite verified the
  *                                  migration — the schemas only use the classic
  *                                  string/number/enum/object surface).
+ *
+ * 2026-10-31 — two moderate advisories in the BUILD-TIME half of the Sentry
+ * integration, five production-scope hits, none of them runtime-reachable:
+ *
+ *   glob 3.0.0 - 14.0.1   GHSA-3g3m-2fjr-6pw4 (AbortSignal cancellation bypass,
+ *                         post-timeout filesystem traversal); reached through
+ *                         @sentry/nextjs → @sentry/bundler-plugins, which uses
+ *                         it to enumerate build artifacts for sourcemap upload.
+ *   minimatch < 11.0.1    GHSA-g3hv-75wg-m249 (globparts amplification DoS);
+ *                         reached through glob's own dependency.
+ *
+ *  Both ride on glob, and no Sentry release (10.x or 11.x) has moved off glob
+ *  13 yet, so the fix is a SCOPED override — a global one would re-resolve the
+ *  test/ESLint toolchains' glob too. glob 14's manifest requires
+ *  minimatch ^11.0.2, so patching the parent patches both.
  */
 const FLOORS: Record<string, string> = {
   next: "16.4.1",
@@ -65,9 +80,26 @@ const FLOORS: Record<string, string> = {
  *                       own toString (CWE-248 uncaught exception, DoS).
  *                       Reached through stripe@17.7.0 (its query encoder), not
  *                       directly; 6.17.0 is the patch.
+ *   glob 3.0.0 - 14.0.1 GHSA-3g3m-2fjr-6pw4 — the patched 14.0.2 also pulls
+ *                       minimatch ^11.0.2, which clears GHSA-g3hv-75wg-m249
+ *                       (minimatch < 11.0.1) transitively.
  */
 const TRANSITIVE_FLOORS: Record<string, string> = {
   qs: "6.17.0",
+  glob: "14.0.2",
+};
+
+/**
+ * Overrides that must be SCOPED rather than global.
+ *
+ * A top-level `glob` override would re-resolve every glob in the tree,
+ * including the dev/test toolchains' copies; the advisory is in Sentry's
+ * build-time bundler plugin, so the override names that parent. Scoping is
+ * also what keeps the assertion honest: the test reads the same nested entry
+ * the resolver does.
+ */
+const OVERRIDE_SCOPES: Record<string, string> = {
+  glob: "@sentry/bundler-plugins",
 };
 
 function numericParts(version: string): number[] {
@@ -97,7 +129,7 @@ type Manifest = { version: string };
 type PackageJson = {
   dependencies: Record<string, string>;
   devDependencies?: Record<string, string>;
-  overrides?: Record<string, string>;
+  overrides?: Record<string, string | Record<string, string>>;
 };
 
 const root = process.cwd();
@@ -127,8 +159,18 @@ describe("dependency floors for published advisories", () => {
       expect(compare(manifest.version, floor), `${name}@${manifest.version} < ${floor}`).toBeGreaterThanOrEqual(0);
       // The installed tree being clean is not enough: the override is what keeps
       // a regenerated lockfile from resolving back down to the advisory range.
-      const override = pkg.overrides?.[name];
-      expect(override, `${name} has no overrides entry, so a fresh resolve need not stay patched`).toBeTruthy();
+      // A transitive package the resolver only meets under one parent is scoped
+      // there (OVERRIDE_SCOPES), so the entry is read from the same place npm
+      // does rather than assuming the top level.
+      const scope = OVERRIDE_SCOPES[name];
+      const scoped = scope ? pkg.overrides?.[scope] : undefined;
+      const override = scope
+        ? (typeof scoped === "object" ? scoped : undefined)?.[name]
+        : pkg.overrides?.[name];
+      expect(
+        override,
+        `${name} has no ${scope ? `${scope}-scoped ` : ""}overrides entry, so a fresh resolve need not stay patched`,
+      ).toBeTruthy();
       expect(compare(override as string, floor), `${name} override "${override}" < ${floor}`).toBeGreaterThanOrEqual(0);
     }
   });
