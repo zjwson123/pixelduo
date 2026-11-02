@@ -147,6 +147,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ key: str
   // guard above exists to remove. fail() maps an ApiError to its status and
   // anything else to the masked internal-error, with captureError attached.
   let shared = false;
+  const download = new URL(req.url).searchParams.get("download") === "1";
   // Definite-assignment assertions: the catch below returns, so every path
   // that reaches the streaming code has run the whole try.
   let obj!: StorageStream;
@@ -201,6 +202,43 @@ export async function GET(req: Request, { params }: { params: Promise<{ key: str
       if (parsed !== "ignore") range = parsed;
     }
 
+    // HEAD must not open a storage body. Next implements HEAD by calling this
+    // GET export and then DISCARDING the body (send-response ends the response
+    // without touching it), so before this branch a HEAD acquired a stream slot
+    // and an S3 GetObject whose reader nobody ever pulled: the response ended,
+    // the guarded body was never consumed, and the slot plus the S3 socket sat
+    // parked until the 120s idle deadline. The S3 client's default pool is 50
+    // sockets, and the per-owner stream cap is 128 — 51 HEADs from ONE ordinary
+    // account (its own gallery key, or a Template.img key listed by
+    // /api/templates) pinned the whole pool: every media GET timed out and
+    // /api/health's storage probe answered 503, so the container was reported
+    // unhealthy for every tenant. Metadata only, no slot and no body: the size
+    // is the one already fetched for a Range request, or a single HeadObject.
+    if (req.method === "HEAD") {
+      const size = total ?? (await getStorage().size(key)) ?? undefined;
+      if (size === undefined) return new NextResponse("not found", { status: 404, headers: NO_STORE });
+      const headHeaders: Record<string, string> = {
+        // Extension-derived: sniffing needs the bytes, and reading the first
+        // chunk is exactly the upstream handle this branch exists not to open.
+        "Content-Type": contentTypeFromKey(key) ?? "application/octet-stream",
+        "Cache-Control": shared ? "private, max-age=31536000, immutable" : "private, no-store",
+        "X-Content-Type-Options": "nosniff",
+        "Accept-Ranges": "bytes",
+      };
+      if (range) {
+        headHeaders["Content-Range"] = `bytes ${range.start}-${range.end}/${size}`;
+        headHeaders["Content-Length"] = String(range.end - range.start + 1);
+      } else {
+        headHeaders["Content-Length"] = String(size);
+      }
+      if (download) {
+        const rawName = key.split("/").pop() || "image";
+        const baseName = rawName.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 128) || "image";
+        headHeaders["Content-Disposition"] = `attachment; filename="${baseName}"`;
+      }
+      return new NextResponse(null, { status: range ? 206 : 200, headers: headHeaders });
+    }
+
     // Bound concurrent streams BEFORE the object is opened (pass 47). Every
     // response below holds a storage handle (a local fd or an S3 socket) and a
     // client socket until the consumer finishes, cancels, or the idle deadline
@@ -233,7 +271,6 @@ export async function GET(req: Request, { params }: { params: Promise<{ key: str
     return fail(e);
   }
 
-  const download = new URL(req.url).searchParams.get("download") === "1";
   // Sanitize filename to prevent header injection (CR/LF, quotes, path traversal).
   const rawName = key.split("/").pop() || "image";
   const baseName = rawName.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 128) || "image";

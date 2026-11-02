@@ -65,6 +65,36 @@ export function getPaymentProvider(): PaymentProvider {
   return cached;
 }
 
+// Every provider whose webhook signature can still be verified by this
+// deployment, selected provider first. A provider switch is a config change who
+// only takes effect on the CURRENT provider: orders created before it keep
+// receiving refunds and disputes at the previous provider, signed with the
+// previous secret, and the route must accept and act on those deliveries. The
+// alternate is considered only when its signature header is present AND its
+// secret is configured; construction can still refuse (an API key removed, a
+// non-live key in production), in which case no delivery could have been
+// verified by it anyway. The route's order-provider match is what prevents a
+// valid event from one provider acting on an order created by another.
+const SIGNATURE_HEADERS: Array<{ name: "stripe" | "paddle"; header: string; secretVar: string }> = [
+  { name: "stripe", header: "stripe-signature", secretVar: "STRIPE_WEBHOOK_SECRET" },
+  { name: "paddle", header: "paddle-signature", secretVar: "PADDLE_WEBHOOK_SECRET" },
+];
+
+export function getWebhookVerifiers(headers: Headers): PaymentProvider[] {
+  const verifiers: PaymentProvider[] = [getPaymentProvider()];
+  for (const { name, header, secretVar } of SIGNATURE_HEADERS) {
+    if (!headers.get(header)) continue;
+    if (verifiers.some((p) => p.name === name)) continue;
+    if (!process.env[secretVar]) continue;
+    try {
+      verifiers.push(name === "stripe" ? new StripeProvider() : new PaddleProvider());
+    } catch {
+      // Its credentials are incomplete, so it cannot verify anything.
+    }
+  }
+  return verifiers;
+}
+
 export function _resetPaymentProviderForTests() {
   cached = undefined;
 }

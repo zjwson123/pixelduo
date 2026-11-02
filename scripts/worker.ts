@@ -508,6 +508,15 @@ export async function processVideoJob(job: {
             const merged = await concatVideos(srcBuf, segBuf);
             if (merged) {
               const finalKey = newStorageKey("mp4");
+              // Re-arm the poll lease before the upload. The lease was extended
+              // before a merge that can take 180s, and the put that follows has
+              // its own 300s budget: the span since that extension can exceed
+              // POLL_LEASE_MS (360s), so a peer could claim the poll and repeat
+              // the download + ffmpeg work while this worker was still
+              // uploading. The fence still refuses the loser's checkpoint, but
+              // the duplicated CPU/egress is exactly what the lease exists to
+              // prevent.
+              await extendPollLease(job.id, workerId);
               await getStorage().put(finalKey, merged, "video/mp4");
               videoKey = finalKey;
               storedKey = finalKey;

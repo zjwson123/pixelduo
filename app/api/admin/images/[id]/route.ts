@@ -5,13 +5,14 @@ import { prisma } from "@/lib/prisma";
 import { getStorage } from "@/lib/storage";
 import { contentTypeFromKey, sniffContentType } from "@/lib/media-type";
 import { acquireFileStreamSlot, createGuardedBody } from "@/lib/stream-limit";
+import { getModel } from "@/lib/model-registry";
 
 // Preview one image for moderation. The admin console used to list id/user/
 // model/prompt without rendering the image, and /api/files only authorizes its
 // OWNER (or a template), so an operator could neither see what a report was
 // about nor inspect what a Delete button would remove. This route answers the
 // same bytes to an admin, never caches them, and is rate-limited per operator.
-export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   let releaseSlot: (() => void) | null = null;
   try {
@@ -19,8 +20,36 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     const adminId = await requireAdmin();
     const limited = await enforceUserRateLimit(adminId, "admin-image-preview", 120, 60_000);
     if (limited) return fail(limited);
-    const image = await prisma.image.findUnique({ where: { id: id }, select: { url: true } });
+    const image = await prisma.image.findUnique({ where: { id: id }, select: { url: true, model: true } });
     if (!image) return fail(new Error("image-not-found"));
+    // The console renders one preview per row, 50 rows a page. `Image` rows
+    // include video outputs (the worker completes a video with model seedance),
+    // so a moderation page used to open 50 full-object streams — up to 50 × the
+    // 100 MB video cap through the web process and the operator's browser — for
+    // thumbnails that cannot even render a video as <img>. Videos are now
+    // opt-in through ?full=1 (the row offers an explicit "open" link); the
+    // automatic grid never streams one. Images keep the inline preview.
+    const isVideo = getModel(image.model)?.mediaType === "video";
+    if (isVideo && new URL(req.url).searchParams.get("full") !== "1") {
+      return errorResponse({ ok: false, error: "preview-not-image" }, { status: 415 });
+    }
+    // HEAD must not open a storage body either. Next auto-implements HEAD by
+    // calling this GET and then discarding the body, so the stream slot and the
+    // S3 socket were held until the idle deadline while nothing ever read them
+    // (the same pool-exhaustion shape /api/files fixed in pass 51). Metadata
+    // only: an admin re-check is pointless for an object this route will never
+    // serve as a body.
+    if (req.method === "HEAD") {
+      const size = (await getStorage().size(image.url)) ?? undefined;
+      if (size === undefined) return fail(new Error("image-not-found"));
+      const headHeaders: Record<string, string> = {
+        "Content-Type": contentTypeFromKey(image.url) ?? "application/octet-stream",
+        "Cache-Control": "private, no-store",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Length": String(size),
+      };
+      return new NextResponse(null, { status: 200, headers: headHeaders });
+    }
     // Streamed, not buffered (pass 44). `Image` rows include VIDEO outputs
     // (the worker completes a video with model seedance), so one preview used
     // to materialize up to the 100 MB download cap in the web process — twice,

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import { getModel } from "@/lib/model-registry";
 
 interface AdminUser {
   id: string;
@@ -355,14 +356,31 @@ export default function AdminPage() {
               {images.map((img) => (
                 <tr key={img.id}>
                   <td>
-                    <img
-                      src={`/api/admin/images/${img.id}`}
-                      alt=""
-                      width={56}
-                      height={56}
-                      loading="lazy"
-                      style={{ objectFit: "cover", borderRadius: 6, display: "block" }}
-                    />
+                    {/* Video outputs are in the same table, but a 56px <img>
+                        of an MP4 renders nothing while downloading the whole
+                        object — 50 rows a page, up to 100 MB each. Inline
+                        preview only for images; a video is an explicit open
+                        (the route refuses an automatic video stream). */}
+                    {getModel(img.model)?.mediaType === "video" ? (
+                      <a
+                        href={`/api/admin/images/${img.id}?full=1`}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={{ fontSize: 12 }}
+                        title="Open the video output"
+                      >
+                        video ↗
+                      </a>
+                    ) : (
+                      <img
+                        src={`/api/admin/images/${img.id}`}
+                        alt=""
+                        width={56}
+                        height={56}
+                        loading="lazy"
+                        style={{ objectFit: "cover", borderRadius: 6, display: "block" }}
+                      />
+                    )}
                   </td>
                   <td style={{ fontSize: 12 }}>{img.id.slice(0, 10)}…</td>
                   <td style={{ fontSize: 12 }}>{img.userId.slice(0, 12)}…</td>

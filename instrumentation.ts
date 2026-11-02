@@ -64,10 +64,23 @@ export function assertProductionConfig(env: NodeJS.ProcessEnv = process.env): vo
   // EMAIL_VERIFY_AUTO auto-verifies every registration AND releases the signup
   // bonus, so a stale value left over from CI turns registration into an
   // unlimited supply of verified, credit-bearing accounts. The explicit
-  // PAYMENT_ALLOW_MOCK flag already marks a deployment as test-only (both CI
-  // and ci-local.sh set it), so it is the escape hatch — reused below for the
-  // two checks that a legitimate test deployment must be allowed to skip.
-  const testDeployment = env.PAYMENT_ALLOW_MOCK === "1";
+  // PAYMENT_ALLOW_MOCK flag alongside the MOCK provider marks a deployment as
+  // test-only (both CI and ci-local.sh set it), so it is the escape hatch —
+  // reused below for the two checks that a legitimate test deployment must be
+  // allowed to skip.
+  //
+  // The flag alone is NOT enough (pass 51). It also spelled "this is a test
+  // deployment" while the configured provider was Stripe or Paddle: a leftover
+  // flag in a host/CI environment made a production deployment accept the
+  // PUBLIC CI signing secret (anyone can forge an admin session), an http://
+  // NEXTAUTH_URL (non-Secure cookie), a missing SMTP_URL (reset links only in
+  // the logs) and EMAIL_VERIFY_AUTO=1 (unlimited verified credit-bearing
+  // accounts) — while real money was being taken by a real provider, so the
+  // "mock is already refused in production" justification did not hold. The
+  // hatch now requires the provider to actually resolve to the mock one.
+  const providerName = env.PAYMENT_PROVIDER ?? "";
+  const testDeployment =
+    env.PAYMENT_ALLOW_MOCK === "1" && (providerName === "" || providerName === "mock");
   // The published CI secret is checked against testDeployment rather than
   // against the placeholder list above: CI and ci-local.sh legitimately use it
   // to boot a production build, so it may only be rejected where it would be a

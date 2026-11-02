@@ -7,14 +7,26 @@ import { hostIsPublic, isPublicPort, readJsonCapped, ssrfPinnedAgent, outboundTi
 import { fetch as pinnedFetch } from "undici";
 
 const BLOCKED: Array<{ re: RegExp; reason: string }> = [
-  { re: /\b(sex|sexual|sexy|nude|nudity|naked|porn|pornographic|erotic|nsfw|explicit)\b/i, reason: "adult-content" },
-  { re: /(色情|裸露|裸体|成人内容|裸照|性暗示)/, reason: "adult-content" },
+  // Inflections, not just the dictionary spellings (pass 51): the old
+  // alternation matched `nude`/`porn` but not `nudes`/`pornos`, and `\b` after
+  // each stem is why the plural forms walked past — "nudes", "pornos",
+  // "sexualized", "explicitly" all returned ok. The stems carry their own
+  // suffix (sex → sexual/sexually/sexualized, nude → nudes) rather than a
+  // blanket `\w*`: `\bsex\w*` would also block "sextant", and a false positive
+  // on a legitimate astronomy prompt is not free. porn/erotic/explicit use
+  // `\w*` because no ordinary word shares those stems.
+  { re: /\b(sex(?:s|ual(?:ly|ized|ization)?|y)?|nude\w*|nudity|naked|porn\w*|erotic\w*|nsfw|explicit\w*)\b/i, reason: "adult-content" },
+  // Traditional spellings are the same words (pass 51): `裸體` and `成人內容`
+  // render identically to the blocked simplified forms and were not matched.
+  { re: /(色情|裸露|裸体|裸體|成人内容|成人內容|裸照|性暗示)/, reason: "adult-content" },
   { re: /\b(gore|gory|bloodbath|mutilation|torture|dismember)\w*\b/i, reason: "violence" },
   { re: /(血腥|暴力|折磨|肢解)/, reason: "violence" },
-  { re: /\b(child(ren)? (abuse|porn|sexual)|minor.*sexual|underage)\b/i, reason: "child-safety" },
-  { re: /(儿童.*(色情|性)|未成年.*色情)/, reason: "child-safety" },
-  { re: /\b(weapon|bomb|explosive|assassination)\b/i, reason: "weapons" },
-  { re: /(武器|炸弹|爆炸物|刺杀)/, reason: "weapons" },
+  // `childporn` (one word) and the plural/traditional forms were the other
+  // trivial evasions: the old rule required a space after child/children.
+  { re: /\b(child(?:ren)?\s*(?:abuse|porn(?:ography)?|sexual)|minor.*sexual|underage)\b/i, reason: "child-safety" },
+  { re: /((儿童|兒童).*(色情|性)|未成年.*色情)/, reason: "child-safety" },
+  { re: /\b(weapons?|bombs?|explosives?|assassinations?)\b/i, reason: "weapons" },
+  { re: /(武器|炸弹|炸彈|爆炸物|刺杀|刺殺)/, reason: "weapons" },
 ];
 
 // The word list is a speed bump, not the control: the provider's own filter and

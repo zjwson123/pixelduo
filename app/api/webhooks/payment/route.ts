@@ -3,7 +3,8 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { rateLimit } from "@/lib/rate-limit";
 import { fulfillOrder, revokeOrderCreditsTx, revokePlanEntitlementTx, dbNow } from "@/lib/ledger";
-import { getPaymentProvider } from "@/lib/payments";
+import { getWebhookVerifiers } from "@/lib/payments";
+import type { IgnoredWebhook, PaymentWebhookEvent } from "@/lib/payments/types";
 import { sanitizeWebhookPayload } from "@/lib/payments/sanitize";
 import { sendOrderReceiptEmail, sendRefundEmail } from "@/lib/mail";
 import { captureError } from "@/lib/observability";
@@ -77,7 +78,22 @@ export async function POST(req: Request) {
     // invalid signature; this route answers that 400 without reporting, so the
     // fault surfaced only as paid orders whose credits never arrived.
     const nowSec = Math.floor((await dbNow(prisma)).getTime() / 1000);
-    const event = await getPaymentProvider().verifyWebhook(raw, req.headers, { nowSec });
+    // Verify against every provider this deployment still has credentials for,
+    // not only the CURRENT PAYMENT_PROVIDER (pass 51). Switching providers is a
+    // configuration change by design (the checkout path resolves one provider),
+    // but orders created under the previous provider keep receiving their
+    // refunds/disputes there — and those deliveries carry that provider's
+    // signature header. Verifying only the selected provider answered 400 for
+    // every one of them, which the provider retries for days and then stops:
+    // the money was returned provider-side while the credits and paid tier
+    // survived, permanently, with no signal. Each verifier still checks its own
+    // HMAC, so an event is accepted only when a configured secret signs it; the
+    // provider-match check below then binds it to the order it names.
+    let event: PaymentWebhookEvent | IgnoredWebhook | null = null;
+    for (const verifier of getWebhookVerifiers(req.headers)) {
+      event = await verifier.verifyWebhook(raw, req.headers, { nowSec });
+      if (event) break;
+    }
     // null = the signature did not verify (reject). A signed event we don't
     // act on must be ACKed, not 400'd: providers retry "failed" deliveries for
     // days and can disable the endpoint over them, which would stop the paid
@@ -175,6 +191,80 @@ export async function POST(req: Request) {
           // claims strictly from "pending"), and only that path can be abused
           // by an event that names an order it did not pay for.
           if (order.status === "pending") assertPaymentMatchesOrder(order, event);
+          // A refund can arrive BEFORE the paid event. Paddle scopes its
+          // full/partial flag to each adjustment, and the refund branch can
+          // only measure a partial against the order's price while
+          // collectedAmountUsd is still null — so two partials that together
+          // returned a DISCOUNTED checkout in full did not promote, and the
+          // later transaction.completed granted the full credits (and, for a
+          // plan, the tier) for money that was already back with the customer
+          // (pass 51). The captured basis is known now, so re-measure before
+          // granting: if every captured cent has already been returned, mark
+          // the order refunded instead of fulfilling it.
+          //
+          // The row lock is taken in fulfillOrder's own order — every plan
+          // order of the account ascending first — so this pre-check cannot
+          // form a lock cycle with a concurrent fulfillment or refund (both
+          // hold that set before touching the incoming order). It also makes
+          // the read see a refund accumulator that committed while we waited.
+          if (order.kind === "plan") {
+            await tx.$queryRaw(
+              Prisma.sql`SELECT id FROM "Order" WHERE "userId" = ${order.userId} AND kind = 'plan' ORDER BY id FOR UPDATE`,
+            );
+          }
+          const lockedRows = await tx.$queryRaw<
+            Array<{
+              status: string;
+              refundedAmountUsd: number;
+              disputedAmountUsd: number;
+              amountUsd: number;
+              collectedAmountUsd: number | null;
+            }>
+          >(Prisma.sql`
+            SELECT status, "refundedAmountUsd", "disputedAmountUsd", "amountUsd", "collectedAmountUsd"
+            FROM "Order" WHERE id = ${order.id} FOR UPDATE
+          `);
+          const locked = lockedRows[0];
+          if (locked?.status === "pending") {
+            const listPrice = locked.amountUsd;
+            const captured =
+              event.collectedAmountUsd ?? locked.collectedAmountUsd ?? listPrice;
+            const basis = Math.min(captured, listPrice);
+            // `returns > 0` matters for a 100%-discounted checkout: its
+            // captured basis is legitimately $0, and `0 >= 0 - 0.005` would
+            // otherwise refuse to fulfill an order that collected nothing AND
+            // returned nothing.
+            const returns = locked.refundedAmountUsd + locked.disputedAmountUsd;
+            if (returns > 0 && returns >= basis - 0.005) {
+              const flipped = await tx.order.updateMany({
+                where: { id: order.id, status: "pending" },
+                data: {
+                  status: "refunded",
+                  // Record the captured amount with the flip, so later
+                  // deliveries and an operator reading the order see the basis
+                  // this decision used.
+                  ...(event.collectedAmountUsd !== undefined
+                    ? { collectedAmountUsd: event.collectedAmountUsd }
+                    : {}),
+                },
+              });
+              if (flipped.count === 1) {
+                const user = await tx.user.findUnique({
+                  where: { id: order.userId },
+                  select: { email: true },
+                });
+                return {
+                  kind: "refund" as const,
+                  email: user?.email ?? "",
+                  itemName:
+                    order.kind === "plan"
+                      ? `${order.planId ?? "plan"} plan`
+                      : `${order.credits} credits pack`,
+                  amountUsd: captured,
+                };
+              }
+            }
+          }
           const result = await fulfillOrder(
             order.userId,
             order.id,
@@ -239,6 +329,34 @@ export async function POST(req: Request) {
           });
         }
       } else if (event.type === "refunded") {
+        // The same binding the paid path enforces. A signature proves the event
+        // is genuine; it does not prove it names an order created by that same
+        // provider — and with the switch-aware verifier above, an event from a
+        // provider that is no longer selected can now reach this code. Acting on
+        // a cross-provider event would revoke credits for a payment the event's
+        // provider never took. Throw (500) like the paid path: not acking means
+        // the delivery keeps being retried until an operator corrects the
+        // configuration, instead of the mismatch being silently persisted.
+        if (order && order.provider !== event.provider) {
+          throw new Error(
+            `payment-provider-mismatch: order is ${order.provider}, event is ${event.provider}`,
+          );
+        }
+        // Hold every plan order of the account, ascending, BEFORE the
+        // accumulator writes — the same set and order fulfillOrder takes first.
+        // Only the promotion path here downgrades a tier, and two concurrent
+        // refunds of two fully-spent plan orders (so neither revoke takes a
+        // User-row lock) used to race revokePlanEntitlementTx's unlocked
+        // candidate read: each saw the other's still-uncommitted order as
+        // "paid" and downgraded to the older tier, leaving both orders refunded
+        // while the account kept a paid plan until the older cycle ended
+        // (pass 51). Taking the set first makes the two refunds serialize and
+        // keeps the lock order monotone with fulfillOrder and erasure.
+        if (order && order.kind === "plan") {
+          await tx.$queryRaw(
+            Prisma.sql`SELECT id FROM "Order" WHERE "userId" = ${order.userId} AND kind = 'plan' ORDER BY id FOR UPDATE`,
+          );
+        }
         // Only a FULL refund revokes credits AND flips the order: a partial
         // refund (e.g. $0.01) must neither wipe the remaining balance nor
         // consume the "paid" status a later full refund still needs.
@@ -453,6 +571,17 @@ export async function POST(req: Request) {
               event.disputedAmountUsd === undefined);
         }
         if (order && fullRefund) {
+          // Serialize the two claims below with every other status writer. An
+          // UPDATE that matches no row takes no lock, so a refund delivery
+          // carrying no amount (the mock provider, a relay-stripped payload —
+          // both treated as full) could run paidClaim (0 rows), then a paid
+          // fulfillment could commit pending→paid + grant, then pendingClaim
+          // (0 rows): the event is persisted and ACKed with no revocation, and
+          // every retry is deduped (pass 51). The explicit row lock — also taken
+          // by the paid path's pre-check and by the accumulator UPDATEs — makes
+          // the later claim re-evaluate after the fulfillment commits, which is
+          // the state the CAS was designed for.
+          await tx.$queryRaw(Prisma.sql`SELECT id FROM "Order" WHERE id = ${order.id} FOR UPDATE`);
           // The pre-state has to be part of the CAS, never a value read earlier
           // in this transaction: updateMany re-evaluates its predicate against
           // the row as it looks AFTER any lock wait (READ COMMITTED /

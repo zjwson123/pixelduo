@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ADMIN_GUARD_LOCK, assertAnotherAdminRemains, requireAdmin } from "@/lib/admin";
+import { ADMIN_GUARD_LOCK, ADMIN_TX_OPTIONS, assertAnotherAdminRemains, requireAdmin } from "@/lib/admin";
 import { enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, refuseNul, zodMessage, tooLarge } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 
@@ -28,8 +28,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     // one atomic step, taken under a lock held to commit, or both writes land
     // and the install is left with no admin and no in-app way to mint one.
     const updated = await prisma.$transaction(async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${ADMIN_GUARD_LOCK})`;
-      const target = await tx.user.findUnique({
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${ADMIN_GUARD_LOCK})`;      const target = await tx.user.findUnique({
         where: { id },
         select: { id: true, role: true, emailVerified: true },
       });
@@ -51,7 +50,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
         data: { role: body.role },
         select: { id: true, role: true },
       });
-    });
+    }, ADMIN_TX_OPTIONS);
     return ok({ user: updated });
   } catch (e) {
     if (e instanceof z.ZodError) return fail(zodMessage(e));

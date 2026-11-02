@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { requireAdmin } from "@/lib/admin";
+import { ADMIN_TX_OPTIONS, requireAdmin } from "@/lib/admin";
 import { enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, refuseNul, zodMessage, tooLarge } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { adminGrantTx, adminClawbackTx } from "@/lib/ledger";
@@ -49,7 +49,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     await prisma.$transaction(async (tx) => {
       if (body.delta > 0) await adminGrantTx(tx, user.id, body.delta, body.note, adminId);
       else await adminClawbackTx(tx, user.id, -body.delta, body.note, adminId);
-    });
+    }, ADMIN_TX_OPTIONS);
     const updated = await prisma.user.findUniqueOrThrow({ where: { id: user.id }, select: { credits: true } });
     return ok({ credits: updated.credits });
   } catch (e) {

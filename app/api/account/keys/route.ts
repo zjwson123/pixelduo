@@ -52,8 +52,10 @@ export async function GET() {
 const MAX_ACTIVE_KEYS = 10;
 
 // Minting a key needs re-authentication (same bar as account deletion): a
-// stolen session cookie alone must not be able to mint a pd_live_ key that
-// outlives the session and never consults sessionVersion.
+// stolen session cookie alone must not be able to mint a pd_live_ key. The key
+// IS bound to the minting sessionVersion (lib/apikey.ts authenticateApiKey), so
+// a reset/revoke/2FA change retires it atomically — but it still outlives the
+// session it was minted in, which is why the re-auth gate remains.
 export async function POST(req: Request) {
   try {
     const { id: userId, sv } = await requireVerifiedUserSession();
@@ -66,8 +68,9 @@ export async function POST(req: Request) {
     const userLimited = await enforceUserRateLimit(userId, "apikey-create", 5, 60_000);
     if (userLimited) return fail(userLimited);
     // Cumulative brake (lib/twofa.ts) before the password and the second factor
-    // are compared: a key outlives sessions and never consults sessionVersion,
-    // so this re-auth gate gets the same campaign-level bound as the login step.
+    // are compared: a key outlives the session it was minted in (even though it
+    // is sessionVersion-bound), so this re-auth gate gets the same
+    // campaign-level bound as the login step.
     const lock = await twoFactorLockStatus(userId);
     if (lock.locked) return fail(new ApiError(429, TWOFA_LOCKED_ERROR, lock.retryAfterSec));
     const bodyRaw = await readBodyCapped(req, 8 * 1024);

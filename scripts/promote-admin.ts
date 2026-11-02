@@ -1,5 +1,5 @@
 import { prisma } from "../lib/prisma";
-import { ADMIN_GUARD_LOCK } from "../lib/admin-guard";
+import { ADMIN_GUARD_LOCK, ADMIN_TX_OPTIONS } from "../lib/admin-guard";
 
 // Roles the app recognises. requireAdmin only accepts "admin", so an unchecked
 // argument ("owner", "", a typo) wrote a value no code path understands and
@@ -50,7 +50,7 @@ async function main() {
       }
     }
     await tx.user.update({ where: { id: user.id }, data: { role } });
-  });
+  }, ADMIN_TX_OPTIONS);
   console.log(`[promote-admin] ${e} is now ${role}`);
 }
 

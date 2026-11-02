@@ -49,7 +49,10 @@ async function main() {
   } else if (!mailDeliverable()) {
     console.error(
       "       Set SMTP_URL + EMAIL_FROM (docs/deploy.md has the provider list) and re-run, or:\n" +
-        "       npx tsx scripts/setup-mail.ts <provider> <credential> [from-address]\n" +
+        "       read -s SMTP_CREDENTIAL; export SMTP_CREDENTIAL\n" +
+        "       npx tsx scripts/setup-mail.ts <provider> [address] [from-address]\n" +
+        "       (the credential goes through the environment, never argv — an argv credential\n" +
+        "       lands in shell history and is readable through ps for the whole run)\n" +
         "       To exercise the transport with no provider account: node scripts/dev-smtp-sink.mjs 2525 &\n" +
         "       then npx tsx scripts/setup-mail.ts local 2525",
     );

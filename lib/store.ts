@@ -228,42 +228,58 @@ export function decodeIpv4Literal(host: string): string | null {
   return null;
 }
 
+// Parse an IPv6 address into its eight 16-bit groups. Returns null on anything
+// that is not a plain colon-separated address (an embedded dotted quad is
+// handled before this by ipv6Private, whose callers still expect the mapped
+// forms to answer "internal").
+function parseIpv6(host: string): number[] | null {
+  const parts = host.split("::");
+  if (parts.length > 2) return null;
+  const head = parts[0] ? parts[0].split(":") : [];
+  const tail = parts.length === 2 && parts[1] ? parts[1].split(":") : [];
+  for (const g of [...head, ...tail]) if (!/^[0-9a-f]{1,4}$/.test(g)) return null;
+  if (parts.length === 1) return head.length === 8 ? head.map((g) => parseInt(g, 16)) : null;
+  if (head.length + tail.length > 7) return null;
+  const zeros = Array<string>(8 - head.length - tail.length).fill("0");
+  return [...head, ...zeros, ...tail].map((g) => parseInt(g, 16));
+}
+
 function ipv6Private(host: string): boolean {
   const h = host.toLowerCase().replace(/^\[|\]$/g, "");
-  if (h === "::" || h === "::1") return true; // unspecified, loopback
-  if (h.startsWith("::ffff:")) {
-    // IPv4-mapped ::ffff:a.b.c.d (dotted or hex last two hextets)
-    const v4 = h.slice(7);
-    if (isIP(v4) === 4) return ipv4Private(v4);
-    const m = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(v4);
-    if (m) return ipv4Private(split32((parseInt(m[1], 16) << 16) | parseInt(m[2], 16)));
-    return true; // unparseable mapped form → treat as internal
-  }
-  if (/^f[cd]/.test(h)) return true; // fc00::/7 ULA
-  if (/^fe[89ab]/.test(h)) return true; // fe80::/10 link-local
-  if (/^fe[c-f]/.test(h)) return true; // fec0::/10 site-local (deprecated, still routable)
-  if (/^ff/.test(h)) return true; // ff00::/8 multicast
-  if (h.startsWith("2001:db8")) return true; // 2001:db8::/32 documentation
-  if (h.startsWith("2001:0:") || h.startsWith("2001:0000")) return true; // 2001::/32 Teredo
-  if (h.startsWith("100::")) return true; // 100::/64 discard-only
-  if (h.startsWith("64:ff9b:")) return true; // NAT64 (embeds an IPv4)
-  if (h.startsWith("2002:")) return true; // 6to4 (embeds an IPv4)
-  // IPv4-COMPATIBLE addresses (::/96): "::7f00:1" is 127.0.0.1 and
-  // "::a9fe:a9fe" is the cloud metadata address, in a spelling the URL parser
-  // does not normalise and the mapped-quad branch above does not catch (there
-  // is no dotted quad). Nothing routes ::/96 today on the platforms this runs
-  // on, but the predicate's whole job is to answer "may we dial this", and
-  // "yes" for an address every IPv4 rule calls internal is the wrong answer —
-  // it only has to be reachable once, on one host, to become an SSRF.
-  const compat = /^::(?:([0-9a-f]{1,4}):)?([0-9a-f]{1,4})$/.exec(h);
-  if (compat) {
-    const hi = parseInt(compat[1] ?? "0", 16);
-    const lo = parseInt(compat[2], 16);
-    return ipv4Private(split32(((hi << 16) | lo) >>> 0));
-  }
-  // Embedded dotted quad ("::10.0.0.1", "64:ff9b::10.0.0.1")
+  // Embedded dotted quad ("::10.0.0.1", "64:ff9b::10.0.0.1", and the mapped
+  // "::ffff:127.0.0.1") first: parseIpv6 cannot read those groups.
   const dm = /(\d+\.\d+\.\d+\.\d+)$/.exec(h);
   if (dm) return ipv4Private(dm[1]);
+  // Numeric classification of the FULL address, not a string prefix. The old
+  // prefix tests only recognised the compressed spellings, so the fully
+  // expanded IPv4-mapped form — "0:0:0:0:0:ffff:7f00:1" is 127.0.0.1 — and
+  // "0:0:0:0:0:0:0:1" came back PUBLIC from a predicate whose whole job is to
+  // answer "may we dial this" (pass 51). Every caller passes a WHATWG-normalised
+  // hostname today, which hides it; the connect-time agent reuses this function
+  // precisely because string reliance was the thing that failed before.
+  const g = parseIpv6(h);
+  if (!g) return true; // unparseable → treat as internal
+  const [a, b, c, d, e, f, hi, lo] = g;
+  if (a === 0 && b === 0 && c === 0 && d === 0 && e === 0 && f === 0 && hi === 0 && lo === 0) return true; // ::
+  if (a === 0 && b === 0 && c === 0 && d === 0 && e === 0 && f === 0 && hi === 0 && lo === 1) return true; // ::1
+  // IPv4-mapped ::ffff:0:0/96 (hex last two hextets; the dotted form returned
+  // above).
+  if (a === 0 && b === 0 && c === 0 && d === 0 && e === 0 && f === 0xffff) {
+    return ipv4Private(split32(((hi << 16) | lo) >>> 0));
+  }
+  // IPv4-COMPATIBLE ::/96 ("::7f00:1", "::a9fe:a9fe" — cloud metadata).
+  if (a === 0 && b === 0 && c === 0 && d === 0 && e === 0 && f === 0) {
+    return ipv4Private(split32(((hi << 16) | lo) >>> 0));
+  }
+  if ((a & 0xfe00) === 0xfc00) return true; // fc00::/7 ULA
+  if ((a & 0xffc0) === 0xfe80) return true; // fe80::/10 link-local
+  if ((a & 0xffc0) === 0xfec0) return true; // fec0::/10 site-local (deprecated)
+  if ((a & 0xff00) === 0xff00) return true; // ff00::/8 multicast
+  if (a === 0x2001 && b === 0x0db8) return true; // 2001:db8::/32 documentation
+  if (a === 0x2001 && b === 0x0000) return true; // 2001::/32 Teredo
+  if (a === 0x0100 && b === 0 && c === 0 && d === 0) return true; // 100::/64 discard-only
+  if (a === 0x0064 && b === 0xff9b && c === 0 && d === 0 && e === 0 && f === 0) return true; // NAT64
+  if (a === 0x2002) return true; // 6to4 (embeds an IPv4)
   return false;
 }
 

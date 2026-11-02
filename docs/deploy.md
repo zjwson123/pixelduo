@@ -34,7 +34,7 @@
 | `EMAIL_VERIFY_AUTO` | 生产禁用 | 自动验证注册并发放注册奖励 = 无限量带额度的已验证账号 |
 | `PAYMENT_PROVIDER` + 对应密钥 | 必须能构造出 provider | `getPaymentProvider()` 现在也在启动时解析（`assertPaymentProviderUsable()`）：拼错的值、生产下的 `mock`、缺少 `STRIPE_WEBHOOK_SECRET` / Paddle 密钥都会让进程拒绝启动。此前它只在第一次 checkout 或 webhook 时才被调用，于是容器"健康"、每笔支付 500、**每个回调 500**——上游重试数天后停用该回调地址，结果是钱收了、积分没给 |
 
-标记为测试部署（`PAYMENT_ALLOW_MOCK=1`，CI 与 `ci-local.sh` 使用）时，后三项自动豁免——mock 支付本身在生产已被拒绝，该标记即"这不是真实部署"的声明。
+标记为测试部署（`PAYMENT_ALLOW_MOCK=1` **且** `PAYMENT_PROVIDER` 为空或 `mock`，CI 与 `ci-local.sh` 使用）时，后三项自动豁免。Pass 51 起这个标记必须与 mock provider 同时成立：此前只要残留一个 `PAYMENT_ALLOW_MOCK=1`，即使 `PAYMENT_PROVIDER=stripe|paddle` 正在收真钱，公开的 CI 签名密钥、http 的 `NEXTAUTH_URL`、缺失的 `SMTP_URL` 与 `EMAIL_VERIFY_AUTO=1` 也全部被放行。
 
 ### 会被静默忽略的配置（启动时告警）
 

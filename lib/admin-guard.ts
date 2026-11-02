@@ -19,6 +19,16 @@ import type { Prisma } from "@prisma/client";
 // namespace; the only consequence is a little extra serialization.
 export const ADMIN_GUARD_LOCK = 987_654_321;
 
+// Transactions that may wait on ADMIN_GUARD_LOCK (or on the User row an erasure
+// holds) must outlive the erasure that owns it: eraseUserArtifacts keeps the
+// lock for up to 60s across its bounded storage sweep (`timeout: 60_000`). The
+// role route and scripts/promote-admin.ts used Prisma's defaults (2s maxWait /
+// 5s timeout), so an ordinary role change or the documented admin-recovery
+// script issued while an account deletion was in flight aborted with P2028 —
+// a masked 500 plus a captured incident for a transient lock wait (pass 51).
+// 70s covers the erasure's own ceiling; 20s covers queuing behind it.
+export const ADMIN_TX_OPTIONS = { timeout: 70_000, maxWait: 20_000 } as const;
+
 // Rejects a mutation that would leave the install with no admin. Must run inside
 // the same transaction as the write it guards, with the lock above taken first,
 // and after the target's current role is known to be "admin".
