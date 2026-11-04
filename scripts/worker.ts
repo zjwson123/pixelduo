@@ -3,7 +3,7 @@ import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import { generateImages, laneCountFor, createVideoTask, pollVideoTask, saveRemoteVideo, mockImageProviderEnabled, type ProviderImage } from "../lib/providers";
 import { modelCost, videoCost } from "../lib/cost";
-import { analyzeAllImagesSequentially, moderationRequested } from "../lib/safety";
+import { analyzeAllImagesSequentially, moderationRequested, MODERATION_REFUSAL_MESSAGE } from "../lib/safety";
 import { getVisionConfig } from "../lib/keys";
 import { getStorage, newStorageKey } from "../lib/storage";
 import { concatInputsWithinBudget, concatVideos } from "../lib/video-concat";
@@ -254,7 +254,13 @@ export async function processImageJob(job: {
     // buffer plus its base64 encoding plus the JSON body at once.
     const audits = await analyzeAllImagesSequentially(rows.map((r) => r.url));
     if (audits.some((a) => a.flagged)) {
-      const msg = "image-flagged: moderation rejected the generated image";
+      // One constant: the route-side refusal budget matches this prefix in
+      // Job.error, so a wording change here must not silently disarm it.
+      const msg = MODERATION_REFUSAL_MESSAGE;
+      // failJob's terminal branch (status=failed, error=msg, refund) is also
+      // the durable record the route-side refusal budget counts; only the
+      // attempt that wins the terminal transition writes it, so a zombie
+      // standing down cannot double-count — see lib/safety.ts.
       const transitioned = await failJob(job.id, msg, { terminal: true, worker: workerId });
       await discardRefusedOutput(job.id, rows.map((r) => r.url), transitioned);
       console.warn(`[worker ${workerId}] job ${job.id}: ${msg}`);
@@ -683,7 +689,9 @@ async function main() {
       }
       if (!worked && idle % 20 === 0) console.log(`[worker] idle… (${idle}s)`);
     } catch (e) {
-      console.error("[worker] tick error:", e);
+      // The raw object carries the stack, which can quote the request that
+      // failed — including a provider credential echoed by a gateway (pass 52).
+      console.error("[worker] tick error:", redactSensitive(e instanceof Error ? (e.stack ?? e.message) : String(e)));
       captureError(e, { worker: workerId });
     }
     await new Promise((r) => setTimeout(r, 1200));

@@ -23,8 +23,27 @@
 // Retry-After, which is the honest answer for "the server is holding as many
 // streams as it will" and is recoverable (a browser retries image loads).
 
-export const MAX_CONCURRENT_FILE_STREAMS = 512;
-export const MAX_CONCURRENT_FILE_STREAMS_PER_OWNER = 128;
+// The ceilings and the S3 client's socket pool have to agree (pass 52). The
+// SDK's NodeHttpHandler defaults to maxSockets = 50 for the WHOLE client, and
+// every stream holds one socket from that pool until its consumer finishes or
+// the idle deadline fires. The old per-owner cap of 128 therefore sat ABOVE the
+// resource it was meant to protect: one ordinary account opening 51 GETs on
+// its own gallery key (the HEAD half was fixed in pass 51; the GET path still
+// opens the object) and never reading the bodies pinned the entire pool — every
+// other user's media hung and /api/health's storage probe answered 503 for the
+// whole deployment. lib/storage supplies an explicit agent sized above the
+// per-process ceiling (S3_MAX_SOCKETS, 192), so the caps below — not an SDK
+// default — are what binds.
+//
+// The per-owner ceiling has to fit ONE legitimately rendered page. /api/gallery
+// returns 60 rows and the grid renders all 60 <img> tags, and Caddy terminates
+// TLS with HTTP/2 — so the browser may hold far more than six requests for the
+// same origin at once. 32 made the 33rd thumbnail a 429 that the browser does
+// not retry. 64 covers a full gallery page with headroom, and still leaves at
+// least 128 of the 192 sockets to every other tenant, the HEAD/health probes
+// and uploads even when that owner is also a deliberate stream-parker.
+export const MAX_CONCURRENT_FILE_STREAMS = 128;
+export const MAX_CONCURRENT_FILE_STREAMS_PER_OWNER = 64;
 
 // How long a response may go without the consumer pulling another chunk before
 // it is assumed abandoned. A legitimate client reads continuously (the pauses

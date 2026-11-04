@@ -4,6 +4,7 @@ import { getVisionConfig } from "./keys";
 import { MAX_INPUT_PIXELS, isRasterImage } from "./watermark";
 import { sniffContentType, type MediaKind } from "./media-type";
 import { hostIsPublic, isPublicPort, readJsonCapped, ssrfPinnedAgent, outboundTimeoutMs } from "./store";
+import { prisma } from "./prisma";
 import { fetch as pinnedFetch } from "undici";
 
 const BLOCKED: Array<{ re: RegExp; reason: string }> = [
@@ -125,6 +126,69 @@ export function checkPrompt(prompt: string): SafetyResult {
     }
   }
   return { ok: true };
+}
+
+// Refunded moderation refusals are not free to the deployment: the provider has
+// already generated (and billed) the batch before the audit rejects it, and
+// failJob's terminal branch refunds the caller in full by design. A caller whose
+// prompt clears the word list but whose output the audit rejects therefore
+// spends the operator's provider budget without spending anything that stays
+// spent, and can repeat it at the route's 20/min for the life of the account
+// (probed: "a photorealistic woman in a sheer wet t-shirt …" clears checkPrompt,
+// the provider bills four images, the audit flags one, and all 104 credits come
+// back). The audit is intentionally lenient about ordinary content, so a false
+// positive now and then is expected; an unbounded loop is not.
+//
+// Each terminal refusal is counted per account, and an account past the
+// threshold is refused BEFORE a new job (and therefore a new provider charge) is
+// created. Ten in 24 hours is far above an honest user's false-positive rate and
+// small enough that a funded account cannot serve as an unbounded provider-spend
+// pump — the refund still happens, so the account loses nothing but time.
+//
+// The count is DERIVED FROM THE JOB ROWS, not from a rate-limit bucket (pass 52
+// review). The refusal is already durably recorded by failJob's terminal branch
+// (`status=failed`, `error` beginning with the marker below) in the same
+// transaction as the refund, and the web app and worker are separate processes
+// in every shipped compose file. A Redis-bucket counter therefore needed Redis
+// to be both configured AND reachable to work at all: README/.env.example
+// document Redis as optional, and both processes fall back to their own
+// in-memory maps during an outage — in either case the worker's increments were
+// invisible to the route and the budget never fired. Postgres is the one store
+// both processes already require.
+export const MODERATION_REFUSAL_LIMIT = 10;
+export const MODERATION_REFUSAL_WINDOW_MS = 24 * 3600_000;
+/** The DB marker failJob stores, and the message built from it (one spelling). */
+export const MODERATION_REFUSAL_ERROR_PREFIX = "image-flagged:";
+export const MODERATION_REFUSAL_MESSAGE = `${MODERATION_REFUSAL_ERROR_PREFIX} moderation rejected the generated image`;
+
+export interface ModerationRefusalBudget {
+  ok: boolean;
+  /** Seconds until the oldest counted refusal leaves the window. */
+  retryAfterSec?: number;
+  /** How many refusals are currently counted (for the log/tests). */
+  refused: number;
+}
+
+/** Whether the account may still submit a generation, and for how long not. */
+export async function moderationRefusalBudget(userId: string): Promise<ModerationRefusalBudget> {
+  const cutoff = new Date(Date.now() - MODERATION_REFUSAL_WINDOW_MS);
+  // At most LIMIT rows, oldest first: the index is (userId, createdAt), so the
+  // scan stops as soon as the budget is known to be spent.
+  const rows = await prisma.job.findMany({
+    where: {
+      userId,
+      status: "failed",
+      error: { startsWith: MODERATION_REFUSAL_ERROR_PREFIX },
+      createdAt: { gte: cutoff },
+    },
+    orderBy: { createdAt: "asc" },
+    take: MODERATION_REFUSAL_LIMIT,
+    select: { createdAt: true },
+  });
+  if (rows.length < MODERATION_REFUSAL_LIMIT) return { ok: true, refused: rows.length };
+  const oldest = rows[0].createdAt.getTime();
+  const retryAfterSec = Math.max(1, Math.ceil((oldest + MODERATION_REFUSAL_WINDOW_MS - Date.now()) / 1000));
+  return { ok: false, refused: rows.length, retryAfterSec };
 }
 
 export interface ImageAudit {

@@ -2,7 +2,7 @@ import { z } from "zod";
 import { enforceRateLimit, errorResponse, fail, ok, parseJsonBody, readBodyCapped, zodMessage, tooLarge } from "@/lib/api";
 import { rateLimit } from "@/lib/rate-limit";
 import { authenticateApiKey } from "@/lib/apikey";
-import { checkPrompt } from "@/lib/safety";
+import { checkPrompt, moderationRefusalBudget } from "@/lib/safety";
 import { createGenerationJob, createMediaJob } from "@/lib/queue";
 import { enabledImageModelIds, enabledVideoModelIds, getVideoModels, getModel, modelEnum } from "@/lib/model-registry";
 import { randomUUID } from "crypto";
@@ -78,6 +78,24 @@ export async function POST(req: Request) {
 
     const model = body.model;
     const isVideo = getModel(model)?.mediaType === "video";
+
+    // The refunded-moderation-refusal bound (pass 52) applies to the image
+    // lanes, which are the ones the output audit covers. Video is unchanged:
+    // it has no output audit to trigger the counter. Same limit as the web
+    // routes — see lib/safety.ts.
+    if (!isVideo) {
+      const refusalBudget = await moderationRefusalBudget(auth.userId);
+      if (!refusalBudget.ok) {
+        return errorResponse(
+          {
+            ok: false,
+            error:
+              "moderation-cooldown: too many recent generations were refused by the content audit — try again later",
+          },
+          { status: 429, headers: { "Retry-After": String(refusalBudget.retryAfterSec ?? 3600) } },
+        );
+      }
+    }
 
     if (isVideo) {
       // The public API has no image field: pure image-to-video models (i2v)

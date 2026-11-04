@@ -1,6 +1,6 @@
 import { z } from "zod";
-import { enforceRateLimit, enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, requireVerifiedUser, zodMessage, tooLarge } from "@/lib/api";
-import { checkPrompt } from "@/lib/safety";
+import { enforceRateLimit, enforceUserRateLimit, errorResponse, fail, ok, parseJsonBody, readBodyCapped, requireVerifiedUser, zodMessage, tooLarge } from "@/lib/api";
+import { checkPrompt, moderationRefusalBudget } from "@/lib/safety";
 import { createMediaJob } from "@/lib/queue";
 import { getStorage } from "@/lib/storage";
 import { saveBase64Image } from "@/lib/store";
@@ -48,6 +48,19 @@ export async function POST(req: Request) {
     const body = schema.parse(parseJsonBody(bodyRaw.raw));
     const safety = checkPrompt(body.prompt);
     if (!safety.ok) return fail(new Error(`blocked:${safety.reason}`));
+    // Same refunded-provider-spend bound as /api/generate, and before the
+    // reference upload is stored so a cooldown costs no storage either.
+    const refusalBudget = await moderationRefusalBudget(userId);
+    if (!refusalBudget.ok) {
+      return errorResponse(
+        {
+          ok: false,
+          error:
+            "moderation-cooldown: too many recent generations were refused by the content audit — try again later",
+        },
+        { status: 429, headers: { "Retry-After": String(refusalBudget.retryAfterSec ?? 3600) } },
+      );
+    }
 
     // Strip the data URL prefix if present.
     const cleaned = body.image.match(DATA_URL_RE)?.[1] ?? body.image;

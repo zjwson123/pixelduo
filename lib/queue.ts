@@ -761,7 +761,7 @@ export async function checkpointJobProgress(jobId: string, payload: unknown, wor
     })
     .catch((e) => {
       console.error(
-        `[queue] checkpoint write failed for job ${jobId}: ${e instanceof Error ? e.message : String(e)}`,
+        `[queue] checkpoint write failed for job ${jobId}: ${redactSensitive(e instanceof Error ? e.message : String(e))}`,
       );
       captureError(e, { jobId, checkpoint: "progress" });
       return null;

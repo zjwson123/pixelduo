@@ -68,3 +68,49 @@ export async function revokeApiKey(userId: string, keyId: string): Promise<boole
   });
   return res.count === 1;
 }
+
+// How many REVOKED keys an account keeps for display. Revocation never deleted
+// the row, so an account could mint (5/min) and revoke (20/min) forever: one
+// day of a script left ~7,200 rows, `GET /api/account/keys` returned every one
+// of them on each call (no take/cursor), and the table grew permanently for
+// every tenant because nothing else prunes. Only the newest few revoked keys
+// have any display value — the rest are history nobody can act on. Active keys
+// are never touched: their own cap (MAX_ACTIVE_KEYS) is enforced separately.
+const MAX_REVOKED_KEYS_RETAINED = 50;
+
+// Rows removed per call. A pre-fix account can carry a tail this function is
+// the only cure for, and both failure modes have to stay bounded: an unbounded
+// DELETE inside the mint transaction can exceed Prisma's 5s interactive budget
+// (P2028 would roll the mint back and the next attempt would retry the same
+// DELETE forever), and binding one parameter per stale row hits Postgres's
+// 32,767-parameter ceiling at ~2 days of scripted revocation (pass 18). One
+// bounded batch per mint converges in a few mints; callers prune best-effort,
+// outside the transaction, so neither failure can block a key mint.
+const MAX_PRUNE_BATCH = 500;
+
+export async function pruneRevokedApiKeys(
+  userId: string,
+  tx: Prisma.TransactionClient | typeof prisma = prisma,
+): Promise<number> {
+  const keep = await tx.apiKey.findMany({
+    where: { userId, revokedAt: { not: null } },
+    orderBy: { createdAt: "desc" },
+    take: MAX_REVOKED_KEYS_RETAINED,
+    select: { id: true },
+  });
+  // Fewer than the retained window means nothing to retire.
+  if (keep.length < MAX_REVOKED_KEYS_RETAINED) return 0;
+  // Oldest first, so the retention window is what survives. Selecting ids now
+  // (rather than deleting by predicate) also keeps a concurrently revoked key
+  // out of the batch: it was active at query time and is therefore not in this
+  // list, so its owner still sees the revocation they just performed.
+  const stale = await tx.apiKey.findMany({
+    where: { userId, revokedAt: { not: null }, id: { notIn: keep.map((k) => k.id) } },
+    orderBy: { createdAt: "asc" },
+    take: MAX_PRUNE_BATCH,
+    select: { id: true },
+  });
+  if (stale.length === 0) return 0;
+  const res = await tx.apiKey.deleteMany({ where: { id: { in: stale.map((s) => s.id) } } });
+  return res.count;
+}

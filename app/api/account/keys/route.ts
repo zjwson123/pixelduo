@@ -3,7 +3,8 @@ import { Prisma } from "@prisma/client";
 import { ApiError, enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, requireVerifiedUser, requireVerifiedUserSession, zodMessage, tooLarge } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { passwordReauthRefusal } from "@/lib/auth";
-import { createApiKey } from "@/lib/apikey";
+import { captureError } from "@/lib/observability";
+import { createApiKey, pruneRevokedApiKeys } from "@/lib/apikey";
 import {
   verifyTotp,
   useBackupCode,
@@ -38,11 +39,31 @@ export async function GET() {
     // rotation lifts. Same treatment as ledger / gallery / orders / me.
     const listLimited = await enforceUserRateLimit(userId, "apikey-list", 60, 60_000);
     if (listLimited) return fail(listLimited);
-    const keys = await prisma.apiKey.findMany({
-      where: { userId },
-      orderBy: { createdAt: "desc" },
-      select: { id: true, name: true, prefix: true, revokedAt: true, lastUsedAt: true, createdAt: true },
-    });
+    // Two reads, two bounds. Active keys are capped by MAX_ACTIVE_KEYS and must
+    // NEVER be clipped: those rows are the only place the console can render a
+    // revoke button, and an account can hold old active keys while minting and
+    // revoking newer ones — a single `take` over both sets would then hide a
+    // live credential from the UI while the cap still counts it. Revoked rows
+    // are bounded because a pre-fix account can carry a long tail; pruning
+    // retires it in batches on the next mint (lib/apikey.ts).
+    const keySelect = {
+      id: true,
+      name: true,
+      prefix: true,
+      revokedAt: true,
+      lastUsedAt: true,
+      createdAt: true,
+    } as const;
+    const [active, revoked] = await Promise.all([
+      prisma.apiKey.findMany({ where: { userId, revokedAt: null }, orderBy: { createdAt: "desc" }, select: keySelect }),
+      prisma.apiKey.findMany({
+        where: { userId, revokedAt: { not: null } },
+        orderBy: { createdAt: "desc" },
+        take: 100,
+        select: keySelect,
+      }),
+    ]);
+    const keys = [...active, ...revoked].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
     return ok({ keys });
   } catch (e) {
     return fail(e);
@@ -146,6 +167,14 @@ export async function POST(req: Request) {
       }
       return createApiKey(userId, body.name ?? "default", fresh.sessionVersion, tx);
     });
+    // Minting is the one write this account makes repeatedly, so it is also the
+    // natural place to retire the history revocation leaves behind (pass 52) —
+    // revoked rows used to accumulate without any bound and the list endpoint
+    // returned all of them. It runs AFTER the mint transaction, best-effort:
+    // the same per-account advisory lock guards job creation, and a slow batch
+    // inside the 5s transaction budget must not be able to fail the mint (or
+    // block a generation) for exactly the accounts this cleanup targets.
+    await pruneRevokedApiKeys(userId).catch((e) => captureError(e, { scope: "apikey-prune" }));
     return ok({ ...key, note: "copy now — the full key is shown only once" });
   } catch (e) {
     if (e instanceof z.ZodError) return fail(zodMessage(e));

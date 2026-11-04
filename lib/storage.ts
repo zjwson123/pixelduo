@@ -1,5 +1,7 @@
 import fs from "fs";
 import fsp from "fs/promises";
+import http from "http";
+import https from "https";
 import path from "path";
 import { randomUUID } from "crypto";
 import { Readable } from "stream";
@@ -157,6 +159,16 @@ class LocalStorage implements StorageDriver {
   }
 }
 
+// Sockets the S3 client may hold at once, for BOTH schemes. The SDK's default
+// is 50 for the whole client, which was below the per-owner stream ceiling
+// (lib/stream-limit.ts) and let one account pin the pool by opening streams and
+// never reading them. The ceilings are now 128 per process and 64 per owner,
+// and this pool sits above BOTH — so the stream caps are what binds and a
+// saturated 128-stream process still leaves 64 sockets for the health probe,
+// HeadObject and PUTs. A single owner can hold at most 64 of them. Exported so
+// the relationship is asserted in tests instead of living in a comment.
+export const S3_MAX_SOCKETS = 192;
+
 class S3Storage implements StorageDriver {
   private client: S3Client;
   private bucket: string;
@@ -196,11 +208,22 @@ class S3Storage implements StorageDriver {
       // to the request HANDLER, not to the client config: S3ClientConfig has no
       // such fields, and an options object here is what NodeHttpHandler.create
       // accepts.
+      //
+      // The two agents exist for the same reason (pass 52): smithy's own
+      // default agent is capped at maxSockets = 50, shared by every S3 call in
+      // the process, while a `/api/files` stream holds one of those sockets for
+      // as long as its consumer takes. Resolving the default pool above the
+      // stream ceilings turns a single account's parked streams from a
+      // deployment-wide outage into a bounded 429 for that account. keepAlive
+      // matches the SDK default the explicit agent replaces; both schemes are
+      // configured because S3_ENDPOINT may be http (MinIO) or https.
       requestHandler: {
         requestTimeout: outboundTimeoutMs(30_000),
         connectionTimeout: outboundTimeoutMs(5_000),
         socketTimeout: 60_000,
         throwOnRequestTimeout: true,
+        httpAgent: new http.Agent({ keepAlive: true, maxSockets: S3_MAX_SOCKETS }),
+        httpsAgent: new https.Agent({ keepAlive: true, maxSockets: S3_MAX_SOCKETS }),
       },
     });
   }

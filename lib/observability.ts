@@ -1,37 +1,12 @@
 import * as Sentry from "@sentry/node";
 import { scrubSentryEvent } from "./sentry-scrub";
 import { numberFromEnv } from "./runtime-env";
+import { redactSensitive } from "./redact";
 
-// Mask common secret patterns before secrets ever reach logs/Sentry.
-const SECRET_PATTERNS: Array<RegExp> = [
-  /\bsk-[A-Za-z0-9_-]{8,}/g,
-  /\bAKIA[0-9A-Z]{16}/g,
-  // Payment and first-party API keys in their bare form: Stripe's `sk_live_…`
-  // does not match the `sk-` pattern above (underscore, not hyphen), and
-  // Paddle's `pdl_live_…`/`pdl_sdbx_…` and this app's own `pd_live_…` match
-  // nothing at all. The Authorization form is covered by the Bearer rule, but a
-  // gateway/proxy error page that echoes a header value without the scheme
-  // (pass 47's Job.error case) would otherwise carry the credential into a
-  // customer's job history and the logs.
-  /\b(?:sk|pdl|pd)_(?:live|test|sdbx)_[A-Za-z0-9_]{8,}/g,
-  /Bearer\s+[A-Za-z0-9._~+/=-]{12,}/gi,
-  /x-amz-credential=[^&]{5,}/gi,
-  /x-amz-signature=[^&]{5,}/gi,
-  // Email addresses are PII in this codebase: Sentry's own query scrubber
-  // already rewrites `email=`/`q=` parameters (lib/sentry-scrub.ts), but the
-  // auth/transaction mail path passes `mailTo: user@example.com` as a CONTEXT
-  // value and SMTP errors quote the recipient in their message — neither
-  // matches a query parameter, so every failed verification/reset/receipt mail
-  // shipped the end user's address to a third party (pass 41). Matched
-  // anywhere, because the shapes this app produces are all bare addresses.
-  /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g,
-];
-
-export function redactSensitive(text: string): string {
-  let out = text;
-  for (const re of SECRET_PATTERNS) out = out.replace(re, "[REDACTED]");
-  return out;
-}
+// Re-exported for the call sites that already import it from here (lib/queue,
+// scripts/worker). The implementation lives in lib/redact.ts so the Sentry
+// beforeSend wire-up can use it without importing @sentry/node.
+export { redactSensitive } from "./redact";
 
 // The same treatment for the strings inside a context object.
 //
@@ -76,11 +51,12 @@ export function initObservability(service: string): boolean {
     // credentials, and it does not go through the web process's configs: without
     // these two the shared scrubber simply does not run here, while the SDK's
     // default integrations still ship console output as breadcrumbs and
-    // uncaught errors as events (both bypassing captureError, whose only
-    // redaction is a message-shaped pattern list). Same function the three
-    // sentry.*.config.ts files install, so the two surfaces cannot drift.
-    beforeSend: (event) => scrubSentryEvent(event),
-    beforeSendTransaction: (event) => scrubSentryEvent(event),
+    // uncaught errors as events (both bypassing captureError). The redactor
+    // masks the configured credential VALUES too (pass 52), not just the
+    // message-shaped prefix list. Same pairing the server config installs, so
+    // the two surfaces cannot drift.
+    beforeSend: (event) => scrubSentryEvent(event, redactSensitive),
+    beforeSendTransaction: (event) => scrubSentryEvent(event, redactSensitive),
   });
   Sentry.setTag("service", service);
   return true;

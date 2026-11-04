@@ -54,15 +54,29 @@ const SENSITIVE_PATH_TOKEN = /(\/hook\/)[A-Za-z0-9_-]{20,}/gi;
 const MAX_DEPTH = 8;
 const MAX_NODES = 5000;
 
-function scrubString(value: string): string {
-  return value.replace(SENSITIVE_QUERY_PARAM, "$1$2[Filtered]").replace(SENSITIVE_PATH_TOKEN, "$1[Filtered]");
+function scrubString(value: string, redactValue?: (text: string) => string): string {
+  // The value-shaped mask runs FIRST on the server/worker, where the operator's
+  // configured credentials are readable (pass 52): a gateway can echo a bare
+  // UUID key in an exception message or a console breadcrumb, and the SDK's own
+  // integrations ship uncaught errors and console output without going through
+  // captureError. The edge/browser configs pass no redactor — they hold no
+  // provider credentials, and importing lib/redact there would pull in fs.
+  const masked = redactValue ? redactValue(value) : value;
+  return masked
+    .replace(SENSITIVE_QUERY_PARAM, "$1$2[Filtered]")
+    .replace(SENSITIVE_PATH_TOKEN, "$1[Filtered]");
 }
 
-function scrubValue(value: unknown, depth: number, budget: { nodes: number }): unknown {
+function scrubValue(
+  value: unknown,
+  depth: number,
+  budget: { nodes: number },
+  redactValue?: (text: string) => string,
+): unknown {
   if (budget.nodes-- <= 0 || depth > MAX_DEPTH) return value;
-  if (typeof value === "string") return scrubString(value);
+  if (typeof value === "string") return scrubString(value, redactValue);
   if (Array.isArray(value)) {
-    return value.map((item) => scrubValue(item, depth + 1, budget));
+    return value.map((item) => scrubValue(item, depth + 1, budget, redactValue));
   }
   // Plain objects only: a Date, Buffer, Error or class instance is left alone
   // rather than cloned into something the SDK no longer understands.
@@ -71,7 +85,7 @@ function scrubValue(value: unknown, depth: number, budget: { nodes: number }): u
     if (proto !== Object.prototype && proto !== null) return value;
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      out[k] = scrubValue(v, depth + 1, budget);
+      out[k] = scrubValue(v, depth + 1, budget, redactValue);
     }
     return out;
   }
@@ -80,9 +94,10 @@ function scrubValue(value: unknown, depth: number, budget: { nodes: number }): u
 
 // Wired as beforeSend / beforeSendTransaction in both SDK configs. Returns the
 // event unchanged in shape — only string values that carry a sensitive query
-// parameter are rewritten, so a report stays as useful as it was.
-export function scrubSentryEvent<T>(event: T): T {
-  return scrubValue(event, 0, { nodes: MAX_NODES }) as T;
+// parameter or a configured credential are rewritten, so a report stays as
+// useful as it was.
+export function scrubSentryEvent<T>(event: T, redactValue?: (text: string) => string): T {
+  return scrubValue(event, 0, { nodes: MAX_NODES }, redactValue) as T;
 }
 
 export { SENSITIVE_QUERY_PARAM as _sensitiveQueryParamForTests };
