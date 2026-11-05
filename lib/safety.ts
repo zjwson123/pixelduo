@@ -5,6 +5,7 @@ import { MAX_INPUT_PIXELS, isRasterImage } from "./watermark";
 import { sniffContentType, type MediaKind } from "./media-type";
 import { hostIsPublic, isPublicPort, readJsonCapped, ssrfPinnedAgent, outboundTimeoutMs } from "./store";
 import { prisma } from "./prisma";
+import { dbNow } from "./ledger";
 import { fetch as pinnedFetch } from "undici";
 
 const BLOCKED: Array<{ re: RegExp; reason: string }> = [
@@ -171,7 +172,14 @@ export interface ModerationRefusalBudget {
 
 /** Whether the account may still submit a generation, and for how long not. */
 export async function moderationRefusalBudget(userId: string): Promise<ModerationRefusalBudget> {
-  const cutoff = new Date(Date.now() - MODERATION_REFUSAL_WINDOW_MS);
+  // The window is measured on the DATABASE's clock (pass 53), like every other
+  // deadline that compares against a DB-stamped column: Job.createdAt is
+  // `now()` from Postgres, and judging it with Date.now() meant a web process
+  // whose clock ran ahead by a day saw a cutoff in the future and counted ZERO
+  // refusals — reopening the provider-spend loop this budget closes — while a
+  // clock behind over-refused. A skew of minutes only shifted the window.
+  const now = await dbNow(prisma);
+  const cutoff = new Date(now.getTime() - MODERATION_REFUSAL_WINDOW_MS);
   // At most LIMIT rows, oldest first: the index is (userId, createdAt), so the
   // scan stops as soon as the budget is known to be spent.
   const rows = await prisma.job.findMany({
@@ -187,7 +195,7 @@ export async function moderationRefusalBudget(userId: string): Promise<Moderatio
   });
   if (rows.length < MODERATION_REFUSAL_LIMIT) return { ok: true, refused: rows.length };
   const oldest = rows[0].createdAt.getTime();
-  const retryAfterSec = Math.max(1, Math.ceil((oldest + MODERATION_REFUSAL_WINDOW_MS - Date.now()) / 1000));
+  const retryAfterSec = Math.max(1, Math.ceil((oldest + MODERATION_REFUSAL_WINDOW_MS - now.getTime()) / 1000));
   return { ok: false, refused: rows.length, retryAfterSec };
 }
 

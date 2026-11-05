@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { decode } from "next-auth/jwt";
 import { createHash } from "crypto";
 import { envLimit, ipBucketAddress } from "./lib/rate-limit";
+import { sessionCookieNames } from "./lib/auth-cookies";
 
 // Edge-safe in-memory limiter: a cheap first line of defense, per-instance.
 // Authoritative cross-instance limits live in route handlers backed by Redis
@@ -100,10 +101,12 @@ function sweep(now: number) {
 // worse trade. Residual, documented.
 async function bucketFor(req: NextRequest, ip: string, allowBearer: boolean): Promise<string> {
   const secret = process.env.NEXTAUTH_SECRET;
-  // Both spellings: next-auth picks __Secure- purely from the NEXTAUTH_URL
-  // scheme, and getting that wrong here would silently downgrade every
-  // authenticated request back onto the shared IP bucket.
-  const raw = ["__Secure-next-auth.session-token", "next-auth.session-token"]
+  // Every spelling the app can mint or a deployment can still be carrying:
+  // `__Host-` is what lib/auth.ts issues under https (pass 53), `__Secure-` is
+  // what every earlier deployment issued, and the bare name is development's.
+  // Getting this wrong would silently downgrade every authenticated request
+  // back onto the shared IP bucket.
+  const raw = sessionCookieNames()
     .map((n) => req.cookies.get(n)?.value)
     .find((v) => v);
   if (raw && secret) {

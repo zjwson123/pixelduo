@@ -222,6 +222,11 @@ model Image {
   // is the same lookup Template solves with its @@index([img]).
   @@index([userId, createdAt])
   @@index([userId, url])
+  // reclaimStoredArtifact asks "did this job store this key?" on every failed
+  // job's cleanup and every superseded extend clip. Without an index that was a
+  // sequential scan over the whole Image table per attempt, on the worker's
+  // failure path (pass 53).
+  @@index([jobId])
 }
 
 model Template {

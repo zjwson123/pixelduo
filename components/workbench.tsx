@@ -482,14 +482,18 @@ export function Workbench() {
     );
     if (!confirmed) return;
     try {
-      const data = await api<{ deleted: number }>("/api/gallery", {
+      const data = await api<{ deleted: number; keptIds?: string[] }>("/api/gallery", {
         method: "DELETE",
         body: JSON.stringify({ ids: [...galSelected] }),
       });
-      const gone = galSelected;
+      // A row whose blob could not be removed is kept server-side so erasure
+      // can still find the key; leave it in the grid instead of pretending it
+      // is gone (pass 53).
+      const kept = new Set(data.keptIds ?? []);
+      const gone = new Set([...galSelected].filter((id) => !kept.has(id)));
       setGallery((prev) => prev.filter((g) => !gone.has(g.id)));
-      setGalSelected(new Set());
-      setGalManaging(false);
+      setGalSelected(new Set(kept));
+      setGalManaging(kept.size > 0);
       setToast(`${data.deleted} ${t.galDeleted}`);
     } catch (e) {
       setToast(friendlyError(e));

@@ -11,6 +11,7 @@ import { prisma } from "./prisma";
 import { verifyPreAuthToken } from "./twofa";
 import { signupBonus } from "./ledger";
 import { readJsonCapped } from "./store";
+import { authCookies } from "./auth-cookies";
 
 // Source address for the per-(email, IP) login cap. Behind Caddy the LAST
 // X-Forwarded-For entry is the address the edge saw. The value is a hint only:
@@ -122,6 +123,14 @@ function hasControlChars(value: string): boolean {
 export const authOptions: NextAuthOptions = {
   session: { strategy: "jwt" },
   pages: { signIn: "/login" },
+  // `__Host-` in production (see lib/auth-cookies.ts): next-auth's default
+  // `__Secure-` names accept a Domain attribute, so a sibling subdomain could
+  // plant a session cookie — or OAuth state/PKCE pair — for the parent domain
+  // and win the duplicate-name race, logging the victim into the attacker's
+  // account. CSRF keeps next-auth's own default (already `__Host-` under
+  // https). Existing sessions re-login once, because the old cookie name cannot
+  // serve the new one.
+  cookies: authCookies(),
   providers: [
     CredentialsProvider({
       name: "credentials",

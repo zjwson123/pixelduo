@@ -67,14 +67,30 @@ export async function DELETE(req: Request) {
       where: { id: { in: ids }, userId },
       select: { id: true, url: true },
     });
-    const del = await prisma.image.deleteMany({
-      where: { id: { in: owned.map((r) => r.id) }, userId },
-    });
-    // Blob cleanup is best-effort: the row is what makes content visible, so
-    // a failed storage delete must not fail the request (orphaned blobs are
-    // an ops concern, not a user-facing one).
-    await Promise.all(owned.map((r) => getStorage().delete(r.url).catch(() => undefined)));
-    return ok({ deleted: del.count });
+    // Delete the OBJECT first, then the row (pass 53). The row is the only
+    // record naming the key: account erasure collects Image.url, and the
+    // Job.images checkpoint list deliberately ignores bare strings, so the old
+    // order — row first, blob best-effort — left an object no later code path
+    // could find when the storage delete failed. The account's "deleted" image
+    // then survived in the bucket forever while erasure reported success.
+    //
+    // Sequentially, because a page is up to 60 objects and parallel deletes
+    // would each take one of the finite S3 sockets. A blob that cannot be
+    // removed keeps its row so the user can retry and erasure can still see it.
+    const removed: string[] = [];
+    const keptIds: string[] = [];
+    for (const row of owned) {
+      try {
+        await getStorage().delete(row.url);
+        removed.push(row.id);
+      } catch {
+        keptIds.push(row.id);
+      }
+    }
+    const del = removed.length
+      ? await prisma.image.deleteMany({ where: { id: { in: removed }, userId } })
+      : { count: 0 };
+    return ok({ deleted: del.count, keptIds });
   } catch (e) {
     if (e instanceof z.ZodError) return fail(zodMessage(e));
     return fail(e);

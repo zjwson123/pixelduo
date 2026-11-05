@@ -61,16 +61,17 @@ ENV NEXT_TELEMETRY_DISABLED=1
 # machine. It can only arrive as a build ARG: `.dockerignore` deliberately keeps
 # `.env*` out of the build context.
 #
-# REQUIRED in practice, and the empty default is what makes that loud: the /login
-# prerender imports next-auth/react, which builds `new URL(NEXTAUTH_URL)`, so a
-# build with no argument fails with `TypeError: Invalid URL` instead of shipping
-# an image whose share previews point at localhost. (Pass 19's bug was the silent
-# version of this; pass 27 discovered the loud one when the pipeline started
-# building this stage — `docker build --target web .` without the arg fails.)
-# The compose files pass it from the same variable their runtime anchors require;
-# the pipeline passes it explicitly.
+# REQUIRED, asserted explicitly below. The old comment claimed an ARG-less build
+# failed with `TypeError: Invalid URL`; by pass 53 that was no longer true —
+# siteBase() falls back to http://localhost:3000 and next-auth's parseUrl()
+# accepts an empty value — so `docker build --target web .` succeeded and baked
+# localhost OpenGraph metadata into the image. The explicit test makes the
+# documented requirement real instead of a comment. The compose files pass it
+# from the same variable their runtime anchors require; the pipeline passes it
+# explicitly.
 ARG NEXTAUTH_URL=""
 ENV NEXTAUTH_URL=$NEXTAUTH_URL
+RUN test -n "$NEXTAUTH_URL" || (echo "[build] NEXTAUTH_URL build arg is required (docker build --build-arg NEXTAUTH_URL=https://your-domain ...)" >&2; exit 1)
 # The browser-side Sentry DSN is a BUILD-time value too (instrumentation-client.ts
 # is compiled into the client bundle; a runtime env var is far too late). There
 # was no ARG for it and `.dockerignore` keeps `.env*` out of the context, so it

@@ -8,7 +8,11 @@ import { prisma } from "../lib/prisma";
 //   npx tsx scripts/test-webhook.ts --create-order <email> <credits>   # creates a pending order then fires the webhook
 //   npx tsx scripts/test-webhook.ts --refund <orderId>                 # fires charge.refunded (credits are revoked)
 const BASE = process.env.PIXELDUO_BASE ?? "http://localhost:3000";
-const SECRET = process.env.STRIPE_WEBHOOK_SECRET ?? "whsec_test";
+// No default: `whsec_test` is published in this repository, and a production
+// deployment booting with it would accept forged paid webhooks (pass 53). The
+// helper must be pointed at the deployment's real secret explicitly.
+const SECRET = process.env.STRIPE_WEBHOOK_SECRET ?? "";
+if (!SECRET) throw new Error("set STRIPE_WEBHOOK_SECRET to the deployment's webhook signing secret");
 
 function signedPayload(orderId: string, eventType = "checkout.session.completed"): { payload: string; signature: string } {
   const payload = JSON.stringify({

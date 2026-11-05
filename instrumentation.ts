@@ -106,6 +106,37 @@ export function assertProductionConfig(env: NodeJS.ProcessEnv = process.env): vo
     );
   }
 
+  // Webhook signing secrets are bearer-equivalent: whoever knows one can forge
+  // `checkout.session.completed` / `transaction.completed` for a pending order
+  // and receive its credits without paying. The provider constructors only
+  // check that the value EXISTS, and the live-key gates beside them do not
+  // examine it — so the test value published in this repository
+  // (`whsec_test`: scripts/test-webhook.ts's default and the value
+  // docs/archive/progress.md records in a compose run) booted a production
+  // deployment clean, one POST away from free credits for anyone who has read
+  // the repo.
+  //
+  // Checked for every configured secret, not just the selected provider's:
+  // getWebhookVerifiers() accepts an alternate provider's header when its
+  // secret is set, and a forged delivery for an order created before a provider
+  // switch would still fulfil.
+  const PUBLISHED_WEBHOOK_SECRETS = ["whsec_test", "whsec_ci", "pdl_ntfset_test", "pdl_whsec_test", "pdl_whsec_ci"];
+  if (!testDeployment) {
+    for (const varName of ["STRIPE_WEBHOOK_SECRET", "PADDLE_WEBHOOK_SECRET"]) {
+      const value = (env[varName] ?? "").trim().toLowerCase();
+      if (!value) continue;
+      if (
+        value.length < 16 ||
+        PUBLISHED_WEBHOOK_SECRETS.includes(value) ||
+        PLACEHOLDER_SECRETS.some((p) => value.includes(p))
+      ) {
+        throw new Error(
+          `${varName} is shorter than 16 characters, still a placeholder, or a value published in this repository — anyone holding it can forge a paid webhook for a pending order. Copy the signing secret from the provider dashboard`,
+        );
+      }
+    }
+  }
+
   if (!testDeployment) {
     // next-auth derives the cookie's Secure flag AND the __Secure- prefix from
     // this URL's scheme alone (useSecureCookies = url.startsWith("https://")).

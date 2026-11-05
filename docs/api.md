@@ -37,7 +37,7 @@ curl -X POST https://pixelduo.ai/api/v1/images/generations \
   `seedance` creates a video job
 - `quality` default `medium` (ignored for seedream)
 - `n` 1–4 images (image models only)
-- `duration` 2–15 seconds, default 5 (video models only, billed per second)
+- `duration` 4–15 seconds, default 5 (video models only, billed per second)
 - Image-to-video models are web-app only: the public API has no image field,
   so pure i2v models are rejected with `400 invalid-input` — use the workbench
 - Concurrency: jobs are queued asynchronously — submit freely while earlier
@@ -66,8 +66,8 @@ through `queued → polling → done` (async provider task, typically 1–3 min)
 ## Limits & errors
 
 - Rate limit: 20 requests/minute per key (HTTP 429 with `Retry-After`)
-- Fetching delivered files from `/api/files/…` is capped at 128 concurrent
-  responses per account and 512 per instance, with a 2-minute idle deadline
+- Fetching delivered files from `/api/files/…` is capped at 64 concurrent
+  responses per account and 128 per instance, with a 2-minute idle deadline
   (HTTP 429 `too-many-streams` with `Retry-After`). Read each body; a client
   that opens responses and never consumes them holds a storage handle until the
   idle deadline retires it.

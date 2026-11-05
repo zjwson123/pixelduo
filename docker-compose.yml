@@ -176,10 +176,10 @@ services:
       args:
         # Baked into the prerendered metadata (og:url / og:image — see the
         # Dockerfile): the `.env` value at build time, so share previews point at
-        # the real origin. An empty value is survivable — robots.txt and
-        # sitemap.xml read the same value per request (lib/site.ts) — but the
-        # og: tags cannot, so production should have it here.
-        NEXTAUTH_URL: ${NEXTAUTH_URL:-}
+        # the real origin. The Dockerfile now REFUSES an empty value (pass 53),
+        # so the default here matches the runtime anchor's own default rather
+        # than letting a dev `docker compose build` fail.
+        NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
         # Build-time only, like NEXTAUTH_URL: instrumentation-client.ts is compiled
         # into the client bundle, so without a build arg these had no path into an
         # image at all and every containerised deployment ran with client-side
