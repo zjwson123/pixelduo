@@ -430,13 +430,19 @@ describe("OAuth callback account-farming cap (pass 15)", () => {
     expect(other.status).toBe(200);
     // ...and the password login path is not on this counter at all (it is
     // bounded per account by lib/login-guard.ts instead).
+    //
+    // The ctx has to describe the route the real router would hand the
+    // handler. Pass 54 made the cap read the same decoded `nextauth` segments
+    // next-auth dispatches on (the raw pathname could be percent-escaped past
+    // it), so reusing the google-shaped ctx here would claim this credentials
+    // request is an OAuth mint.
     const credentials = await authEndpoint(
       new NextRequest("http://localhost/api/auth/callback/credentials", {
         method: "POST",
         headers: { "content-type": "application/x-www-form-urlencoded", "x-forwarded-for": attacker },
         body: "csrfToken=tok&email=nobody%40test.dev&password=pw",
       }),
-      ctx as never,
+      { params: Promise.resolve({ nextauth: ["callback", "credentials"] }) } as never,
     );
     expect(credentials.status).toBe(200);
   });

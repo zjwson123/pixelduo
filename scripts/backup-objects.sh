@@ -105,7 +105,28 @@ docker run --rm \
       # Mirror the SNAPSHOT, not the live bucket: the source can be emptied
       # between the two legs, and `--remove` would then erase the off-site
       # copy as well. The validated snapshot is the thing being backed up.
-      mc mirror --overwrite --remove "/backups/objects/$STAMP" "tgt/$TARGET_BUCKET"
-      echo "[backup-objects] off-site mirror to $TARGET_BUCKET done"
+      #
+      # The snapshot goes under its OWN stamp prefix and is rotated like the
+      # local copies. It used to mirror into the target bucket root, so the
+      # off-site copy always equaled the previous night of live state: a partial
+      # deletion (compromised credentials, a mass-delete bug) was copied
+      # off-site on the next run, while the only history sat on the same host
+      # the off-site copy exists to survive (pass 54). Point-in-time prefixes
+      # keep the off-site copy able to restore something older than the most
+      # recent mistake; the local snapshot was already validated non-empty.
+      mc mb -p "tgt/$TARGET_BUCKET" >/dev/null 2>&1 || true
+      if mc mirror --overwrite --remove "/backups/objects/$STAMP" "tgt/$TARGET_BUCKET/$STAMP"; then
+        # Count-based rotation over the stamp prefixes only. `mc ls` prints
+        # directory names with a trailing slash; anything that is not one of our
+        # YYYYMMDD-HHMMSS names (operator-owned objects, an old flat-layout
+        # snapshot) is left untouched.
+        mc ls "tgt/$TARGET_BUCKET" 2>/dev/null | tr -s " " "\n" | grep -xE "[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]/" | tr -d "/" | sort -r | tail -n +$((KEEP + 1)) | while read -r old; do
+          mc rm --recursive --force "tgt/$TARGET_BUCKET/$old" || echo "[backup-objects] could not prune off-site snapshot $old" >&2
+          echo "[backup-objects] off-site snapshot $old pruned"
+        done
+        echo "[backup-objects] off-site mirror to $TARGET_BUCKET/$STAMP done"
+      else
+        echo "[backup-objects] off-site mirror FAILED at $STAMP (the local snapshot is complete)" >&2
+      fi
     fi
   '

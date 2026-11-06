@@ -416,10 +416,19 @@ services:
           echo "[backup-objects] FAILED at $${STAMP} — no snapshot written (empty or failed mirror), rotation skipped (the previous snapshots are untouched)" >&2;
         fi;
         if [ -n "$${BACKUP_TARGET_ENDPOINT}" ]; then
-          if mc alias set tgt $${BACKUP_TARGET_ENDPOINT} $${BACKUP_TARGET_ACCESS_KEY_ID} $${BACKUP_TARGET_SECRET_ACCESS_KEY} >/dev/null 2>&1 && mc mirror --overwrite --remove /backups/objects/$${STAMP} tgt/$${BACKUP_TARGET_BUCKET}; then
-            echo "[backup-objects] off-site mirror done";
+          if mc alias set tgt $${BACKUP_TARGET_ENDPOINT} $${BACKUP_TARGET_ACCESS_KEY_ID} $${BACKUP_TARGET_SECRET_ACCESS_KEY} >/dev/null 2>&1; then
+            mc mb -p tgt/$${BACKUP_TARGET_BUCKET} >/dev/null 2>&1 || true;
+            # Stamp prefix + remote rotation, same as docker-compose.yml: a
+            # bucket-root mirror made the off-site copy equal the previous night of live
+            # state, so a partial deletion propagated on the next run (pass 54).
+            if mc mirror --overwrite --remove /backups/objects/$${STAMP} tgt/$${BACKUP_TARGET_BUCKET}/$${STAMP}; then
+              mc ls tgt/$${BACKUP_TARGET_BUCKET} 2>/dev/null | tr -s " " "\n" | grep -xE "[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]/" | tr -d "/" | sort -r | tail -n +$$((BACKUP_KEEP > 0 ? BACKUP_KEEP + 1 : 2)) | while read -r old; do mc rm --recursive --force tgt/$${BACKUP_TARGET_BUCKET}/$$old || echo "[backup-objects] could not prune off-site snapshot $$old" >&2; done;
+              echo "[backup-objects] off-site mirror done";
+            else
+              echo "[backup-objects] off-site mirror FAILED at $${STAMP} (the local snapshot is complete)" >&2;
+            fi;
           else
-            echo "[backup-objects] off-site mirror FAILED at $${STAMP} (the local snapshot is complete)" >&2;
+            echo "[backup-objects] off-site mirror FAILED at $${STAMP} (cannot reach the target endpoint; the local snapshot is complete)" >&2;
           fi;
         fi;
         sleep 86400;

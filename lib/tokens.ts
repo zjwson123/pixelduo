@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "crypto";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "./prisma";
+import { dbNow } from "./ledger";
 
 export type TokenPurpose = "verify-email" | "reset-password";
 
@@ -31,7 +32,15 @@ const ROTATION_GRACE_MS = 30 * 60 * 1000;
 // purpose are invalidated so only the latest email link works.
 export async function createToken(email: string, purpose: TokenPurpose, userId?: string | null): Promise<string> {
   const raw = randomBytes(32).toString("hex");
-  const now = new Date();
+  // Both sides of these comparisons have to be on ONE clock. `createdAt` is
+  // stamped by the column default, i.e. the DATABASE's now(), while the cutoff
+  // and the new expiry used to be built from the app's `new Date()`. With the
+  // app ahead of the database by more than the grace window, a link the owner
+  // had just been mailed counted as stale and the next /forgot-password request
+  // — which needs no mailbox — consumed it before they could click (pass 54);
+  // the same skew shortened or lengthened every token's TTL. dbNow is the
+  // database's clock, the one that stamped the row and will judge it later.
+  const now = await dbNow(prisma);
   await prisma.$transaction([
     prisma.verificationToken.updateMany({
       where: {
@@ -68,7 +77,7 @@ export async function previewToken(purpose: TokenPurpose, rawToken: string): Pro
   const token = await prisma.verificationToken.findFirst({
     where: { purpose, tokenHash: sha256(rawToken), consumedAt: null },
   });
-  if (!token || token.expiresAt <= new Date()) return { ok: false };
+  if (!token || token.expiresAt <= (await dbNow(prisma))) return { ok: false };
   return { ok: true, email: token.email };
 }
 
@@ -86,11 +95,13 @@ export async function consumeToken(
   client: Prisma.TransactionClient | typeof prisma = prisma,
 ): Promise<ConsumeResult> {
   const tokenHash = sha256(rawToken);
-  const now = new Date();
   const token = await client.verificationToken.findFirst({
     where: { purpose, tokenHash, consumedAt: null },
   });
-  if (!token || token.expiresAt <= now) return { ok: false };
+  // Same one-clock rule as createToken/previewToken.
+  if (!token) return { ok: false };
+  const now = await dbNow(client);
+  if (token.expiresAt <= now) return { ok: false };
   const updated = await client.verificationToken.updateMany({
     where: { id: token.id, consumedAt: null },
     data: { consumedAt: now },
@@ -101,8 +112,12 @@ export async function consumeToken(
 
 // Housekeeping: drop expired or already-consumed tokens (call from cron).
 export async function purgeExpiredTokens(): Promise<number> {
+  // The cutoff is the database's clock, like the validity checks above: an app
+  // clock ahead of the database would otherwise purge links the consuming
+  // routes still accept.
+  const now = await dbNow(prisma);
   const res = await prisma.verificationToken.deleteMany({
-    where: { OR: [{ expiresAt: { lt: new Date() } }, { consumedAt: { not: null } }] },
+    where: { OR: [{ expiresAt: { lt: now } }, { consumedAt: { not: null } }] },
   });
   return res.count;
 }

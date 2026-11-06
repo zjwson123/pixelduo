@@ -134,4 +134,8 @@ ls -1t "$BACKUP_DIR"/"${DB}"-*.sql.gz 2>/dev/null | tail -n +$((KEEP + 1)) | whi
   echo "removed old backup: $old"
 done
 
-echo "restore: gunzip -c $OUT | docker exec -i $CONTAINER psql -U $DB_USER -d $DB"
+# The printed restore command has to fail as a whole, like the docs' version
+# (docs/deploy.md): psql without ON_ERROR_STOP continues past SQL errors and
+# exits 0, and without pipefail a gzip CRC failure is invisible — the operator
+# sees success and a half-restored database, then re-enables traffic (pass 54).
+echo "restore: set -o pipefail; gunzip -c $OUT | docker exec -i $CONTAINER psql -v ON_ERROR_STOP=1 --single-transaction -U $DB_USER -d $DB"

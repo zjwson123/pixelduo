@@ -1,7 +1,7 @@
 import NextAuth from "next-auth";
 import { NextRequest } from "next/server";
 import { authOptions } from "@/lib/auth";
-import { fail, enforceRateLimit, readBodyCapped, tooLarge } from "@/lib/api";
+import { fail, enforceRateLimit, readBodyCapped, tooLarge, refuseNul } from "@/lib/api";
 import { envLimit } from "@/lib/rate-limit";
 
 const handler = NextAuth(authOptions);
@@ -62,21 +62,36 @@ const OAUTH_CALLBACK_RATE_LIMIT_DEFAULT = 30;
 // is the password login, already bounded per account by lib/login-guard.ts, and
 // capping it here would spend an account-creation budget on ordinary logins.
 //
-// The path is matched by SHAPE, not by equality (pass 33): the anchored
-// `…/([^/]+)$` this replaced returned false for `/api/auth/callback/google/x`
-// and `/api/auth/callback/google/`, but next-auth dispatches on
-// `pathname.split("/").slice(3)` and reads only [0] and [1]
-// (node_modules/next-auth/core/index.js), so every extra segment was ignored
-// and the callback executed normally — the account-minting request ran at the
-// coarse 300/min cap instead of this one, and the redirect_uri comes from the
-// configured origin, not the request path, so the exchange still succeeded. A
-// farming run's cheapest evasion was one trailing character. Trailing segments
-// now charge this bucket; only the provider segment decides the credentials
-// exclusion, so `/api/auth/callback/credentials/…` (which next-auth also
-// dispatches as credentials) stays out of it.
-function isOAuthCallback(pathname: string): boolean {
+// The decision MUST be the same one next-auth makes. Its App Router adapter
+// dispatches on `await context.params.nextauth` — the catch-all segments AFTER
+// Next has decoded them (node_modules/next-auth/next/index.js) — while the raw
+// request URL keeps percent-escapes (`new URL(req.url).pathname` is
+// `/api/auth/%63allback/google`). Matching the pathname let an attacker spell
+// the same callback a different way: next-auth minted the provider-verified
+// account and this gate never charged the farming bucket (pass 54, probed live
+// — `%63allback/credentials` reaches the same handler as the canonical path).
+//
+// The decoded array is therefore the primary input, and the regex stays only as
+// a fallback for callers that supply no params. Extra trailing segments still
+// charge this bucket (pass 33); only the provider segment decides the
+// credentials exclusion, so `/api/auth/callback/credentials/…` stays out of it.
+function isOAuthCallback(nextauth: string[] | undefined, pathname: string): boolean {
+  if (nextauth && nextauth.length > 0) {
+    return nextauth[0] === "callback" && nextauth[1] !== "credentials";
+  }
   const m = /^\/api\/auth\/callback\/([^/]+)(?:\/.*)?$/.exec(pathname);
   return m !== null && m[1] !== "credentials";
+}
+
+// `context.params` is a Promise in Next 15+ and the tests pass one too; accept a
+// plain object as well so a direct invocation cannot silently fall back to the
+// raw-path regex for the wrong reason.
+async function decodedNextAuth(ctx: Parameters<typeof handler>[1]): Promise<string[] | undefined> {
+  const params = (
+    ctx as unknown as { params?: { nextauth?: string[] } | Promise<{ nextauth?: string[] }> }
+  ).params;
+  if (!params) return undefined;
+  return (await params)?.nextauth;
 }
 
 // Per-IP cap on ALL NextAuth endpoints (credentials login, CSRF/session
@@ -100,8 +115,18 @@ async function limited(req: NextRequest, ctx: Parameters<typeof handler>[1]) {
   const res = await enforceRateLimit(req, "auth-endpoint", 300, 60_000);
   if (res) return res;
   // Account-farming cap, before the handler below exchanges the provider code
-  // and provisions (and credits) the account.
-  if (isOAuthCallback(new URL(req.url).pathname)) {
+  // and provisions (and credits) the account. The decoded segments also pass
+  // the app's NUL/UTF-16 guard: this wrapper now awaits params before
+  // next-auth does, and a `%00` in them reached the dependency's own lookups
+  // (pass 27's rollout rule — a path param is guarded at the route).
+  let nextauth: string[] | undefined;
+  try {
+    nextauth = await decodedNextAuth(ctx);
+    for (const segment of nextauth ?? []) refuseNul(segment);
+  } catch (e) {
+    return fail(e);
+  }
+  if (isOAuthCallback(nextauth, new URL(req.url).pathname)) {
     const oauth = await enforceRateLimit(
       req,
       "oauth-callback",

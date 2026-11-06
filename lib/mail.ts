@@ -54,6 +54,46 @@ class DevMailer implements Mailer {
   }
 }
 
+// Whether an SMTP URL must refuse to continue without STARTTLS.
+//
+// `smtp://` (the documented providers all use port 587) starts TLS only when
+// the server's EHLO advertises STARTTLS; an on-path attacker who strips that
+// line makes nodemailer send `AUTH PLAIN` — for Resend/SendGrid/Postmark the
+// password IS the API key — and every message body (live reset and
+// verification links) in cleartext (pass 54). `requireTLS` makes a stripped
+// EHLO fail the send instead.
+//
+// Loopback is exempt because the shipped dev sink (scripts/dev-smtp-sink.mjs)
+// speaks no TLS and neither does `setup-mail.ts local`; `smtps://` is TLS from
+// the first byte and needs no flag. An operator whose relay genuinely cannot
+// do STARTTLS can still opt out explicitly in the URL
+// (`?requireTLS=false` — URL query options override this bag), but the default
+// fails closed rather than silently downgrading.
+export function smtpRequiresTls(url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== "smtp:") return false;
+  const host = parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (host === "localhost" || host === "::1" || host.endsWith(".localhost")) return false;
+  if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return false;
+  return true;
+}
+
+// Exported so the test can assert the options nodemailer actually receives.
+export function smtpTransportOptions(url: string) {
+  return {
+    url,
+    ...(smtpRequiresTls(url) ? { requireTLS: true } : {}),
+    connectionTimeout: 10_000,
+    greetingTimeout: 10_000,
+    socketTimeout: 30_000,
+  };
+}
+
 class SmtpMailer implements Mailer {
   private transport: Transporter;
   private from: string;
@@ -72,13 +112,9 @@ class SmtpMailer implements Mailer {
     // parameter is message defaults, so `createTransport(url, {timeouts})`
     // silently ignores them. With `url` inside the options object its own
     // parseConnectionUrl does the parsing (percent-encoded credentials and all)
-    // and the timeouts are part of the same options bag.
-    this.transport = nodemailer.createTransport({
-      url,
-      connectionTimeout: 10_000,
-      greetingTimeout: 10_000,
-      socketTimeout: 30_000,
-    });
+    // and the timeouts are part of the same options bag. smtpTransportOptions
+    // also pins requireTLS for non-loopback `smtp://` (pass 54).
+    this.transport = nodemailer.createTransport(smtpTransportOptions(url));
     this.from = from;
   }
 
