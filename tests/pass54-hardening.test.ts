@@ -245,7 +245,10 @@ describe("pass 54 — backup restore and off-site history", () => {
 
     const sh = read("scripts/backup-objects.sh");
     expect(sh).toContain('"tgt/$TARGET_BUCKET/$STAMP"');
-    expect(sh).toContain('grep -xE "[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]/"');
+    // The stamp filter is a shell case, not grep: the pinned mc image has no
+    // grep (pass 56), so the old pipeline silently pruned nothing.
+    expect(sh).toContain('case "$f" in');
+    expect(sh).not.toContain("grep -xE");
     expect(sh).toContain('mc rm --recursive --force "tgt/$TARGET_BUCKET/$old"');
   });
 

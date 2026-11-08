@@ -233,6 +233,9 @@ describe("pass 22 — a failed object mirror cannot masquerade as a good snapsho
     [
       "#!/bin/sh",
       `[ "$1" = "alias" ] && exit ${aliasFail ? 1 : 0}`,
+      // The non-empty gate counts with the client's own recursive listing
+      // (pass 56: the image has no `find`); one line is one object.
+      '[ "$1" = "ls" ] && { echo object.bin; exit 0; }',
       '[ "$1" = "mirror" ] || exit 0',
       `[ ${mirrorFail ? 1 : 0} = 1 ] && exit 1`,
       'for last in "$@"; do :; done',
@@ -314,9 +317,14 @@ describe("pass 22 — a failed object mirror cannot masquerade as a good snapsho
     return dir;
   }
 
+  // Snapshot names are YYYYMMDD-HHMMSS: rotation now filters out anything that
+  // is not one of ours (pass 56), so fixtures must look like real snapshots.
+  const OLDER = "20260101-000000";
+  const NEWER = "20260102-000000";
+
   for (const file of ["docker-compose.yml", "docker-compose.single.yml"]) {
     it(`rotates only after a mirror that succeeded (${file})`, () => {
-      const dir = scratch(["old-1", "old-2"]);
+      const dir = scratch([OLDER, NEWER]);
       try {
         const out = runOnce(file, dir, {}, 2);
         expect(out).toContain("mirrored (keep 2)");
@@ -324,8 +332,8 @@ describe("pass 22 — a failed object mirror cannot masquerade as a good snapsho
         // The new snapshot exists, the oldest of the three was rotated away,
         // and no `.partial` working directory was left behind.
         expect(entries.filter((e) => e.startsWith("."))).toEqual([]);
-        expect(entries).toContain("old-2");
-        expect(entries).not.toContain("old-1");
+        expect(entries).toContain(NEWER);
+        expect(entries).not.toContain(OLDER);
         expect(entries.length).toBe(2);
       } finally {
         fs.rmSync(dir, { recursive: true, force: true });
@@ -333,14 +341,14 @@ describe("pass 22 — a failed object mirror cannot masquerade as a good snapsho
     });
 
     it(`keeps every previous snapshot when the mirror fails (${file})`, () => {
-      const dir = scratch(["old-1", "old-2"]);
+      const dir = scratch([OLDER, NEWER]);
       try {
         const out = runOnce(file, dir, { mirrorFail: true }, 2);
         // Pre-fix this printed "mirrored (keep 2)" — a green line for a mirror
-        // that copied nothing — and old-1 was gone.
+        // that copied nothing — and the oldest was gone.
         expect(out).toContain("FAILED");
         expect(out).not.toContain("mirrored (keep");
-        expect(fs.readdirSync(dir).sort()).toEqual(["old-1", "old-2"]);
+        expect(fs.readdirSync(dir).sort()).toEqual([OLDER, NEWER]);
       } finally {
         fs.rmSync(dir, { recursive: true, force: true });
       }
@@ -365,12 +373,12 @@ describe("pass 22 — a failed object mirror cannot masquerade as a good snapsho
   }
 
   it("treats a failed credential/alias setup as a failed backup, not a success", () => {
-    const dir = scratch(["old-1", "old-2"]);
+    const dir = scratch([OLDER, NEWER]);
     try {
       const out = runOnce("docker-compose.yml", dir, { aliasFail: true }, 2);
       expect(out).toContain("FAILED");
       expect(out).not.toContain("mirrored (keep");
-      expect(fs.readdirSync(dir).sort()).toEqual(["old-1", "old-2"]);
+      expect(fs.readdirSync(dir).sort()).toEqual([OLDER, NEWER]);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

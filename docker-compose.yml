@@ -448,19 +448,34 @@ services:
     # oldest COMPLETE snapshot, and the only signal was a success line. The
     # restore path in docs/deploy.md would have found nothing but the empty
     # ones. Both `mc` legs are gated now, including the off-site mirror.
+    #
+    # Pass 56: this loop could never succeed as written. The pinned mc image
+    # has no `find`, so the non-empty gate always measured 0 (and `grep`, used
+    # by the remote rotation, is absent too — the old prefixes were never
+    # pruned). It also runs as ${BACKUP_UID}, whose $HOME=/ is unwritable, so
+    # `mc alias set` itself failed. Home is exported inside the loop; counts
+    # and the stamp filter now use mc and the shell only.
     command: >
       'while true; do
         umask 077;
+        HOME=/tmp;
+        export HOME;
         if [ ! -w /backups ]; then echo "[backup-objects] /backups is NOT writable by uid $$(id -u): the bind-mounted ./backups is missing or owned by another user, so no snapshot will ever be written. On the host: mkdir -p backups && chown $$(id -u):$$(id -g) backups" >&2; fi;
         mkdir -p /backups/objects;
         chmod 700 /backups/objects 2>/dev/null || true;
         rm -rf /backups/objects/.*.partial;
         STAMP=$$(date +%Y%m%d-%H%M%S);
-        if mc alias set src $${BACKUP_S3_ENDPOINT} $${BACKUP_S3_ACCESS_KEY_ID} $${BACKUP_S3_SECRET_ACCESS_KEY} >/dev/null 2>&1 && mc mirror --overwrite --remove src/$${BACKUP_S3_BUCKET} /backups/objects/.$${STAMP}.partial && [ "$$(find /backups/objects/.$${STAMP}.partial -type f | wc -l)" -gt 0 ]; then
+        OK=0;
+        if ! mc alias set src $${BACKUP_S3_ENDPOINT} $${BACKUP_S3_ACCESS_KEY_ID} $${BACKUP_S3_SECRET_ACCESS_KEY} >/dev/null 2>&1; then
+          echo "[backup-objects] FAILED at $${STAMP} — cannot configure the source alias (check the endpoint and credentials)" >&2;
+        elif mc mirror --overwrite --remove src/$${BACKUP_S3_BUCKET} /backups/objects/.$${STAMP}.partial && [ "$$(mc ls --recursive --quiet /backups/objects/.$${STAMP}.partial 2>/dev/null | wc -l | tr -d " ")" -gt 0 ]; then
           mv /backups/objects/.$${STAMP}.partial /backups/objects/$${STAMP};
           # Same clamp as the dump rotation above (pass 37): KEEP=0 must not
-          # delete the snapshot this run just renamed into place.
-          ls -1t /backups/objects/ | tail -n +$$((BACKUP_KEEP > 0 ? BACKUP_KEEP + 1 : 2)) | while read -r f; do rm -rf /backups/objects/$$f; done;
+          # delete the snapshot this run just renamed into place. Only our
+          # YYYYMMDD-HHMMSS snapshots are candidates; anything else in this
+          # directory belongs to the operator (pass 55).
+          ls -1t /backups/objects/ | while read -r f; do case "$$f" in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]) echo "$$f";; esac; done | tail -n +$$((BACKUP_KEEP > 0 ? BACKUP_KEEP + 1 : 2)) | while read -r f; do rm -rf /backups/objects/$$f; done;
+          OK=1;
           echo "[backup-objects] $${STAMP} mirrored (keep $$((BACKUP_KEEP > 0 ? BACKUP_KEEP : 1)))";
         else
           rm -rf /backups/objects/.$${STAMP}.partial;
@@ -471,7 +486,11 @@ services:
           echo "[backup-objects] FAILED at $${STAMP} — no snapshot written (empty or failed mirror), rotation skipped (the previous snapshots are untouched)" >&2;
         fi;
         if [ -n "$${BACKUP_TARGET_ENDPOINT}" ]; then
-          if mc alias set tgt $${BACKUP_TARGET_ENDPOINT} $${BACKUP_TARGET_ACCESS_KEY_ID} $${BACKUP_TARGET_SECRET_ACCESS_KEY} >/dev/null 2>&1; then
+          if [ "$$OK" != 1 ]; then
+            echo "[backup-objects] off-site mirror SKIPPED at $${STAMP}: no local snapshot was written this run (see the FAILED line above)" >&2;
+          elif ! mc alias set tgt $${BACKUP_TARGET_ENDPOINT} $${BACKUP_TARGET_ACCESS_KEY_ID} $${BACKUP_TARGET_SECRET_ACCESS_KEY} >/dev/null 2>&1; then
+            echo "[backup-objects] off-site mirror FAILED at $${STAMP} (cannot configure the target alias; the local snapshot is complete)" >&2;
+          else
             mc mb -p tgt/$${BACKUP_TARGET_BUCKET} >/dev/null 2>&1 || true;
             # The snapshot goes under its OWN stamp prefix, and the remote
             # prefixes are rotated like the local ones. Mirroring into the
@@ -480,13 +499,11 @@ services:
             # only history sat on the same host the copy exists to survive
             # (pass 54). Only our YYYYMMDD-HHMMSS prefixes are ever pruned.
             if mc mirror --overwrite --remove /backups/objects/$${STAMP} tgt/$${BACKUP_TARGET_BUCKET}/$${STAMP}; then
-              mc ls tgt/$${BACKUP_TARGET_BUCKET} 2>/dev/null | tr -s " " "\n" | grep -xE "[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]/" | tr -d "/" | sort -r | tail -n +$$((BACKUP_KEEP > 0 ? BACKUP_KEEP + 1 : 2)) | while read -r old; do mc rm --recursive --force tgt/$${BACKUP_TARGET_BUCKET}/$$old || echo "[backup-objects] could not prune off-site snapshot $$old" >&2; done;
+              mc ls tgt/$${BACKUP_TARGET_BUCKET} 2>/dev/null | tr -s " " "\n" | while read -r f; do case "$$f" in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]/) echo "$${f%/}";; esac; done | sort -r | tail -n +$$((BACKUP_KEEP > 0 ? BACKUP_KEEP + 1 : 2)) | while read -r old; do mc rm --recursive --force tgt/$${BACKUP_TARGET_BUCKET}/$$old || echo "[backup-objects] could not prune off-site snapshot $$old" >&2; done;
               echo "[backup-objects] off-site mirror done";
             else
               echo "[backup-objects] off-site mirror FAILED at $${STAMP} (the local snapshot is complete)" >&2;
             fi;
-          else
-            echo "[backup-objects] off-site mirror FAILED at $${STAMP} (cannot reach the target endpoint; the local snapshot is complete)" >&2;
           fi;
         fi;
         sleep 86400;

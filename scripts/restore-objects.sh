@@ -118,6 +118,7 @@ fi
 export SRC_ENDPOINT SRC_ACCESS SRC_SECRET
 docker run --rm \
   --entrypoint /bin/sh \
+  -e HOME=/tmp \
   -e SRC_ENDPOINT \
   -e SRC_ACCESS \
   -e SRC_SECRET \
@@ -126,6 +127,11 @@ docker run --rm \
   -v "$SNAPSHOT:/snapshot:ro" \
   "$MC_IMAGE" -c '
     set -e
+    # mc stores its alias config under $HOME/.mc; this image has no passwd
+    # entry for arbitrary uids and $HOME may resolve to an unwritable / (pass
+    # 56, the same failure the backup side fixed).
+    HOME=/tmp
+    export HOME
     mc alias set tgt "$SRC_ENDPOINT" "$SRC_ACCESS" "$SRC_SECRET" >/dev/null
     mc mb -p "tgt/$SCRATCH_BUCKET" >/dev/null 2>&1 || true
     mc mirror --overwrite --remove "/snapshot" "tgt/$SCRATCH_BUCKET"

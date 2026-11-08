@@ -146,8 +146,11 @@ describe("pass 24 — the manual object backup cannot leave a partial snapshot a
     expect(sh).toMatch(/mc mirror[^\n]*"\/backups\/objects\/\.\$STAMP\.partial"/);
     // ...publish it with an atomic rename only after the mirror succeeded AND
     // the snapshot is non-empty (pass 42: `mc mirror` exits 0 on an empty
-    // source, so a bare success gate rotated the last good snapshot away)...
-    expect(sh).toMatch(/COUNT=\$\(find "\/backups\/objects\/\.\$STAMP\.partial" -type f \| wc -l/);
+    // source, so a bare success gate rotated the last good snapshot away).
+    // The count comes from the client, not `find`: the pinned mc image has no
+    // findutils, so the old command answered 0 for every source (pass 56).
+    expect(sh).toMatch(/COUNT=\$\(mc ls --recursive --quiet "\/backups\/objects\/\.\$STAMP\.partial"/);
+    expect(sh).not.toMatch(/COUNT=\$\(find /);
     expect(sh).toMatch(/mv "\/backups\/objects\/\.\$STAMP\.partial" "\/backups\/objects\/\$STAMP"/);
     // ...and never leave a stale one behind for the next run to trip over.
     expect(sh).toMatch(/rm -rf \/backups\/objects\/\.\*\.partial/);

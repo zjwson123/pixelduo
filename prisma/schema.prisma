@@ -162,6 +162,12 @@ model CreditGrant {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, expiresAt])
+  // The daily sweep (lib/expiry.ts) pages the WHOLE table by
+  // `remaining > 0 AND "expiresAt" <= now()` with no userId filter, ordered by
+  // (expiresAt, id). The (userId, expiresAt) index cannot serve that: every
+  // page was a sequential scan plus sort, i.e. quadratic in the number of
+  // expired grants (pass 56).
+  @@index([expiresAt])
   @@index([refId])
   @@index([cycleOrderId])
 }

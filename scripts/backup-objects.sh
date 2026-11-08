@@ -66,8 +66,22 @@ MC_IMAGE="${MC_IMAGE:-minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae64060
 # the value from this shell's environment, so export first.
 export SRC_ENDPOINT SRC_ACCESS SRC_SECRET SRC_BUCKET
 export TARGET_ENDPOINT TARGET_ACCESS TARGET_SECRET TARGET_BUCKET KEEP
+# Create the mount source as the invoking user before Docker sees it. If the
+# directory is missing, Docker creates it owned by root and the container
+# (now uid $(id -u)) cannot write into it — the same failure the compose
+# services document. mkdir here makes the owner the operator who ran this.
+mkdir -p "$PWD/backups"
+
+# The uid is the invoking user's, not root: the snapshot tree (every user image
+# and video, unencrypted) landed root-owned when this script ran, and the
+# documented recovery reads it as the operator (pass 55). The image has no
+# passwd entry for an arbitrary uid and $HOME resolves to /, which it cannot
+# write — mc saves its alias config under $HOME/.mc, so `mc alias set` died
+# with "Unable to save new mc config" and the redirection hid it (pass 56).
 docker run --rm \
+  --user "$(id -u):$(id -g)" \
   --entrypoint /bin/sh \
+  -e HOME=/tmp \
   -e SRC_ENDPOINT \
   -e SRC_ACCESS \
   -e SRC_SECRET \
@@ -81,7 +95,14 @@ docker run --rm \
   "$MC_IMAGE" -c '
     set -e
     umask 077
-    mc alias set src "$SRC_ENDPOINT" "$SRC_ACCESS" "$SRC_SECRET" >/dev/null
+    HOME=/tmp
+    export HOME
+    # Never silent: a wrong endpoint or credential used to be swallowed by the
+    # redirection and surface only as an empty-snapshot failure (pass 56).
+    if ! mc alias set src "$SRC_ENDPOINT" "$SRC_ACCESS" "$SRC_SECRET" >/dev/null 2>&1; then
+      echo "[backup-objects] FAILED: cannot configure the source alias for $SRC_ENDPOINT (mc alias set reported an error; check the endpoint and credentials)" >&2
+      exit 1
+    fi
     STAMP=$(date +%Y%m%d-%H%M%S)
     rm -rf /backups/objects/.*.partial
     mc mirror --overwrite --remove "src/$SRC_BUCKET" "/backups/objects/.$STAMP.partial"
@@ -91,42 +112,65 @@ docker run --rm \
     # target too (`--remove` from an empty source). The bucket being empty is
     # exactly what a compromised or misconfigured endpoint looks like, so it is
     # a failure, not a backup.
-    COUNT=$(find "/backups/objects/.$STAMP.partial" -type f | wc -l | tr -d " ")
+    #
+    # `find` is not in the pinned mc image (pass 56), so count with the mc
+    # client recursive listing: one line per object, 0 for an empty directory.
+    # The old `find … | wc -l` answered 0 in that image for EVERY source, so
+    # this script refused every backup it ever took.
+    COUNT=$(mc ls --recursive --quiet "/backups/objects/.$STAMP.partial" 2>/dev/null | wc -l | tr -d " ")
     if [ "$COUNT" -eq 0 ]; then
       echo "[backup-objects] FAILED: $SRC_BUCKET produced 0 objects — refusing to rotate or mirror an empty snapshot (previous snapshots are untouched)" >&2
       rm -rf "/backups/objects/.$STAMP.partial"
       exit 1
     fi
     mv "/backups/objects/.$STAMP.partial" "/backups/objects/$STAMP"
-    ls -1t /backups/objects/ | tail -n +$((KEEP + 1)) | while read -r f; do rm -rf "/backups/objects/$f"; done
+    # `grep`/`awk`/`sed` are not in the image either (pass 56), so the
+    # YYYYMMDD-HHMMSS filter is done with the shell case statement. Only our
+    # snapshots are rotated; operator-owned files in this directory are left
+    # untouched.
+    ls -1t /backups/objects/ | while read -r f; do
+      case "$f" in
+        [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]) echo "$f" ;;
+      esac
+    done | tail -n +$((KEEP + 1)) | while read -r f; do rm -rf "/backups/objects/$f"; done
     echo "[backup-objects] $STAMP mirrored from $SRC_BUCKET ($COUNT objects, keeping $KEEP snapshots)"
     if [ -n "$TARGET_ENDPOINT" ]; then
-      mc alias set tgt "$TARGET_ENDPOINT" "$TARGET_ACCESS" "$TARGET_SECRET" >/dev/null
-      # Mirror the SNAPSHOT, not the live bucket: the source can be emptied
-      # between the two legs, and `--remove` would then erase the off-site
-      # copy as well. The validated snapshot is the thing being backed up.
-      #
-      # The snapshot goes under its OWN stamp prefix and is rotated like the
-      # local copies. It used to mirror into the target bucket root, so the
-      # off-site copy always equaled the previous night of live state: a partial
-      # deletion (compromised credentials, a mass-delete bug) was copied
-      # off-site on the next run, while the only history sat on the same host
-      # the off-site copy exists to survive (pass 54). Point-in-time prefixes
-      # keep the off-site copy able to restore something older than the most
-      # recent mistake; the local snapshot was already validated non-empty.
-      mc mb -p "tgt/$TARGET_BUCKET" >/dev/null 2>&1 || true
-      if mc mirror --overwrite --remove "/backups/objects/$STAMP" "tgt/$TARGET_BUCKET/$STAMP"; then
-        # Count-based rotation over the stamp prefixes only. `mc ls` prints
-        # directory names with a trailing slash; anything that is not one of our
-        # YYYYMMDD-HHMMSS names (operator-owned objects, an old flat-layout
-        # snapshot) is left untouched.
-        mc ls "tgt/$TARGET_BUCKET" 2>/dev/null | tr -s " " "\n" | grep -xE "[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]/" | tr -d "/" | sort -r | tail -n +$((KEEP + 1)) | while read -r old; do
-          mc rm --recursive --force "tgt/$TARGET_BUCKET/$old" || echo "[backup-objects] could not prune off-site snapshot $old" >&2
-          echo "[backup-objects] off-site snapshot $old pruned"
-        done
-        echo "[backup-objects] off-site mirror to $TARGET_BUCKET/$STAMP done"
+      if ! mc alias set tgt "$TARGET_ENDPOINT" "$TARGET_ACCESS" "$TARGET_SECRET" >/dev/null 2>&1; then
+        echo "[backup-objects] off-site mirror FAILED at $STAMP (cannot configure the target alias; the local snapshot is complete)" >&2
       else
-        echo "[backup-objects] off-site mirror FAILED at $STAMP (the local snapshot is complete)" >&2
+        # Mirror the SNAPSHOT, not the live bucket: the source can be emptied
+        # between the two legs, and `--remove` would then erase the off-site
+        # copy as well. The validated snapshot is the thing being backed up.
+        #
+        # The snapshot goes under its OWN stamp prefix and is rotated like the
+        # local copies. It used to mirror into the target bucket root, so the
+        # off-site copy always equaled the previous night of live state: a
+        # partial deletion (compromised credentials, a mass-delete bug) was
+        # copied off-site on the next run, while the only history sat on the
+        # same host the off-site copy exists to survive (pass 54). Point-in-time
+        # prefixes keep the off-site copy able to restore something older than
+        # the most recent mistake; the local snapshot was already validated
+        # non-empty.
+        mc mb -p "tgt/$TARGET_BUCKET" >/dev/null 2>&1 || true
+        if mc mirror --overwrite --remove "/backups/objects/$STAMP" "tgt/$TARGET_BUCKET/$STAMP"; then
+          # Count-based rotation over the stamp prefixes only. `mc ls` prints
+          # directory names with a trailing slash; anything that is not one of
+          # our YYYYMMDD-HHMMSS names (operator-owned objects, an old flat-layout
+          # snapshot) is left untouched. The filter is the shell case statement
+          # because `grep` is absent from the pinned image (pass 56) — the old
+          # pipeline silently pruned nothing at all.
+          mc ls "tgt/$TARGET_BUCKET" 2>/dev/null | tr -s " " "\n" | while read -r f; do
+            case "$f" in
+              [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]/) echo "${f%/}" ;;
+            esac
+          done | sort -r | tail -n +$((KEEP + 1)) | while read -r old; do
+            mc rm --recursive --force "tgt/$TARGET_BUCKET/$old" || echo "[backup-objects] could not prune off-site snapshot $old" >&2
+            echo "[backup-objects] off-site snapshot $old pruned"
+          done
+          echo "[backup-objects] off-site mirror to $TARGET_BUCKET/$STAMP done"
+        else
+          echo "[backup-objects] off-site mirror FAILED at $STAMP (the local snapshot is complete)" >&2
+        fi
       fi
     fi
   '

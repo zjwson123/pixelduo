@@ -1,0 +1,12 @@
+-- Pass 56.
+--
+-- runExpiry's global page (lib/expiry.ts) asks for
+--   WHERE remaining > 0 AND "expiresAt" <= now()
+-- ordered by ("expiresAt", id), with no userId filter. The only index touching
+-- this column was (userId, expiresAt), which cannot serve a table-wide range:
+-- every page was a sequential scan plus sort over a table that grows with every
+-- purchase, refund and check-in — quadratic work in the number of expired
+-- grants. That cannot mint credits (spendCreditsTx checks expiresAt itself),
+-- but a sweep that never finishes leaves expired rows counted in User.credits
+-- and the ledger, so /api/me advertises a balance that is not spendable.
+CREATE INDEX "CreditGrant_expiresAt_idx" ON "CreditGrant"("expiresAt");
