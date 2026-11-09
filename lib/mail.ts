@@ -45,10 +45,31 @@ class DevMailer implements Mailer {
       // links, and the default umask made them 0644 in a 0755 directory — any
       // other local account on a shared host or self-hosted runner could read
       // a working reset token during the run.
-      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-      fs.appendFileSync(path.join(dir, `${safe}.txt`), `Subject: ${subject}\n${replyTo ? `Reply-To: ${replyTo}\n` : ""}${text}\n\n---\n`, {
-        mode: 0o600,
-      });
+      //
+      // The path is predictable and MAIL_DEV_DIR is documented as /tmp/pd-mail,
+      // a world-writable directory: `mkdir -p` and `appendFile` both FOLLOW a
+      // symlink planted at that path, letting a local attacker redirect a live
+      // reset link to a file they own (or append to an operator file). The
+      // directory must be a real directory and the file is opened O_NOFOLLOW —
+      // a planted link now fails loudly instead of silently receiving the token.
+      const dirStat = fs.lstatSync(dir, { throwIfNoEntry: false });
+      if (dirStat && !dirStat.isDirectory()) {
+        throw new Error(`MAIL_DEV_DIR '${dir}' is not a real directory (symlink?) — refusing to write auth mail there`);
+      }
+      if (!dirStat) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      const fd = fs.openSync(
+        path.join(dir, `${safe}.txt`),
+        fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND | (fs.constants.O_NOFOLLOW ?? 0),
+        0o600,
+      );
+      try {
+        fs.writeSync(
+          fd,
+          `Subject: ${subject}\n${replyTo ? `Reply-To: ${replyTo}\n` : ""}${text}\n\n---\n`,
+        );
+      } finally {
+        fs.closeSync(fd);
+      }
     }
     return { response: "not sent — no SMTP_URL configured (log-only mailer)" };
   }

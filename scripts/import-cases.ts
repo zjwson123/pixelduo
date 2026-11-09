@@ -12,6 +12,7 @@
 // photos / portraits / product shots → "seedream" (faster, cheaper).
 import fs from "fs";
 import fsp from "fs/promises";
+import type { FileHandle } from "fs/promises";
 import path from "path";
 import { PrismaClient } from "@prisma/client";
 import { getStorage, newStorageKey } from "../lib/storage";
@@ -110,17 +111,43 @@ async function downloadImage(caseId: number, srcPath: string): Promise<string | 
   // and every provider credential. path.basename stops `../..`, not a symlink.
   // The size cap below also ran after the read, so a link to a huge file was a
   // heap spike and a link to a FIFO hung the import.
-  const st = await fsp.lstat(localPath).catch(() => null);
-  if (st && !st.isFile()) {
-    console.warn(`[import] skipping ${filename}: not a regular file (symlink/device?)`);
-    return null;
-  }
-  if (st) {
-    if (st.size > MAX_CASE_BYTES) {
-      console.warn(`[import] skipping ${filename}: over the ${MAX_CASE_BYTES}-byte cap`);
+  //
+  // The lstat→readFile pair was still a TOCTOU and ignored HARDLINKS: a regular
+  // file with another name (e.g. a link to the repo .env) passes isFile(), and
+  // the path can be swapped after the check. Open once with O_NOFOLLOW and
+  // decide from the fd's own fstat; nlink === 1 rejects a hardlink, and
+  // O_NONBLOCK keeps a FIFO from hanging the open.
+  let localFd: FileHandle | null = null;
+  try {
+    localFd = await fsp.open(
+      localPath,
+      fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0),
+    );
+  } catch (e) {
+    // Missing is the normal "use the GitHub fallback" path. Anything else —
+    // ELOOP from O_NOFOLLOW on a symlink, a device/FIFO refusal — is a
+    // deliberate refusal, not a reason to quietly fetch from the network.
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+      console.warn(`[import] skipping ${filename}: not a regular file (symlink/device?)`);
       return null;
     }
-    buf = await fsp.readFile(localPath);
+    localFd = null;
+  }
+  if (localFd) {
+    try {
+      const st = await localFd.stat();
+      if (!st.isFile() || st.nlink !== 1) {
+        console.warn(`[import] skipping ${filename}: not a regular file (symlink/hardlink/device?)`);
+        return null;
+      }
+      if (st.size > MAX_CASE_BYTES) {
+        console.warn(`[import] skipping ${filename}: over the ${MAX_CASE_BYTES}-byte cap`);
+        return null;
+      }
+      buf = await localFd.readFile();
+    } finally {
+      await localFd.close().catch(() => undefined);
+    }
   } else {
     // 2. GitHub raw fallback
     const url = `${RAW_BASE}/${filename}`;

@@ -71,10 +71,13 @@ export function getPaymentProvider(): PaymentProvider {
 // receiving refunds and disputes at the previous provider, signed with the
 // previous secret, and the route must accept and act on those deliveries. The
 // alternate is considered only when its signature header is present AND its
-// secret is configured; construction can still refuse (an API key removed, a
-// non-live key in production), in which case no delivery could have been
-// verified by it anyway. The route's order-provider match is what prevents a
-// valid event from one provider acting on an order created by another.
+// secret is configured. It is constructed VERIFIER-ONLY: webhook verification
+// needs the signing secret, not the checkout API key, so removing the old
+// provider's key (the natural cleanup after a switch) must not silently drop
+// its refunds — which is what requiring a full provider instance did: the
+// delivery answered 400, the provider stopped retrying, and credits were kept.
+// The route's order-provider match is what prevents a valid event from one
+// provider acting on an order created by another.
 const SIGNATURE_HEADERS: Array<{ name: "stripe" | "paddle"; header: string; secretVar: string }> = [
   { name: "stripe", header: "stripe-signature", secretVar: "STRIPE_WEBHOOK_SECRET" },
   { name: "paddle", header: "paddle-signature", secretVar: "PADDLE_WEBHOOK_SECRET" },
@@ -87,9 +90,12 @@ export function getWebhookVerifiers(headers: Headers): PaymentProvider[] {
     if (verifiers.some((p) => p.name === name)) continue;
     if (!process.env[secretVar]) continue;
     try {
-      verifiers.push(name === "stripe" ? new StripeProvider() : new PaddleProvider());
+      verifiers.push(
+        name === "stripe" ? new StripeProvider({ webhookOnly: true }) : new PaddleProvider({ webhookOnly: true }),
+      );
     } catch {
-      // Its credentials are incomplete, so it cannot verify anything.
+      // Its signing secret is unusable (or the SDK refused the dummy
+      // credential), so it cannot verify anything.
     }
   }
   return verifiers;

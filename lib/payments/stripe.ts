@@ -17,32 +17,47 @@ export class StripeProvider implements PaymentProvider {
   name = "stripe";
   private stripe: Stripe;
   private webhookSecret: string;
+  private webhookOnly: boolean;
 
-  constructor(opts?: { stripe?: Stripe; webhookSecret?: string }) {
+  constructor(opts?: { stripe?: Stripe; webhookSecret?: string; webhookOnly?: boolean }) {
     const key = process.env.STRIPE_SECRET_KEY;
-    if (!opts?.stripe && !key) {
+    const webhookOnly = opts?.webhookOnly === true;
+    if (!opts?.stripe && !webhookOnly && !key) {
       throw new Error("STRIPE_SECRET_KEY is required when PAYMENT_PROVIDER=stripe");
     }
     // A test-mode key in a production deployment would let test-card payments
     // (4242…) fulfill real credits through genuinely signed webhooks — fail
     // closed. The predicate is the shared runtime one (lib/runtime-env.ts), not
     // an exact "production" string test that a differently-spelled NODE_ENV
-    // slipped past.
-    if (isProductionRuntime() && !opts?.stripe && key && !key.startsWith("sk_live_")) {
+    // slipped past. Skipped for a verifier-only instance, which never calls the
+    // API.
+    if (isProductionRuntime() && !opts?.stripe && !webhookOnly && key && !key.startsWith("sk_live_")) {
       throw new Error("STRIPE_SECRET_KEY must be a live-mode key (sk_live_…) in production");
     }
     // A missing webhook secret makes every verification fail (forgery-safe),
     // but checkout would keep accepting real money whose orders can never
     // fulfill — same fail-at-boot policy as the live-key check above.
     const secret = opts?.webhookSecret ?? process.env.STRIPE_WEBHOOK_SECRET;
-    if (isProductionRuntime() && !opts?.stripe && !secret) {
+    if (isProductionRuntime() && !opts?.stripe && !webhookOnly && !secret) {
       throw new Error("STRIPE_WEBHOOK_SECRET is required when PAYMENT_PROVIDER=stripe in production");
     }
     this.webhookSecret = secret ?? "";
-    this.stripe = opts?.stripe ?? new Stripe(key as string);
+    this.webhookOnly = webhookOnly && !opts?.stripe;
+    // A verifier-only instance exists for a provider SWITCH: refunds on orders
+    // created under Stripe keep arriving after PAYMENT_PROVIDER moved, and
+    // verifying them needs only STRIPE_WEBHOOK_SECRET — not the checkout API
+    // key. Requiring the key (as this constructor did) silently dropped the
+    // alternate verifier the moment the operator cleaned up the old credential,
+    // so those refunds answered 400, the provider stopped retrying, and the
+    // credits were kept. The SDK needs *a* key to construct; the dummy one is
+    // never sent anywhere because this instance refuses createCheckout.
+    this.stripe = opts?.stripe ?? new Stripe(key ?? "sk_live_webhook_verifier_only");
   }
 
   async createCheckout(input: CreateCheckoutInput): Promise<CheckoutSession> {
+    if (this.webhookOnly) {
+      throw new Error("stripe: this instance verifies webhooks only (no STRIPE_SECRET_KEY) and cannot create checkouts");
+    }
     const session = await this.stripe.checkout.sessions.create({
       mode: "payment",
       line_items: [
@@ -175,9 +190,19 @@ export class StripeProvider implements PaymentProvider {
       let reinstatedDisputeId: string | undefined;
       // async_payment_succeeded: delayed-notification methods (SEPA, Boleto…)
       // settle after checkout.session.completed arrived as unpaid.
+      //
+      // `no_payment_required` is the third status Checkout uses: a 100%-off
+      // coupon or full customer-credit balance leaves amount_total = 0 and no
+      // PaymentIntent, so the session completes without a payment. Treating
+      // only "paid" as fulfilment left those orders `pending` forever — credits
+      // never granted and no receipt mailed — even though the operator had
+      // built the session for the order's full subtotal (the documented
+      // goodwill flow). The subtotal still proves the session matched the order;
+      // collectedAmountUsd records the zero actually captured, so a later
+      // refund/dispute cannot measure against a price nobody paid.
       if (
         (event.type === "checkout.session.completed" || event.type === "checkout.session.async_payment_succeeded") &&
-        obj?.payment_status === "paid"
+        (obj?.payment_status === "paid" || obj?.payment_status === "no_payment_required")
       ) {
         type = "paid";
         if (typeof obj.amount_subtotal === "number") paidAmountUsd = obj.amount_subtotal / 100;

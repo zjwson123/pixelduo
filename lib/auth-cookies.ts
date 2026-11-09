@@ -21,7 +21,22 @@
 // buckets on the session cookie; it must recognise the same spelling the auth
 // routes mint.
 export function secureAuthCookies(): boolean {
-  return (process.env.NEXTAUTH_URL ?? "").trim().startsWith("https://");
+  // Parse, don't prefix-match. The boot gate (instrumentation.ts) validates
+  // NEXTAUTH_URL through `new URL()`, which normalises the scheme — so
+  // "HTTPS://pixelduo.ai" and "https:/pixelduo.ai" both boot as https
+  // deployments. A raw startsWith("https://") is false for both spellings, and
+  // the cookie layer then minted UNPREFIXED, NON-Secure session/OAuth cookies
+  // on a deployment that looked healthy: a sibling subdomain could plant
+  // `next-auth.session-token` for the parent domain (the pass-53 fixation this
+  // prefix exists to stop), and the session cookie travelled in cleartext
+  // before HSTS was learned. One predicate, the same one the gate uses.
+  const raw = (process.env.NEXTAUTH_URL ?? "").trim();
+  if (!raw) return false;
+  try {
+    return new URL(raw).protocol === "https:";
+  } catch {
+    return false;
+  }
 }
 
 export function authCookiePrefix(): string {

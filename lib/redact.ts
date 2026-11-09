@@ -20,6 +20,12 @@ const SECRET_PATTERNS: Array<RegExp> = [
   /Bearer\s+[A-Za-z0-9._~+/=-]{12,}/gi,
   /x-amz-credential=[^&]{5,}/gi,
   /x-amz-signature=[^&]{5,}/gi,
+  // The third presign parameter: temporary S3/MinIO credentials (STS, R2,
+  // scoped service accounts) carry a session token, and it is itself a
+  // credential — a gateway that echoes a presigned URL into Job.error or a
+  // console line would leak it. lib/sentry-scrub already lists it; the two
+  // scrubbers cover the same set.
+  /x-amz-security-token=[^&]{5,}/gi,
   // Email addresses are PII in this codebase: Sentry's own query scrubber
   // already rewrites `email=`/`q=` parameters (lib/sentry-scrub.ts), but the
   // auth/transaction mail path passes `mailTo: user@example.com` as a CONTEXT

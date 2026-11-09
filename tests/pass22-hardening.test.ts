@@ -270,7 +270,12 @@ describe("pass 22 — a failed object mirror cannot masquerade as a good snapsho
   }
 
   /** Run one iteration against `dir` and return everything the loop printed. */
-  function runOnce(file: string, dir: string, opts: { aliasFail?: boolean; mirrorFail?: boolean }, keep: number) {
+  function runOnce(
+    file: string,
+    dir: string,
+    opts: { aliasFail?: boolean; mirrorFail?: boolean; badEndpoint?: boolean },
+    keep: number,
+  ) {
     const script = backupObjectsScript(file)
       // The mount point becomes a scratch directory...
       .replaceAll("/backups/objects", dir)
@@ -283,7 +288,9 @@ describe("pass 22 — a failed object mirror cannot masquerade as a good snapsho
       env: {
         ...process.env,
         PATH: `${fakeMc(!!opts.aliasFail, !!opts.mirrorFail)}:${process.env.PATH}`,
-        BACKUP_S3_ENDPOINT: "http://storage:9000",
+        // Pass 57 replaced `mc alias set` (credential in argv) with MC_HOST_*,
+        // so a bad endpoint is now what makes alias setup fail.
+        BACKUP_S3_ENDPOINT: opts.badEndpoint ? "storage:9000" : "http://storage:9000",
         BACKUP_S3_ACCESS_KEY_ID: "k",
         BACKUP_S3_SECRET_ACCESS_KEY: "s",
         BACKUP_S3_BUCKET: "pixelduo",
@@ -372,10 +379,10 @@ describe("pass 22 — a failed object mirror cannot masquerade as a good snapsho
     });
   }
 
-  it("treats a failed credential/alias setup as a failed backup, not a success", () => {
+  it("treats an unusable endpoint (no scheme) as a failed backup, not a success", () => {
     const dir = scratch([OLDER, NEWER]);
     try {
-      const out = runOnce("docker-compose.yml", dir, { aliasFail: true }, 2);
+      const out = runOnce("docker-compose.yml", dir, { badEndpoint: true }, 2);
       expect(out).toContain("FAILED");
       expect(out).not.toContain("mirrored (keep");
       expect(fs.readdirSync(dir).sort()).toEqual([OLDER, NEWER]);

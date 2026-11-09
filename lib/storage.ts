@@ -318,9 +318,28 @@ class S3Storage implements StorageDriver {
 
 let driver: StorageDriver | null = null;
 
+// Which backend the deployment asked for, normalised and fail-closed.
+//
+// The old ternary was `(STORAGE_DRIVER ?? "local") === "s3" ? S3 : Local`, so
+// every other spelling — "S3", "minio", "s3 " pasted from .env, a typo — silently
+// selected LOCAL storage. In a container stack that means uploaded media and
+// delivered outputs land on the container's ephemeral filesystem while
+// /api/health still reports `storage: up` (the local probe writes a file), and
+// every one of them is lost on redeploy while the Image/Job rows still point at
+// them. A value this process does not recognise is a configuration error, not a
+// reason to pick a backend the operator did not choose.
+function storageDriverName(): "s3" | "local" {
+  const raw = (process.env.STORAGE_DRIVER ?? "").trim().toLowerCase();
+  if (raw === "" || raw === "local") return "local";
+  if (raw === "s3") return "s3";
+  throw new Error(
+    `unknown STORAGE_DRIVER '${process.env.STORAGE_DRIVER}' — use 's3' or 'local' (the composes pin 's3'; a typo must not silently write to the container filesystem)`,
+  );
+}
+
 export function getStorage(): StorageDriver {
   if (driver) return driver;
-  driver = (process.env.STORAGE_DRIVER ?? "local") === "s3" ? new S3Storage() : new LocalStorage();
+  driver = storageDriverName() === "s3" ? new S3Storage() : new LocalStorage();
   return driver;
 }
 

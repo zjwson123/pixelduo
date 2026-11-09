@@ -27,6 +27,25 @@ TARGET_ENDPOINT="${BACKUP_TARGET_ENDPOINT:-}"
 TARGET_ACCESS="${BACKUP_TARGET_ACCESS_KEY_ID:-}"
 TARGET_SECRET="${BACKUP_TARGET_SECRET_ACCESS_KEY:-}"
 TARGET_BUCKET="${BACKUP_TARGET_BUCKET:-}"
+
+# An off-site target is all-or-nothing, and the bucket must be a real bucket
+# name. `mc mirror tgt//$STAMP` with an empty bucket creates a bucket NAMED
+# AFTER THE TIMESTAMP on the remote store, and the stamp rotation below would
+# then delete timestamp-named buckets — creating and destroying buckets on a
+# remote store from a typo. The restore script already validates its target;
+# this side must too. Refuse before taking a snapshot, not halfway through.
+if [ -n "$TARGET_ENDPOINT" ]; then
+  case "$TARGET_BUCKET" in
+    ""|[!a-z0-9]*|*[!a-z0-9.-]*)
+      echo "BACKUP_TARGET_BUCKET must be a valid S3 bucket name (lowercase letters, digits, dots, hyphens; got '$TARGET_BUCKET')" >&2
+      exit 1
+      ;;
+  esac
+  if [ -z "$TARGET_ACCESS" ] || [ -z "$TARGET_SECRET" ]; then
+    echo "set BACKUP_TARGET_ACCESS_KEY_ID and BACKUP_TARGET_SECRET_ACCESS_KEY when BACKUP_TARGET_ENDPOINT is set" >&2
+    exit 1
+  fi
+fi
 # BACKUP_KEEP, not BACKUP_KEEP_OBJECTS — and .env.example documents the two as
 # different knobs: BACKUP_KEEP is the DB-dump retention (the `backup` service,
 # default 14) and BACKUP_KEEP_OBJECTS is the object-snapshot retention (default
@@ -97,10 +116,47 @@ docker run --rm \
     umask 077
     HOME=/tmp
     export HOME
-    # Never silent: a wrong endpoint or credential used to be swallowed by the
-    # redirection and surface only as an empty-snapshot failure (pass 56).
-    if ! mc alias set src "$SRC_ENDPOINT" "$SRC_ACCESS" "$SRC_SECRET" >/dev/null 2>&1; then
-      echo "[backup-objects] FAILED: cannot configure the source alias for $SRC_ENDPOINT (mc alias set reported an error; check the endpoint and credentials)" >&2
+    # Credentials go to mc through its CHILD ENVIRONMENT (MC_HOST_*), never as
+    # argv: `mc alias set <url> <key> <secret>` writes the secret into
+    # /proc/<pid>/cmdline, which every local account can read for the duration
+    # of the mirror. Percent-encode the URL-significant characters first.
+    enc() {
+      _s="$1"; _o=""
+      while [ -n "$_s" ]; do
+        _c="${_s%"${_s#?}"}"
+        _s="${_s#?}"
+        case "$_c" in
+          [a-zA-Z0-9._~-]) _o="$_o$_c" ;;
+          %) _o="${_o}%25" ;;
+          @) _o="${_o}%40" ;;
+          :) _o="${_o}%3A" ;;
+          /) _o="${_o}%2F" ;;
+          [?]) _o="${_o}%3F" ;;
+          [#]) _o="${_o}%23" ;;
+          " ") _o="${_o}%20" ;;
+          *) _o="$_o$_c" ;;
+        esac
+      done
+      printf "%s" "$_o"
+    }
+    setup_src() {
+      case "$SRC_ENDPOINT" in *://*) ;; *) return 1 ;; esac
+      _scheme="${SRC_ENDPOINT%%://*}"
+      _rest="${SRC_ENDPOINT#*://}"
+      MC_HOST_src="${_scheme}://$(enc "$SRC_ACCESS"):$(enc "$SRC_SECRET")@${_rest}"
+      export MC_HOST_src
+    }
+    setup_tgt() {
+      case "$TARGET_ENDPOINT" in *://*) ;; *) return 1 ;; esac
+      _scheme="${TARGET_ENDPOINT%%://*}"
+      _rest="${TARGET_ENDPOINT#*://}"
+      MC_HOST_tgt="${_scheme}://$(enc "$TARGET_ACCESS"):$(enc "$TARGET_SECRET")@${_rest}"
+      export MC_HOST_tgt
+    }
+    # Never silent: a wrong endpoint used to be swallowed by the redirection and
+    # surface only as an empty-snapshot failure (pass 56).
+    if ! setup_src; then
+      echo "[backup-objects] FAILED: BACKUP_S3_ENDPOINT needs a scheme (http://host:port) — got ${SRC_ENDPOINT}" >&2
       exit 1
     fi
     STAMP=$(date +%Y%m%d-%H%M%S)
@@ -135,8 +191,8 @@ docker run --rm \
     done | tail -n +$((KEEP + 1)) | while read -r f; do rm -rf "/backups/objects/$f"; done
     echo "[backup-objects] $STAMP mirrored from $SRC_BUCKET ($COUNT objects, keeping $KEEP snapshots)"
     if [ -n "$TARGET_ENDPOINT" ]; then
-      if ! mc alias set tgt "$TARGET_ENDPOINT" "$TARGET_ACCESS" "$TARGET_SECRET" >/dev/null 2>&1; then
-        echo "[backup-objects] off-site mirror FAILED at $STAMP (cannot configure the target alias; the local snapshot is complete)" >&2
+      if ! setup_tgt; then
+        echo "[backup-objects] off-site mirror FAILED at $STAMP (BACKUP_TARGET_ENDPOINT needs a scheme; the local snapshot is complete)" >&2
       else
         # Mirror the SNAPSHOT, not the live bucket: the source can be emptied
         # between the two legs, and `--remove` would then erase the off-site

@@ -137,8 +137,8 @@ services:
       # itself. The production composes take ${S3_ENDPOINT} because there the
       # bucket is off-network and one public address serves both roles.
       S3_ENDPOINT: http://storage:9000
-      S3_REGION: us-east-1
-      S3_BUCKET: pixelduo
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_BUCKET: ${S3_BUCKET:-pixelduo}
       S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-pixelduo}
       S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-pixelduo-secret}
       S3_FORCE_PATH_STYLE: "true"
@@ -326,20 +326,24 @@ services:
     # container, so `$${S3_ACCESS_KEY_ID:-pixelduo}` fell back to the defaults
     # while the MinIO server itself is configured from ${S3_ACCESS_KEY_ID} in
     # .env. The moment an operator follows .env.example's own instruction
-    # ("change these in any non-local environment"), `mc alias set` fails, the
+    # ("change these in any non-local environment"), the alias setup failed, the
     # bucket creation was swallowed by `|| true`, and the container exited 1 with
     # nothing anyone sees: the bucket never exists, every upload fails, and the
     # stack reports unhealthy with no clue why. single.yml injects
     # MINIO_ROOT_USER/PASSWORD here; this is the same thing under this file's
-    # names.
+    # names. The credential is assembled into MC_HOST_local rather than passed
+    # to `mc alias set` argv (pass 57).
     environment:
       S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-pixelduo}
       S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-pixelduo-secret}
+      S3_BUCKET: ${S3_BUCKET:-pixelduo}
     entrypoint: >
       /bin/sh -c "
-      mc alias set local http://storage:9000 $${S3_ACCESS_KEY_ID} $${S3_SECRET_ACCESS_KEY} &&
-      mc mb -p local/pixelduo &&
-      mc anonymous set none local/pixelduo &&
+      enc() { _s=\"$$1\"; _o=\"\"; while [ -n \"$$_s\" ]; do _c=\"$${_s%\"$${_s#?}\"}\"; _s=\"$${_s#?}\"; case \"$$_c\" in [a-zA-Z0-9._~-]) _o=\"$$_o$$_c\";; %) _o=\"$${_o}%25\";; @) _o=\"$${_o}%40\";; :) _o=\"$${_o}%3A\";; /) _o=\"$${_o}%2F\";; [?]) _o=\"$${_o}%3F\";; [#]) _o=\"$${_o}%23\";; \" \") _o=\"$${_o}%20\";; *) _o=\"$$_o$$_c\";; esac; done; printf '%s' \"$$_o\"; };
+      MC_HOST_local=\"http://$$(enc \"$$S3_ACCESS_KEY_ID\"):$$(enc \"$$S3_SECRET_ACCESS_KEY\")@storage:9000\";
+      export MC_HOST_local;
+      mc mb -p local/$${S3_BUCKET} &&
+      mc anonymous set none local/$${S3_BUCKET} &&
       echo 'minio bucket ready'"
 
   backup:
@@ -455,8 +459,18 @@ services:
     # pruned). It also runs as ${BACKUP_UID}, whose $HOME=/ is unwritable, so
     # `mc alias set` itself failed. Home is exported inside the loop; counts
     # and the stamp filter now use mc and the shell only.
+    # Credentials are assembled into MC_HOST_* INSIDE the container and never
+    # passed to `mc` as argv. `mc alias set <url> <key> <secret>` puts the store
+    # credential (on the single-VPS stack, MinIO's ROOT password) into the
+    # process's command line, which /proc/<pid>/cmdline exposes to every local
+    # account on the host while the daily job runs. MC_HOST_* is read from the
+    # child environment, which only the owning uid can read. The credentials are
+    # percent-encoded first so a password with @/:/#/etc. cannot alter the URL.
     command: >
       'while true; do
+        enc() { _s="$$1"; _o=""; while [ -n "$$_s" ]; do _c="$${_s%"$${_s#?}"}"; _s="$${_s#?}"; case "$$_c" in [a-zA-Z0-9._~-]) _o="$$_o$$_c";; %) _o="$${_o}%25";; @) _o="$${_o}%40";; :) _o="$${_o}%3A";; /) _o="$${_o}%2F";; [?]) _o="$${_o}%3F";; [#]) _o="$${_o}%23";; " ") _o="$${_o}%20";; *) _o="$$_o$$_c";; esac; done; printf "%s" "$$_o"; };
+        setup_src() { case "$$BACKUP_S3_ENDPOINT" in *://*) ;; *) return 1;; esac; _scheme="$${BACKUP_S3_ENDPOINT%%://*}"; _rest="$${BACKUP_S3_ENDPOINT#*://}"; MC_HOST_src="$${_scheme}://$$(enc "$$BACKUP_S3_ACCESS_KEY_ID"):$$(enc "$$BACKUP_S3_SECRET_ACCESS_KEY")@$${_rest}"; export MC_HOST_src; };
+        setup_tgt() { case "$$BACKUP_TARGET_ENDPOINT" in *://*) ;; *) return 1;; esac; _scheme="$${BACKUP_TARGET_ENDPOINT%%://*}"; _rest="$${BACKUP_TARGET_ENDPOINT#*://}"; MC_HOST_tgt="$${_scheme}://$$(enc "$$BACKUP_TARGET_ACCESS_KEY_ID"):$$(enc "$$BACKUP_TARGET_SECRET_ACCESS_KEY")@$${_rest}"; export MC_HOST_tgt; };
         umask 077;
         HOME=/tmp;
         export HOME;
@@ -466,8 +480,8 @@ services:
         rm -rf /backups/objects/.*.partial;
         STAMP=$$(date +%Y%m%d-%H%M%S);
         OK=0;
-        if ! mc alias set src $${BACKUP_S3_ENDPOINT} $${BACKUP_S3_ACCESS_KEY_ID} $${BACKUP_S3_SECRET_ACCESS_KEY} >/dev/null 2>&1; then
-          echo "[backup-objects] FAILED at $${STAMP} — cannot configure the source alias (check the endpoint and credentials)" >&2;
+        if ! setup_src; then
+          echo "[backup-objects] FAILED at $${STAMP} — cannot configure the source alias (BACKUP_S3_ENDPOINT needs a scheme, e.g. http://storage:9000)" >&2;
         elif mc mirror --overwrite --remove src/$${BACKUP_S3_BUCKET} /backups/objects/.$${STAMP}.partial && [ "$$(mc ls --recursive --quiet /backups/objects/.$${STAMP}.partial 2>/dev/null | wc -l | tr -d " ")" -gt 0 ]; then
           mv /backups/objects/.$${STAMP}.partial /backups/objects/$${STAMP};
           # Same clamp as the dump rotation above (pass 37): KEEP=0 must not
@@ -488,7 +502,13 @@ services:
         if [ -n "$${BACKUP_TARGET_ENDPOINT}" ]; then
           if [ "$$OK" != 1 ]; then
             echo "[backup-objects] off-site mirror SKIPPED at $${STAMP}: no local snapshot was written this run (see the FAILED line above)" >&2;
-          elif ! mc alias set tgt $${BACKUP_TARGET_ENDPOINT} $${BACKUP_TARGET_ACCESS_KEY_ID} $${BACKUP_TARGET_SECRET_ACCESS_KEY} >/dev/null 2>&1; then
+          elif [ -z "$${BACKUP_TARGET_BUCKET}" ]; then
+            # Without a bucket name `tgt//$STAMP` makes mc CREATE a bucket named
+            # after the timestamp, and the rotation below then deletes
+            # timestamp-named buckets on the remote store. The restore script
+            # already refuses a bare/empty target; the backup side must too.
+            echo "[backup-objects] off-site mirror FAILED at $${STAMP} (BACKUP_TARGET_BUCKET is empty; the local snapshot is complete)" >&2;
+          elif ! setup_tgt; then
             echo "[backup-objects] off-site mirror FAILED at $${STAMP} (cannot configure the target alias; the local snapshot is complete)" >&2;
           else
             mc mb -p tgt/$${BACKUP_TARGET_BUCKET} >/dev/null 2>&1 || true;

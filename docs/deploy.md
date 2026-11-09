@@ -230,7 +230,7 @@ docker compose -f docker-compose.prod.yml up -d
 ### 备份与恢复
 
 - 托管 Postgres：开启自动备份 + PITR，按需 `pg_restore`（恢复演练已通过，见 `progress.md`）
-- 自托管 Postgres：`docker compose up -d backup` 每日 dump 到 `./backups/`；手动 `./scripts/backup.sh`
+- 自托管 Postgres：`docker compose -f docker-compose.single.yml up -d backup` 每日 dump 到 `./backups/`（**必须带 `-f`**：不带时 compose 默认读 `docker-compose.yml`，那是本地开发栈，备份的是另一个数据库）；手动 `./scripts/backup.sh`
 - 恢复（两种格式，**不要混用**）。先停掉 `web`/`worker`，并先做一份当前库的 dump：
   - compose `backup` 服务的 `backups/pixelduo-<stamp>.dump.gz` 是 `pg_dump -Fc` **自定义格式**（文件名带 `.gz` 只是命名习惯，内容没有再 gzip）：`pg_restore --single-transaction --exit-on-error -d $DATABASE_URL backups/pixelduo-<stamp>.dump.gz`
   - 手动 `./scripts/backup.sh` 的 `backups/<db>-<stamp>.sql.gz` 是 gzip 压缩的**纯 SQL**，`pg_restore` 读不了：`gunzip -c backups/<db>-<stamp>.sql.gz | docker exec -i pixelduo-db psql -v ON_ERROR_STOP=1 --single-transaction -U pixelduo -d pixelduo`

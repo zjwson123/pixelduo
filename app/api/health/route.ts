@@ -43,7 +43,14 @@ async function probe(): Promise<{ body: Record<string, unknown>; ok: boolean }> 
 
 async function runProbe(now: number): Promise<{ body: Record<string, unknown>; ok: boolean }> {
   const [dbOk, redisOk, storageOk, activeJob] = await Promise.all([
-    prisma.$queryRaw`SELECT 1`.then(() => true).catch(() => false),
+    // Every other leg below has a deadline. This one did not: the probe is
+    // single-flight (one `inflightProbe` shared by every caller), so a
+    // connection that never answers left the promise pending forever and every
+    // later healthcheck — including the compose healthcheck — awaited the same
+    // never-settling probe, accumulating handlers until restart. A bounded
+    // answer turns a wedged DB into "db: down" (503), which is the signal the
+    // endpoint exists to give.
+    withTimeout(prisma.$queryRaw`SELECT 1`.then(() => true).catch(() => false), 2500, false),
     withTimeout(checkRedis(), 2500, false),
     withTimeout(getStorage().health(), 2500, false),
     withTimeout(

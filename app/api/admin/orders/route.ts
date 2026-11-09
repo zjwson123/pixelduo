@@ -30,6 +30,13 @@ export async function GET(req: Request) {
           status: true,
           createdAt: true,
           paidAt: true,
+          // The money facts a refund decision needs. The operator console is
+          // where a near-full partial return is investigated: without these
+          // columns a $49.98 dispute on a $49.99 pack looked identical to no
+          // return at all, and the order stayed `paid` with its credits.
+          collectedAmountUsd: true,
+          refundedAmountUsd: true,
+          disputedAmountUsd: true,
         },
       }),
       prisma.order.count(),

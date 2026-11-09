@@ -60,6 +60,13 @@ export async function listExpiringCredits(userId: string, days = 14): Promise<Ex
       source: { in: ["PURCHASE", "SUBSCRIPTION", "ROLLOVER", "REFUND"] },
     },
     orderBy: { expiresAt: "asc" },
+    // A hard ceiling like every sibling list (/api/ledger 100, gallery 60).
+    // Grants are expensive to create, so the practical list is small — but this
+    // feed is rendered as a banner on every workbench load and had no bound at
+    // all; an account with an unusually large grant history made the response
+    // grow without limit. The soonest-expiring 100 are what the banner can act
+    // on anyway.
+    take: 100,
     select: { id: true, source: true, remaining: true, expiresAt: true },
   });
   const nowMs = now.getTime();

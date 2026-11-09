@@ -132,7 +132,33 @@ docker run --rm \
     # 56, the same failure the backup side fixed).
     HOME=/tmp
     export HOME
-    mc alias set tgt "$SRC_ENDPOINT" "$SRC_ACCESS" "$SRC_SECRET" >/dev/null
+    # Same rule as the backup side: the credential travels in mc'"'"'s CHILD
+    # ENVIRONMENT (MC_HOST_*), never in `mc alias set` argv, which /proc exposes
+    # to every local account. Percent-encode URL-significant characters.
+    enc() {
+      _s="$1"; _o=""
+      while [ -n "$_s" ]; do
+        _c="${_s%"${_s#?}"}"
+        _s="${_s#?}"
+        case "$_c" in
+          [a-zA-Z0-9._~-]) _o="$_o$_c" ;;
+          %) _o="${_o}%25" ;;
+          @) _o="${_o}%40" ;;
+          :) _o="${_o}%3A" ;;
+          /) _o="${_o}%2F" ;;
+          [?]) _o="${_o}%3F" ;;
+          [#]) _o="${_o}%23" ;;
+          " ") _o="${_o}%20" ;;
+          *) _o="$_o$_c" ;;
+        esac
+      done
+      printf "%s" "$_o"
+    }
+    case "$SRC_ENDPOINT" in *://*) ;; *) echo "SRC_ENDPOINT needs a scheme (http://host:port)" >&2; exit 1 ;; esac
+    _scheme="${SRC_ENDPOINT%%://*}"
+    _rest="${SRC_ENDPOINT#*://}"
+    MC_HOST_tgt="${_scheme}://$(enc "$SRC_ACCESS"):$(enc "$SRC_SECRET")@${_rest}"
+    export MC_HOST_tgt
     mc mb -p "tgt/$SCRATCH_BUCKET" >/dev/null 2>&1 || true
     mc mirror --overwrite --remove "/snapshot" "tgt/$SCRATCH_BUCKET"
     RESTORED=$(mc find "tgt/$SCRATCH_BUCKET" 2>/dev/null | wc -l | tr -d " ")

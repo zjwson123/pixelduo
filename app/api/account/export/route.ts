@@ -30,7 +30,7 @@ export async function POST(req: Request) {
     // Bounded take so a hoarded account cannot force an unbounded response —
     // one past the cap, so truncation is detectable.
     const take = EXPORT_ROW_LIMIT + 1;
-    const [user, ledgerRows, images, jobs, orders, feedback] = await Promise.all([
+    const [user, ledgerRows, images, jobs, orders, grants, apiKeys, feedback] = await Promise.all([
       prisma.user.findUnique({
         where: { id: userId },
         select: { id: true, email: true, name: true, credits: true, plan: true, planRenewsAt: true, createdAt: true },
@@ -131,6 +131,44 @@ export async function POST(req: Request) {
           disputedAmountUsd: true,
         },
       }),
+      // The user's credit LOTS and API-key metadata were the two user-owned
+      // tables the export omitted while docs/compliance/privacy.md promises
+      // "可导出您的全部数据" (all your data). Grants are not reconstructible
+      // from the ledger: the ledger records movements, while a grant carries
+      // the lot's original amount, remaining balance and expiry — the facts
+      // /api/me, /api/credits/expiring and every spend decision are made from.
+      // Key metadata is what /api/account/keys shows the user, minus the hash
+      // (a credential verifier, not user data — exporting it would turn a
+      // read-only data export into a copy of the account's public-API
+      // credentials) and the sessionVersion (internal revocation bookkeeping).
+      prisma.creditGrant.findMany({
+        where: { userId },
+        orderBy: { createdAt: "asc" },
+        take,
+        select: {
+          id: true,
+          source: true,
+          amount: true,
+          remaining: true,
+          expiresAt: true,
+          refType: true,
+          refId: true,
+          createdAt: true,
+        },
+      }),
+      prisma.apiKey.findMany({
+        where: { userId },
+        orderBy: { createdAt: "asc" },
+        take,
+        select: {
+          id: true,
+          name: true,
+          prefix: true,
+          revokedAt: true,
+          lastUsedAt: true,
+          createdAt: true,
+        },
+      }),
       // Messages the user sent while signed in. Anonymous reports carry no
       // userId and are therefore not attributable, so they cannot be included.
       // `handledBy` is the closing operator's User.id — the same cross-account
@@ -160,7 +198,7 @@ export async function POST(req: Request) {
     // provider-echoed credentials; the export is a read path like the three job
     // views, so it applies the same read-time mask (see redactJobError).
     const safeJobs = jobs.map((j) => ({ ...j, error: redactJobError(j.error) }));
-    const tables = { ledger, images, jobs: safeJobs, orders, feedback };
+    const tables = { ledger, images, jobs: safeJobs, orders, grants, apiKeys, feedback };
     const truncated = Object.values(tables).some((rows) => rows.length > EXPORT_ROW_LIMIT);
     const data = Object.fromEntries(
       Object.entries(tables).map(([name, rows]) => [

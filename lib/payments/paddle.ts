@@ -27,10 +27,12 @@ export class PaddleProvider implements PaymentProvider {
   name = "paddle";
   private client: Paddle;
   private webhookSecret: string;
+  private webhookOnly: boolean;
 
-  constructor(opts?: { client?: Paddle; webhookSecret?: string }) {
+  constructor(opts?: { client?: Paddle; webhookSecret?: string; webhookOnly?: boolean }) {
     const key = process.env.PADDLE_API_KEY;
-    if (!opts?.client && !key) {
+    const webhookOnly = opts?.webhookOnly === true;
+    if (!opts?.client && !webhookOnly && !key) {
       throw new Error("PADDLE_API_KEY is required when PAYMENT_PROVIDER=paddle");
     }
     // Sandbox transactions complete with Paddle's public test instruments and
@@ -38,7 +40,9 @@ export class PaddleProvider implements PaymentProvider {
     // production deployment that would fulfill real credits for fake payments.
     // Predicate from lib/runtime-env.ts: an exact "production" string test let
     // a deployment spelling NODE_ENV=staging take the sandbox path silently.
-    if (isProductionRuntime() && !opts?.client && process.env.PADDLE_ENVIRONMENT !== "production") {
+    // Verifier-only instances never call the API and are exempt (the same
+    // provider-switch case StripeProvider's constructor documents).
+    if (isProductionRuntime() && !opts?.client && !webhookOnly && process.env.PADDLE_ENVIRONMENT !== "production") {
       throw new Error("PADDLE_ENVIRONMENT must be 'production' in production");
     }
     // The environment string alone does not prove the CREDENTIAL matches it: a
@@ -48,22 +52,29 @@ export class PaddleProvider implements PaymentProvider {
     // (sk_live_ check). Paddle Billing keys are `pdl_live_…` (live) and
     // `pdl_sdbx_…` (sandbox); in production, anything that is not a live
     // credential is refused at boot rather than at the first customer.
-    if (isProductionRuntime() && !opts?.client && key && !key.startsWith("pdl_live_")) {
+    if (isProductionRuntime() && !opts?.client && !webhookOnly && key && !key.startsWith("pdl_live_")) {
       throw new Error("PADDLE_API_KEY must be a live key (pdl_live_…) in production — sandbox keys only work with PADDLE_ENVIRONMENT=sandbox");
     }
     const secret = opts?.webhookSecret ?? process.env.PADDLE_WEBHOOK_SECRET;
-    if (isProductionRuntime() && !opts?.client && !secret) {
+    if (isProductionRuntime() && !opts?.client && !webhookOnly && !secret) {
       throw new Error("PADDLE_WEBHOOK_SECRET is required when PAYMENT_PROVIDER=paddle in production");
     }
     this.webhookSecret = secret ?? "";
+    this.webhookOnly = webhookOnly && !opts?.client;
+    // verifyWebhook is an in-repo HMAC and never touches this client. The
+    // dummy key only satisfies the SDK constructor when the old provider's API
+    // key has been removed after a switch; createCheckout refuses.
     this.client =
       opts?.client ??
-      new Paddle(key as string, {
+      new Paddle(key ?? "pdl_live_webhook_verifier_only", {
         environment: process.env.PADDLE_ENVIRONMENT === "production" ? Environment.production : Environment.sandbox,
       });
   }
 
   async createCheckout(input: CreateCheckoutInput): Promise<CheckoutSession> {
+    if (this.webhookOnly) {
+      throw new Error("paddle: this instance verifies webhooks only (no PADDLE_API_KEY) and cannot create checkouts");
+    }
     const tx = await this.client.transactions.create({
       items: [
         {

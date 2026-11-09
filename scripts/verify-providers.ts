@@ -16,6 +16,7 @@ import {
 import { analyzeImage, moderationRequested } from "../lib/safety";
 import { getStorage } from "../lib/storage";
 import { getVisionConfig } from "../lib/keys";
+import { redactSensitive } from "../lib/redact";
 
 // Post-generation moderation is fail-closed in the worker: when an operator has
 // asked for an audit (IMAGE_MODERATION=1 — the default in docker-compose.prod —
@@ -37,7 +38,7 @@ async function verifyModeration(imageKey: string): Promise<void> {
     return;
   }
   const cfg = getVisionConfig();
-  console.log(`[3/4] moderation audit (vision: ${cfg ? `${cfg.model} @ ${cfg.baseUrl}` : "CONFIG MISSING"})…`);
+  console.log(`[3/4] moderation audit (vision: ${cfg ? `${cfg.model} @ ${redactSensitive(cfg.baseUrl)}` : "CONFIG MISSING"})…`);
   const audit = await analyzeImage(imageKey);
   console.log(`  => ${JSON.stringify(audit)}`);
   if (!audit.checked) {
@@ -79,7 +80,7 @@ async function main() {
   for (;;) {
     await new Promise((r) => setTimeout(r, 10_000));
     const st = await pollVideoTask("seedance", task.taskId);
-    console.log(`  poll: ${st.status}${st.error ? ` (${st.error})` : ""}`);
+    console.log(`  poll: ${st.status}${st.error ? ` (${redactSensitive(st.error)})` : ""}`);
     if (st.status === "succeeded" && st.videoUrl) {
       const key = await saveRemoteVideo(st.videoUrl);
       const buf = await getStorage().get(key);
@@ -98,6 +99,12 @@ async function main() {
 main()
   .then(() => process.exit(0))
   .catch((e) => {
-    console.error("VERIFY FAILED:", e);
+    // This script is the documented ops triage path and its output lands in
+    // terminals, CI logs and deploy transcripts. Provider/LLM errors quote the
+    // request that failed — including a `Bearer <key>` or an echoed
+    // Authorization header — so the same sanitiser the worker applies to
+    // Job.error is applied here, at the one place this script prints.
+    const detail = e instanceof Error ? (e.stack ?? e.message) : String(e);
+    console.error("VERIFY FAILED:", redactSensitive(detail));
     process.exit(1);
   });

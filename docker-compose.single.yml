@@ -7,7 +7,7 @@
 # it — see lib/mail.ts), SENTRY_DSN, REDIS_PASSWORD, MINIO_ROOT_USER/PASSWORD.
 
 x-appenv: &appenv
-  DATABASE_URL: postgresql://pixelduo:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@db:5432/pixelduo
+  DATABASE_URL: postgresql://${POSTGRES_USER:-pixelduo}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-pixelduo}
   REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379
   NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?set NEXTAUTH_SECRET}
   NEXTAUTH_URL: ${NEXTAUTH_URL:?set NEXTAUTH_URL, e.g. https://pixelduo.ai}
@@ -39,8 +39,8 @@ x-appenv: &appenv
   # to override it from .env. Set the PUBLIC endpoint (the MinIO reverse-proxy
   # domain) in production.
   S3_ENDPOINT: ${S3_ENDPOINT:-http://storage:9000}
-  S3_REGION: us-east-1
-  S3_BUCKET: pixelduo
+  S3_REGION: ${S3_REGION:-us-east-1}
+  S3_BUCKET: ${S3_BUCKET:-pixelduo}
   # These are MinIO's ROOT credentials (pass 31 examined the choice): the app,
   # worker and maintenance containers sign and fetch objects with the same
   # identity that carries MinIO's admin API — create/delete buckets, manage
@@ -248,12 +248,12 @@ services:
   db:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: pixelduo
+      POSTGRES_USER: ${POSTGRES_USER:-pixelduo}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
-      POSTGRES_DB: pixelduo
+      POSTGRES_DB: ${POSTGRES_DB:-pixelduo}
     volumes: [pgdata:/var/lib/postgresql/data]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U pixelduo -d pixelduo"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -308,10 +308,13 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      S3_BUCKET: ${S3_BUCKET:-pixelduo}
     command: >
-      'mc alias set local http://storage:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD} >/dev/null &&
-       mc mb -p local/pixelduo || true &&
-       mc anonymous set none local/pixelduo &&
+      'enc() { _s="$$1"; _o=""; while [ -n "$$_s" ]; do _c="$${_s%"$${_s#?}"}"; _s="$${_s#?}"; case "$$_c" in [a-zA-Z0-9._~-]) _o="$$_o$$_c";; %) _o="$${_o}%25";; @) _o="$${_o}%40";; :) _o="$${_o}%3A";; /) _o="$${_o}%2F";; [?]) _o="$${_o}%3F";; [#]) _o="$${_o}%23";; " ") _o="$${_o}%20";; *) _o="$$_o$$_c";; esac; done; printf "%s" "$$_o"; };
+       MC_HOST_local="http://$$(enc "$$MINIO_ROOT_USER"):$$(enc "$$MINIO_ROOT_PASSWORD")@storage:9000";
+       export MC_HOST_local;
+       mc mb -p local/$${S3_BUCKET} || true &&
+       mc anonymous set none local/$${S3_BUCKET} &&
        echo "[init-storage] bucket ready"'
     restart: "no"
 
@@ -339,9 +342,9 @@ services:
     image: postgres:16-alpine
     environment:
       PGHOST: db
-      PGUSER: pixelduo
+      PGUSER: ${POSTGRES_USER:-pixelduo}
       PGPASSWORD: ${POSTGRES_PASSWORD}
-      PGDATABASE: pixelduo
+      PGDATABASE: ${POSTGRES_DB:-pixelduo}
       BACKUP_KEEP: ${BACKUP_KEEP:-14}
     volumes: [./backups:/backups]
     depends_on:
@@ -387,6 +390,7 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      S3_BUCKET: ${S3_BUCKET:-pixelduo}
       BACKUP_KEEP: ${BACKUP_KEEP_OBJECTS:-7}
       BACKUP_TARGET_ENDPOINT: ${BACKUP_TARGET_ENDPOINT:-}
       BACKUP_TARGET_ACCESS_KEY_ID: ${BACKUP_TARGET_ACCESS_KEY_ID:-}
@@ -406,8 +410,17 @@ services:
     # whose $HOME=/ is unwritable, so `mc alias set` failed too. Home is
     # exported inside the loop; counts and the stamp filter now use mc and the
     # shell only.
+    # Credentials are assembled into MC_HOST_* INSIDE the container, never
+    # passed to `mc` as argv: on this stack the operand is MinIO's ROOT
+    # password, and `mc alias set <url> <key> <secret>` puts it in
+    # /proc/<pid>/cmdline where every local account can read it. `enc`
+    # percent-encodes URL-significant characters first.
     command: >
       'while true; do
+        enc() { _s="$$1"; _o=""; while [ -n "$$_s" ]; do _c="$${_s%"$${_s#?}"}"; _s="$${_s#?}"; case "$$_c" in [a-zA-Z0-9._~-]) _o="$$_o$$_c";; %) _o="$${_o}%25";; @) _o="$${_o}%40";; :) _o="$${_o}%3A";; /) _o="$${_o}%2F";; [?]) _o="$${_o}%3F";; [#]) _o="$${_o}%23";; " ") _o="$${_o}%20";; *) _o="$$_o$$_c";; esac; done; printf "%s" "$$_o"; };
+        MC_HOST_src="http://$$(enc "$$MINIO_ROOT_USER"):$$(enc "$$MINIO_ROOT_PASSWORD")@storage:9000";
+        export MC_HOST_src;
+        setup_tgt() { case "$$BACKUP_TARGET_ENDPOINT" in *://*) ;; *) return 1;; esac; _scheme="$${BACKUP_TARGET_ENDPOINT%%://*}"; _rest="$${BACKUP_TARGET_ENDPOINT#*://}"; MC_HOST_tgt="$${_scheme}://$$(enc "$$BACKUP_TARGET_ACCESS_KEY_ID"):$$(enc "$$BACKUP_TARGET_SECRET_ACCESS_KEY")@$${_rest}"; export MC_HOST_tgt; };
         umask 077;
         HOME=/tmp;
         export HOME;
@@ -417,9 +430,9 @@ services:
         rm -rf /backups/objects/.*.partial;
         STAMP=$$(date +%Y%m%d-%H%M%S);
         OK=0;
-        if ! mc alias set src http://storage:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD} >/dev/null 2>&1; then
-          echo "[backup-objects] FAILED at $${STAMP} — cannot configure the source alias (check the endpoint and credentials)" >&2;
-        elif mc mirror --overwrite --remove src/pixelduo /backups/objects/.$${STAMP}.partial && [ "$$(mc ls --recursive --quiet /backups/objects/.$${STAMP}.partial 2>/dev/null | wc -l | tr -d " ")" -gt 0 ]; then
+        if [ -z "$${S3_BUCKET}" ]; then
+          echo "[backup-objects] FAILED at $${STAMP} — S3_BUCKET is empty" >&2;
+        elif mc mirror --overwrite --remove src/$${S3_BUCKET} /backups/objects/.$${STAMP}.partial && [ "$$(mc ls --recursive --quiet /backups/objects/.$${STAMP}.partial 2>/dev/null | wc -l | tr -d " ")" -gt 0 ]; then
           mv /backups/objects/.$${STAMP}.partial /backups/objects/$${STAMP};
           # Only our YYYYMMDD-HHMMSS snapshots are rotation candidates; an
           # operator-owned entry in this directory is left untouched (pass 55).
@@ -433,8 +446,13 @@ services:
         if [ -n "$${BACKUP_TARGET_ENDPOINT}" ]; then
           if [ "$$OK" != 1 ]; then
             echo "[backup-objects] off-site mirror SKIPPED at $${STAMP}: no local snapshot was written this run (see the FAILED line above)" >&2;
-          elif ! mc alias set tgt $${BACKUP_TARGET_ENDPOINT} $${BACKUP_TARGET_ACCESS_KEY_ID} $${BACKUP_TARGET_SECRET_ACCESS_KEY} >/dev/null 2>&1; then
-            echo "[backup-objects] off-site mirror FAILED at $${STAMP} (cannot configure the target alias; the local snapshot is complete)" >&2;
+          elif [ -z "$${BACKUP_TARGET_BUCKET}" ]; then
+            # An empty target bucket turns `tgt//$STAMP` into a NEW bucket named
+            # after the timestamp on the remote store, which the rotation below
+            # would then delete. Refuse, exactly as restore-objects.sh does.
+            echo "[backup-objects] off-site mirror FAILED at $${STAMP} (BACKUP_TARGET_BUCKET is empty; the local snapshot is complete)" >&2;
+          elif ! setup_tgt; then
+            echo "[backup-objects] off-site mirror FAILED at $${STAMP} (BACKUP_TARGET_ENDPOINT needs a scheme; the local snapshot is complete)" >&2;
           else
             mc mb -p tgt/$${BACKUP_TARGET_BUCKET} >/dev/null 2>&1 || true;
             # Stamp prefix + remote rotation, same as docker-compose.yml: a

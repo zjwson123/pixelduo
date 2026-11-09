@@ -550,11 +550,20 @@ export async function POST(req: Request) {
           });
           const listPrice = totals?.amountUsd ?? order.amountUsd;
           const fullBasis = Math.min(totals?.collectedAmountUsd ?? listPrice, listPrice);
+          // `returns > 0` mirrors the paid path above, and covers the same
+          // 100%-discount order from the other side: its basis is legitimately
+          // $0, and `0 >= 0 - 0.005` promoted ANY refund event — including a $0
+          // adjustment — to a full revoke, taking back credits and the paid tier
+          // from a customer whose order collected nothing. A genuine return of
+          // $0 is not a return; the unmeasurable-payload branch below still
+          // fails closed.
+          const returns = (totals?.refundedAmountUsd ?? 0) + (totals?.disputedAmountUsd ?? 0);
           if (
             fullRefund !== true &&
             event.reinstatedAmountUsd === undefined &&
             totals &&
-            totals.refundedAmountUsd + totals.disputedAmountUsd >= fullBasis - 0.005
+            returns > 0 &&
+            returns >= fullBasis - 0.005
           ) {
             fullRefund = true;
           }
