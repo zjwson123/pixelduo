@@ -390,7 +390,7 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
-      S3_BUCKET: ${S3_BUCKET:-pixelduo}
+      BACKUP_S3_BUCKET: ${S3_BUCKET:-pixelduo}
       BACKUP_KEEP: ${BACKUP_KEEP_OBJECTS:-7}
       BACKUP_TARGET_ENDPOINT: ${BACKUP_TARGET_ENDPOINT:-}
       BACKUP_TARGET_ACCESS_KEY_ID: ${BACKUP_TARGET_ACCESS_KEY_ID:-}
@@ -430,9 +430,9 @@ services:
         rm -rf /backups/objects/.*.partial;
         STAMP=$$(date +%Y%m%d-%H%M%S);
         OK=0;
-        if [ -z "$${S3_BUCKET}" ]; then
-          echo "[backup-objects] FAILED at $${STAMP} — S3_BUCKET is empty" >&2;
-        elif mc mirror --overwrite --remove src/$${S3_BUCKET} /backups/objects/.$${STAMP}.partial && [ "$$(mc ls --recursive --quiet /backups/objects/.$${STAMP}.partial 2>/dev/null | wc -l | tr -d " ")" -gt 0 ]; then
+        if [ -z "$${BACKUP_S3_BUCKET}" ]; then
+          echo "[backup-objects] FAILED at $${STAMP} — BACKUP_S3_BUCKET is empty" >&2;
+        elif mc mirror --overwrite --remove src/$${BACKUP_S3_BUCKET} /backups/objects/.$${STAMP}.partial && [ "$$(mc ls --recursive --quiet /backups/objects/.$${STAMP}.partial 2>/dev/null | wc -l | tr -d " ")" -gt 0 ]; then
           mv /backups/objects/.$${STAMP}.partial /backups/objects/$${STAMP};
           # Only our YYYYMMDD-HHMMSS snapshots are rotation candidates; an
           # operator-owned entry in this directory is left untouched (pass 55).
