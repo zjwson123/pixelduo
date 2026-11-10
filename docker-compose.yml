@@ -391,6 +391,15 @@ services:
         umask 077;
         if [ ! -w /backups ]; then echo "[backup] /backups is NOT writable by uid $$(id -u): the bind-mounted ./backups is missing or owned by another user, so no dump will ever be written. On the host: mkdir -p backups && chown $$(id -u):$$(id -g) backups" >&2; fi;
         chmod 700 /backups 2>/dev/null || true;
+        # Retention is a DESTRUCTIVE setting, so a value the operator did not
+        # mean must not be read as a number (pass 58). The arithmetic below
+        # treated a typo ("1O") or a negative value as 0 — "keep one" — so the
+        # nightly rotation deleted backups the operator had asked to keep,
+        # silently, while scripts/backup.sh refuses the same value. Validation
+        # runs before anything is renamed; an invalid value skips rotation
+        # entirely, so the dump is still written and every previous one kept.
+        ROTATE=1;
+        case "$$BACKUP_KEEP" in ""|*[!0-9]*) ROTATE=0; echo "[backup] FAILED: BACKUP_KEEP must be a non-negative integer (got $$BACKUP_KEEP) — rotation is SKIPPED and every previous dump is kept" >&2;; esac;
         STAMP=$$(date +%Y%m%d-%H%M%S);
         TMP=/backups/.pixelduo-$${STAMP}.partial;
         if pg_dump -Fc -d "$$PGDATABASE" -f $$TMP; then
@@ -400,10 +409,11 @@ services:
           # of "no retention", and what a whitespace-only value collapses to —
           # deleted the dump renamed into place one line earlier and then printed
           # "written, keeping 0": zero backups, every log affirming one (probed).
-          # A numeric 0 keeps the newest; a non-numeric value dies in the
-          # arithmetic, loudly, before anything is removed.
-          ls -1t /backups/pixelduo-*.dump.gz | tail -n +$$((BACKUP_KEEP > 0 ? BACKUP_KEEP + 1 : 2)) | xargs -r rm -f;
-          echo "[backup] $$STAMP written, keeping $$((BACKUP_KEEP > 0 ? BACKUP_KEEP : 1))";
+          # A numeric 0 keeps the newest. A non-numeric value never reaches this
+          # arithmetic: the `case` above turns ROTATE off and keeps everything
+          # (pass 58 — it used to be read as 0 here).
+          if [ "$$ROTATE" = 1 ]; then ls -1t /backups/pixelduo-*.dump.gz | tail -n +$$((BACKUP_KEEP > 0 ? BACKUP_KEEP + 1 : 2)) | xargs -r rm -f; fi;
+          if [ "$$ROTATE" = 1 ]; then echo "[backup] $$STAMP written, keeping $$((BACKUP_KEEP > 0 ? BACKUP_KEEP : 1))"; else echo "[backup] $$STAMP written; rotation skipped because BACKUP_KEEP is invalid (every previous dump is kept)"; fi;
         else
           rm -f $$TMP;
           echo "[backup] FAILED at $$STAMP — no dump written, rotation skipped (the previous dumps are untouched)" >&2;
@@ -474,6 +484,13 @@ services:
         umask 077;
         HOME=/tmp;
         export HOME;
+        # Same retention validation as the dump loop above (pass 58): a typo or
+        # a negative value was read as 0 by the arithmetic, which keeps ONE
+        # snapshot and deletes every other one. An invalid value skips rotation
+        # (local and off-site), so the snapshot is still written and every
+        # previous one kept.
+        ROTATE=1;
+        case "$$BACKUP_KEEP" in ""|*[!0-9]*) ROTATE=0; echo "[backup-objects] FAILED: BACKUP_KEEP must be a non-negative integer (got $$BACKUP_KEEP) — snapshot rotation is SKIPPED and every previous snapshot is kept" >&2;; esac;
         if [ ! -w /backups ]; then echo "[backup-objects] /backups is NOT writable by uid $$(id -u): the bind-mounted ./backups is missing or owned by another user, so no snapshot will ever be written. On the host: mkdir -p backups && chown $$(id -u):$$(id -g) backups" >&2; fi;
         mkdir -p /backups/objects;
         chmod 700 /backups/objects 2>/dev/null || true;
@@ -487,10 +504,11 @@ services:
           # Same clamp as the dump rotation above (pass 37): KEEP=0 must not
           # delete the snapshot this run just renamed into place. Only our
           # YYYYMMDD-HHMMSS snapshots are candidates; anything else in this
-          # directory belongs to the operator (pass 55).
-          ls -1t /backups/objects/ | while read -r f; do case "$$f" in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]) echo "$$f";; esac; done | tail -n +$$((BACKUP_KEEP > 0 ? BACKUP_KEEP + 1 : 2)) | while read -r f; do rm -rf /backups/objects/$$f; done;
+          # directory belongs to the operator (pass 55). An invalid KEEP skips
+          # the rotation entirely (pass 58).
+          if [ "$$ROTATE" = 1 ]; then ls -1t /backups/objects/ | while read -r f; do case "$$f" in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]) echo "$$f";; esac; done | tail -n +$$((BACKUP_KEEP > 0 ? BACKUP_KEEP + 1 : 2)) | while read -r f; do rm -rf /backups/objects/$$f; done; fi;
           OK=1;
-          echo "[backup-objects] $${STAMP} mirrored (keep $$((BACKUP_KEEP > 0 ? BACKUP_KEEP : 1)))";
+          if [ "$$ROTATE" = 1 ]; then echo "[backup-objects] $${STAMP} mirrored (keep $$((BACKUP_KEEP > 0 ? BACKUP_KEEP : 1)))"; else echo "[backup-objects] $${STAMP} mirrored; rotation skipped because BACKUP_KEEP is invalid (every previous snapshot is kept)"; fi;
         else
           rm -rf /backups/objects/.$${STAMP}.partial;
           # The count arm is what catches `mc mirror` exiting 0 on an EMPTY
@@ -519,7 +537,7 @@ services:
             # only history sat on the same host the copy exists to survive
             # (pass 54). Only our YYYYMMDD-HHMMSS prefixes are ever pruned.
             if mc mirror --overwrite --remove /backups/objects/$${STAMP} tgt/$${BACKUP_TARGET_BUCKET}/$${STAMP}; then
-              mc ls tgt/$${BACKUP_TARGET_BUCKET} 2>/dev/null | tr -s " " "\n" | while read -r f; do case "$$f" in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]/) echo "$${f%/}";; esac; done | sort -r | tail -n +$$((BACKUP_KEEP > 0 ? BACKUP_KEEP + 1 : 2)) | while read -r old; do mc rm --recursive --force tgt/$${BACKUP_TARGET_BUCKET}/$$old || echo "[backup-objects] could not prune off-site snapshot $$old" >&2; done;
+              if [ "$$ROTATE" = 1 ]; then mc ls tgt/$${BACKUP_TARGET_BUCKET} 2>/dev/null | tr -s " " "\n" | while read -r f; do case "$$f" in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]/) echo "$${f%/}";; esac; done | sort -r | tail -n +$$((BACKUP_KEEP > 0 ? BACKUP_KEEP + 1 : 2)) | while read -r old; do mc rm --recursive --force tgt/$${BACKUP_TARGET_BUCKET}/$$old || echo "[backup-objects] could not prune off-site snapshot $$old" >&2; done; fi;
               echo "[backup-objects] off-site mirror done";
             else
               echo "[backup-objects] off-site mirror FAILED at $${STAMP} (the local snapshot is complete)" >&2;

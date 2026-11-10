@@ -567,6 +567,25 @@ export async function POST(req: Request) {
           ) {
             fullRefund = true;
           }
+          // A provider's own "full" flag is not enough when the measured
+          // return is zero AND the order collected nothing. Pass 57's guard
+          // above closed the ACCUMULATOR path for a 100%-discount checkout;
+          // Paddle's `type` describes the adjustment, so its explicit
+          // `fullRefund: true` skips that promotion block entirely. A "$0
+          // full refund" of a $0-collected order therefore still revoked the
+          // credits and the paid tier the operator had given away for free —
+          // the customer returns nothing and loses the goods. A full return of
+          // a zero basis is not a return; an UNMEASURABLE payload (no `totals`
+          // or no recorded basis) keeps the fail-closed default below.
+          if (
+            fullRefund === true &&
+            event.reinstatedAmountUsd === undefined &&
+            totals &&
+            returns <= 0 &&
+            fullBasis <= 0
+          ) {
+            fullRefund = false;
+          }
         }
         // No amount to accumulate: keep the fail-closed default — a refund we
         // cannot measure against the order counts as full (a skipped

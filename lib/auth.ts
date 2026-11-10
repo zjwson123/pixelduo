@@ -11,7 +11,7 @@ import { prisma } from "./prisma";
 import { verifyPreAuthToken } from "./twofa";
 import { signupBonus } from "./ledger";
 import { readJsonCapped } from "./store";
-import { authCookies } from "./auth-cookies";
+import { authCookies, secureAuthCookies } from "./auth-cookies";
 
 // Source address for the per-(email, IP) login cap. Behind Caddy the LAST
 // X-Forwarded-For entry is the address the edge saw. The value is a hint only:
@@ -127,9 +127,26 @@ export const authOptions: NextAuthOptions = {
   // `__Secure-` names accept a Domain attribute, so a sibling subdomain could
   // plant a session cookie — or OAuth state/PKCE pair — for the parent domain
   // and win the duplicate-name race, logging the victim into the attacker's
-  // account. CSRF keeps next-auth's own default (already `__Host-` under
-  // https). Existing sessions re-login once, because the old cookie name cannot
-  // serve the new one.
+  // account. Existing sessions re-login once, because the old cookie name
+  // cannot serve the new one.
+  //
+  // `useSecureCookies` is the same predicate, explicitly. The custom cookie
+  // names above cover the session and OAuth state, but CSRF deliberately keeps
+  // next-auth's default — and that default is chosen from
+  // `url.base.startsWith("https://")` (core/init.js), the raw-prefix test pass
+  // 57 removed from our own layer. On a deployment spelling NEXTAUTH_URL as
+  // "HTTPS://host" or "https:/host" — both of which the boot gate accepts
+  // through `new URL()` — next-auth therefore minted an UNPREFIXED,
+  // non-Secure `next-auth.csrf-token` while the session cookie was already
+  // `__Host-`. A same-site sibling subdomain can plant that cookie (it accepts
+  // a Domain attribute) with a value it knows, then submit the credentials
+  // login form with the matching csrfToken: next-auth's double-submit check
+  // passes and the victim's browser is signed into the ATTACKER'S account
+  // (login CSRF — their prompts, uploads and purchases land in it). One
+  // predicate for the whole stack, the one the boot gate uses. Existing
+  // sessions re-login once, because the old cookie name cannot serve the new
+  // one.
+  useSecureCookies: secureAuthCookies(),
   cookies: authCookies(),
   providers: [
     CredentialsProvider({

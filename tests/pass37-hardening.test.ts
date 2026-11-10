@@ -397,10 +397,18 @@ describe("pass 37 — the restore-drill guard and the retention rotation", () =>
         const fresh = path.join(d, "pixelduo-20261014-000000.dump.gz");
         fs.writeFileSync(fresh, "x");
         fs.utimesSync(fresh, at(14), at(14));
-        execFileSync("sh", ["-c", `set -e; BACKUP_KEEP=${keep}; cd ${JSON.stringify(d)}; ${body}`], {
-          encoding: "utf8",
-          stdio: "pipe",
-        });
+        // ROTATE=1 is what the shipped loop sets for a valid retention value
+        // (pass 58 added the guard around the rotation line for an INVALID
+        // one; the line itself is unchanged). The excerpt runs out of its loop
+        // context, so it supplies the variable the loop would have.
+        execFileSync(
+          "sh",
+          ["-c", `set -e; BACKUP_KEEP=${keep}; ROTATE=1; cd ${JSON.stringify(d)}; ${body}`],
+          {
+            encoding: "utf8",
+            stdio: "pipe",
+          },
+        );
         const left = fs.readdirSync(d).sort();
         expect(left.length, `${file} with BACKUP_KEEP=${keep}`).toBe(Math.max(keep, 1));
         expect(left, "the newest dump must survive the rotation").toContain("pixelduo-20261014-000000.dump.gz");

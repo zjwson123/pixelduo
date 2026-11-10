@@ -354,6 +354,12 @@ services:
         umask 077;
         if [ ! -w /backups ]; then echo "[backup] /backups is NOT writable by uid $$(id -u): the bind-mounted ./backups is missing or owned by another user, so no dump will ever be written. On the host: mkdir -p backups && chown $$(id -u):$$(id -g) backups" >&2; fi;
         chmod 700 /backups 2>/dev/null || true;
+        # Same retention validation as the full compose file (pass 58): a typo
+        # or a negative BACKUP_KEEP was read as 0 by the arithmetic below,
+        # which keeps ONE dump and deletes every other. An invalid value skips
+        # rotation entirely; the dump is still written, the previous ones kept.
+        ROTATE=1;
+        case "$$BACKUP_KEEP" in ""|*[!0-9]*) ROTATE=0; echo "[backup] FAILED: BACKUP_KEEP must be a non-negative integer (got $$BACKUP_KEEP) — rotation is SKIPPED and every previous dump is kept" >&2;; esac;
         STAMP=$$(date +%Y%m%d-%H%M%S);
         TMP=/backups/.pixelduo-$${STAMP}.partial;
         if pg_dump -Fc -f $$TMP; then
@@ -362,9 +368,10 @@ services:
           # +1 prints EVERY line, so BACKUP_KEEP=0 deleted the dump renamed into
           # place one line earlier and still printed "written, keeping 0" — zero
           # backups with every log affirming one. Same clamp as the full compose
-          # file and the two scripts under scripts/.
-          ls -1t /backups/pixelduo-*.dump.gz | tail -n +$$((BACKUP_KEEP > 0 ? BACKUP_KEEP + 1 : 2)) | xargs -r rm -f;
-          echo "[backup] $$STAMP written, keeping $$((BACKUP_KEEP > 0 ? BACKUP_KEEP : 1))";
+          # file and the two scripts under scripts/. A non-numeric value never
+          # reaches this arithmetic: the `case` above turns ROTATE off (pass 58).
+          if [ "$$ROTATE" = 1 ]; then ls -1t /backups/pixelduo-*.dump.gz | tail -n +$$((BACKUP_KEEP > 0 ? BACKUP_KEEP + 1 : 2)) | xargs -r rm -f; fi;
+          if [ "$$ROTATE" = 1 ]; then echo "[backup] $$STAMP written, keeping $$((BACKUP_KEEP > 0 ? BACKUP_KEEP : 1))"; else echo "[backup] $$STAMP written; rotation skipped because BACKUP_KEEP is invalid (every previous dump is kept)"; fi;
         else
           rm -f $$TMP;
           echo "[backup] FAILED at $$STAMP — no dump written, rotation skipped (the previous dumps are untouched)" >&2;
@@ -424,6 +431,12 @@ services:
         umask 077;
         HOME=/tmp;
         export HOME;
+        # Same retention validation as docker-compose.yml (pass 58): an invalid
+        # or negative BACKUP_KEEP used to make the arithmetic keep one snapshot
+        # and delete the rest. Rotation is skipped instead; the snapshot is
+        # still written.
+        ROTATE=1;
+        case "$$BACKUP_KEEP" in ""|*[!0-9]*) ROTATE=0; echo "[backup-objects] FAILED: BACKUP_KEEP must be a non-negative integer (got $$BACKUP_KEEP) — snapshot rotation is SKIPPED and every previous snapshot is kept" >&2;; esac;
         if [ ! -w /backups ]; then echo "[backup-objects] /backups is NOT writable by uid $$(id -u): the bind-mounted ./backups is missing or owned by another user, so no snapshot will ever be written. On the host: mkdir -p backups && chown $$(id -u):$$(id -g) backups" >&2; fi;
         mkdir -p /backups/objects;
         chmod 700 /backups/objects 2>/dev/null || true;
@@ -436,9 +449,10 @@ services:
           mv /backups/objects/.$${STAMP}.partial /backups/objects/$${STAMP};
           # Only our YYYYMMDD-HHMMSS snapshots are rotation candidates; an
           # operator-owned entry in this directory is left untouched (pass 55).
-          ls -1t /backups/objects/ | while read -r f; do case "$$f" in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]) echo "$$f";; esac; done | tail -n +$$((BACKUP_KEEP > 0 ? BACKUP_KEEP + 1 : 2)) | while read -r f; do rm -rf /backups/objects/$$f; done;
+          # An invalid KEEP skips rotation entirely (pass 58).
+          if [ "$$ROTATE" = 1 ]; then ls -1t /backups/objects/ | while read -r f; do case "$$f" in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]) echo "$$f";; esac; done | tail -n +$$((BACKUP_KEEP > 0 ? BACKUP_KEEP + 1 : 2)) | while read -r f; do rm -rf /backups/objects/$$f; done; fi;
           OK=1;
-          echo "[backup-objects] $${STAMP} mirrored (keep $$((BACKUP_KEEP > 0 ? BACKUP_KEEP : 1)))";
+          if [ "$$ROTATE" = 1 ]; then echo "[backup-objects] $${STAMP} mirrored (keep $$((BACKUP_KEEP > 0 ? BACKUP_KEEP : 1)))"; else echo "[backup-objects] $${STAMP} mirrored; rotation skipped because BACKUP_KEEP is invalid (every previous snapshot is kept)"; fi;
         else
           rm -rf /backups/objects/.$${STAMP}.partial;
           echo "[backup-objects] FAILED at $${STAMP} — no snapshot written (empty or failed mirror), rotation skipped (the previous snapshots are untouched)" >&2;
@@ -459,7 +473,7 @@ services:
             # bucket-root mirror made the off-site copy equal the previous night of live
             # state, so a partial deletion propagated on the next run (pass 54).
             if mc mirror --overwrite --remove /backups/objects/$${STAMP} tgt/$${BACKUP_TARGET_BUCKET}/$${STAMP}; then
-              mc ls tgt/$${BACKUP_TARGET_BUCKET} 2>/dev/null | tr -s " " "\n" | while read -r f; do case "$$f" in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]/) echo "$${f%/}";; esac; done | sort -r | tail -n +$$((BACKUP_KEEP > 0 ? BACKUP_KEEP + 1 : 2)) | while read -r old; do mc rm --recursive --force tgt/$${BACKUP_TARGET_BUCKET}/$$old || echo "[backup-objects] could not prune off-site snapshot $$old" >&2; done;
+              if [ "$$ROTATE" = 1 ]; then mc ls tgt/$${BACKUP_TARGET_BUCKET} 2>/dev/null | tr -s " " "\n" | while read -r f; do case "$$f" in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]/) echo "$${f%/}";; esac; done | sort -r | tail -n +$$((BACKUP_KEEP > 0 ? BACKUP_KEEP + 1 : 2)) | while read -r old; do mc rm --recursive --force tgt/$${BACKUP_TARGET_BUCKET}/$$old || echo "[backup-objects] could not prune off-site snapshot $$old" >&2; done; fi;
               echo "[backup-objects] off-site mirror done";
             else
               echo "[backup-objects] off-site mirror FAILED at $${STAMP} (the local snapshot is complete)" >&2;
