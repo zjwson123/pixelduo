@@ -598,7 +598,21 @@ jobs:
       - run: npx prisma migrate deploy
       - run: npx tsx prisma/seed.ts
       - run: npm run build
-      - run: npx playwright install --with-deps chromium
+      - name: Install Playwright Chromium
+        # The runner's apt mirror is occasionally unreachable, and it failed this
+        # job twice on 2026-11-11 BEFORE any test ran ("Temporary failure
+        # resolving 'azure.archive.ubuntu.com'"). The browser comes from
+        # Playwright's CDN and ubuntu-latest already ships Chromium's shared
+        # libraries; what `--with-deps` adds beyond that on this image is fonts,
+        # which this suite never asserts (it checks text content, not glyphs).
+        # Keep the faithful attempt, but fall back to the browser-only install so
+        # a mirror outage cannot red the pipeline while leaving a real browser
+        # failure to surface as a test failure.
+        run: |
+          npx playwright install --with-deps chromium || {
+            echo "::warning::playwright install-deps failed (runner apt mirror?); falling back to the runner image's preinstalled libraries"
+            npx playwright install chromium
+          }
       - name: Start app + worker
         run: |
           # Loopback, not 0.0.0.0 (pass 37): this stack auto-verifies
