@@ -278,7 +278,17 @@ export class StripeProvider implements PaymentProvider {
       } else if (
         event.type === "charge.dispute.created" ||
         event.type === "charge.dispute.updated" ||
-        event.type === "charge.dispute.funds_withdrawn"
+        event.type === "charge.dispute.funds_withdrawn" ||
+        // `closed` with status `lost` is the TERMINAL, authoritative record of
+        // a chargeback the merchant lost (funds stay withdrawn). It used to
+        // fall through to the ignored branch because only `funds_withdrawn`
+        // was counted: when the earlier created/updated deliveries were never
+        // received (endpoint outage past the provider's retry window), the
+        // dispute never entered Order.disputedAmountUsd and the credits/tier
+        // survived money the merchant lost. The route's per-dispute marker
+        // makes this a no-op when an earlier delivery was already counted, and
+        // an inquiry's `warning_closed` is still refused by disputeMovesFunds.
+        event.type === "charge.dispute.closed"
       ) {
         if (!disputeMovesFunds(disputeStatus)) {
           // An inquiry: signed, real, and deliberately not acted on.

@@ -40,10 +40,23 @@
 // TLS with HTTP/2 — so the browser may hold far more than six requests for the
 // same origin at once. 32 made the 33rd thumbnail a 429 that the browser does
 // not retry. 64 covers a full gallery page with headroom, and still leaves at
-// least 128 of the 192 sockets to every other tenant, the HEAD/health probes
+// least 64 of the 192 sockets to every other tenant, the HEAD/health probes
 // and uploads even when that owner is also a deliberate stream-parker.
 export const MAX_CONCURRENT_FILE_STREAMS = 128;
 export const MAX_CONCURRENT_FILE_STREAMS_PER_OWNER = 64;
+
+// The ratio above is the availability ceiling, not only a fairness one (pass
+// 59): ceil(128 / 64) = 2, so TWO ordinary accounts parking their full quota
+// hold every slot in the process and every other tenant's gallery answers
+// `429 too-many-streams` for as long as they keep re-parking (a parked stream
+// costs one request per idle deadline, far under the rate limits). The last
+// quarter of the process ceiling is therefore a fair-share reserve: an owner
+// already holding this many streams cannot take from it, so the two-owner
+// attack fills 96 slots and stops, while every other account — including one
+// holding none — can still open up to this many streams in the contested
+// quarter. The true fix for a Sybil attacker is account cost; this bounds what
+// one or two throwaway accounts can do with a single request loop.
+export const FILE_STREAM_RESERVE_BURST = 8;
 
 // How long a response may go without the consumer pulling another chunk before
 // it is assumed abandoned. A legitimate client reads continuously (the pauses
@@ -61,16 +74,26 @@ export const STREAM_IDLE_TIMEOUT_MS = 120_000;
 export class StreamSlotLimiter {
   private total = 0;
   private readonly perOwner = new Map<string, number>();
+  private readonly reserveStart: number;
+  private readonly reserveBurst: number;
 
   constructor(
     private readonly globalMax = MAX_CONCURRENT_FILE_STREAMS,
     private readonly perOwnerMax = MAX_CONCURRENT_FILE_STREAMS_PER_OWNER,
-  ) {}
+    reserveBurst = FILE_STREAM_RESERVE_BURST,
+  ) {
+    // 3/4 of the ceiling: with the shipped 128 that is 96. Clamped so a tiny
+    // test limiter keeps its old semantics (the reserve is never larger than
+    // the per-owner cap that already applies).
+    this.reserveStart = this.globalMax - Math.ceil(this.globalMax / 4);
+    this.reserveBurst = Math.min(reserveBurst, this.perOwnerMax);
+  }
 
   /** Reserve one stream for `owner`; returns an idempotent release, or null. */
   tryAcquire(owner: string): (() => void) | null {
     const held = this.perOwner.get(owner) ?? 0;
     if (this.total >= this.globalMax || held >= this.perOwnerMax) return null;
+    if (this.total >= this.reserveStart && held >= this.reserveBurst) return null;
     this.total += 1;
     this.perOwner.set(owner, held + 1);
     let released = false;

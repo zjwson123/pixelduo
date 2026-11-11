@@ -1,5 +1,17 @@
+# App containers run as `node` and listen on an unprivileged port, so none of
+# them needs privilege escalation or a Linux capability. Dropping ALL caps and
+# setting no-new-privileges blocks the post-compromise path from a dependency /
+# libvips bug to CAP_NET_RAW spoofing on the compose network (pass 59). Caddy
+# is excluded from cap_drop because binding 80/443 needs NET_BIND_SERVICE.
+x-app-hardening: &app-hardening
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
 services:
   migrate:
+    <<: *app-hardening
     restart: "no"
     # Pinned like web/worker/rollover below (pass 34; pass 31 pinned the two
     # production files only). Without it compose derives <project>-migrate, so
@@ -162,6 +174,7 @@ services:
         condition: service_healthy
 
   web:
+    <<: *app-hardening
     restart: unless-stopped
 
     # Pinned, with the same defaults docker-compose.prod.yml consumes. Without
@@ -219,6 +232,7 @@ services:
       retries: 12
 
   worker:
+    <<: *app-hardening
     restart: unless-stopped
 
     image: ${IMAGE_WORKER:-image-gen-worker:latest}
@@ -236,6 +250,7 @@ services:
         condition: service_completed_successfully
 
   rollover:
+    <<: *app-hardening
     restart: unless-stopped
 
     image: ${IMAGE_WORKER:-image-gen-worker:latest}

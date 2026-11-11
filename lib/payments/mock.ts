@@ -31,6 +31,12 @@ export class MockProvider implements PaymentProvider {
       const body = JSON.parse(rawBody) as {
         eventId?: string;
         orderId?: string;
+        // Provider-side identities the real verifiers emit. Carried through so
+        // the route's order-resolution fallback and its unresolved-refund
+        // retry budget (keyed on the stable adjustment/transaction id, pass 59)
+        // are reachable from tests and demos with the mock provider.
+        providerOrderId?: string;
+        refundAdjustmentId?: string;
         status?: string;
         fullRefund?: boolean;
         refundAmountUsd?: number;
@@ -52,6 +58,9 @@ export class MockProvider implements PaymentProvider {
         eventId: body.eventId,
         type: body.status === "refunded" ? "refunded" : "paid",
         orderId: body.orderId,
+        providerOrderId: typeof body.providerOrderId === "string" ? body.providerOrderId : undefined,
+        refundAdjustmentId:
+          typeof body.refundAdjustmentId === "string" ? body.refundAdjustmentId : undefined,
         fullRefund: typeof body.fullRefund === "boolean" ? body.fullRefund : undefined,
         refundAmountUsd: typeof body.refundAmountUsd === "number" ? body.refundAmountUsd : undefined,
         refundCumulativeUsd: typeof body.refundCumulativeUsd === "number" ? body.refundCumulativeUsd : undefined,

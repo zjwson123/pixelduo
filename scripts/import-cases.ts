@@ -17,7 +17,7 @@ import path from "path";
 import { PrismaClient } from "@prisma/client";
 import { getStorage, newStorageKey } from "../lib/storage";
 import { storeContentType, extensionForContentType } from "../lib/media-type";
-import { readBodyCapped } from "../lib/store";
+import { fetchPublicBuffer } from "../lib/store";
 
 // Largest case image worth storing; also the streaming read cap below.
 const MAX_CASE_BYTES = 25 * 1024 * 1024;
@@ -150,21 +150,21 @@ async function downloadImage(caseId: number, srcPath: string): Promise<string | 
     }
   } else {
     // 2. GitHub raw fallback
+    //
+    // Through the shared hardened downloader, not the global fetch (pass 59):
+    // Node's fetch follows up to 20 cross-origin redirects with NO re-check,
+    // and whatever comes back is stored as a Template object that /api/files
+    // serves to every signed-in account and API key. A redirect to an internal
+    // service (metadata, Redis, an admin port) would publish those bytes as a
+    // shared image. fetchPublicBuffer re-validates scheme/port/public-IP on
+    // every hop, refuses redirects without a Location, pins DNS at connect
+    // time, and caps the body while streaming — the same helper every app
+    // download uses.
     const url = `${RAW_BASE}/${filename}`;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 30_000);
     try {
-      const res = await fetch(url, { signal: controller.signal });
-      if (!res.ok) return null;
-      // Capped while STREAMING, not after: reading the whole body first made
-      // the 25MB check below too late to be the limit — a hostile or wrong
-      // upstream (or a redirect to a huge file) allocated whatever it liked.
-      // Same helper every app path uses.
-      buf = await readBodyCapped(res, MAX_CASE_BYTES);
+      buf = await fetchPublicBuffer(url, { timeoutMs: 30_000, maxBytes: MAX_CASE_BYTES });
     } catch {
       return null;
-    } finally {
-      clearTimeout(timer);
     }
   }
   if (!buf || buf.length > MAX_CASE_BYTES) return null;

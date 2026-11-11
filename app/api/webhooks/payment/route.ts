@@ -147,8 +147,23 @@ export async function POST(req: Request) {
             `[webhook] refund for order ${event.orderId} which no longer exists (account erased?) — nothing to revoke, acking`,
           );
         } else {
+          // Bound the retries on the STABLE identity of the thing that cannot
+          // resolve, not on the notification id. Paddle re-notifies one
+          // adjustment under a fresh `event_id` (lib/payments/paddle.ts's own
+          // comment: "eventId is a notification id, and a re-notification of
+          // the same adjustment carries a new one"), so an eventId-keyed budget
+          // handed a permanently unresolvable adjustment a fresh 25 attempts
+          // per re-notification — the loop the bound exists to stop never
+          // ended, and the endpoint's failure streak could disable it, which
+          // stops the paid events we do need. The adjustment id is the thing
+          // being retried; providerOrderId is the fallback when a payload
+          // carries no adjustment id, and orderId/eventId keep pre-Paddle
+          // shapes working. The provider prefix keeps two providers' opaque ids
+          // from colliding in one bucket.
+          const retryKey =
+            event.refundAdjustmentId ?? event.providerOrderId ?? event.orderId ?? event.eventId;
           const attempts = await rateLimit(
-            `whrefund:${event.eventId}`,
+            `whrefund:${event.provider}:${retryKey}`,
             MAX_UNRESOLVED_REFUND_RETRIES,
             7 * 24 * 3600_000,
           );

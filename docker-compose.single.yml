@@ -6,6 +6,16 @@
 # SMTP_URL, EMAIL_FROM, FEEDBACK_TO (feedback notifications are refused without
 # it — see lib/mail.ts), SENTRY_DSN, REDIS_PASSWORD, MINIO_ROOT_USER/PASSWORD.
 
+# App containers run as `node` and need no Linux capabilities; dropping ALL and
+# refusing privilege escalation blocks lateral movement (CAP_NET_RAW spoofing of
+# DB/Redis/S3 traffic) if a dependency or libvips is compromised. Caddy is
+# excluded from cap_drop because 80/443 need NET_BIND_SERVICE (pass 59).
+x-app-hardening: &app-hardening
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
 x-appenv: &appenv
   DATABASE_URL: postgresql://${POSTGRES_USER:-pixelduo}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-pixelduo}
   REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379
@@ -153,6 +163,10 @@ x-appenv: &appenv
 
 services:
   caddy:
+    # No cap_drop: binding 80/443 needs NET_BIND_SERVICE. no-new-privileges
+    # still applies.
+    security_opt:
+      - no-new-privileges:true
     image: caddy:2-alpine
     ports: ["80:80", "443:443", "443:443/udp"]
     environment:
@@ -165,6 +179,7 @@ services:
     restart: unless-stopped
 
   migrate:
+    <<: *app-hardening
     # Pinned like web/worker (pass 31): with `build:` and no `image:`, Compose
     # names this image after the PROJECT DIRECTORY (`image-gen-migrate`), which
     # no tag swap in the documented rollback touches — so after a rollback the
@@ -181,6 +196,7 @@ services:
     restart: "no"
 
   web:
+    <<: *app-hardening
     # Pinned so the rollback in docs/server-setup.md §6 names a real image:
     # without it Compose derives the name from the PROJECT DIRECTORY (the clone
     # path is "pixelduo" in that guide, "image-gen" in this tree), so
@@ -214,6 +230,7 @@ services:
     restart: unless-stopped
 
   worker:
+    <<: *app-hardening
     image: ${IMAGE_WORKER:-image-gen-worker:latest}
     build: { context: ., target: worker }
     command: npx tsx scripts/worker.ts
@@ -228,6 +245,7 @@ services:
     restart: unless-stopped
 
   rollover:
+    <<: *app-hardening
     # Same pin as migrate (pass 31) — the loop that runs plan downgrade, credit
     # expiry and expiry reminders on money-adjacent state is the service a
     # rollback most needs to actually roll back.

@@ -118,8 +118,13 @@ SENTRY_DSN="https://xxxx@o000000.ingest.sentry.io/0000000" STORAGE_DRIVER=s3 doc
 
 ```bash
 ./scripts/backup.sh                          # pg_dump → backups/，保留最近 14 份
-gunzip -c backups/<file>.sql.gz | docker exec -i pixelduo-db psql -U pixelduo -d pixelduo
+set -o pipefail; gunzip -c backups/<file>.sql.gz | docker exec -i pixelduo-db sh -c 'psql -v ON_ERROR_STOP=1 --single-transaction -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
 ```
+
+恢复命令必须**失败即整体回滚**：`psql` 默认遇错继续并以 0 退出，没有 `ON_ERROR_STOP=1`
+和 `pipefail` 时，恢复了一半的库会被当成成功（`scripts/backup.sh` 打印的是带这两项的版本）。
+单机生产栈（`docker-compose.single.yml`）里数据库容器名不是 `pixelduo-db`（那是本地开发
+compose 才固定的名字），恢复命令见 `docs/deploy.md`。
 
 图片对象备份（自托管 MinIO/S3 时使用；托管对象存储建议直接开版本控制 + 跨区域复制）：
 

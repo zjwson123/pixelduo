@@ -18,14 +18,23 @@ const SECRET_PATTERNS: Array<RegExp> = [
   // customer's job history and the logs.
   /\b(?:sk|pdl|pd)_(?:live|test|sdbx)_[A-Za-z0-9_]{8,}/g,
   /Bearer\s+[A-Za-z0-9._~+/=-]{12,}/gi,
-  /x-amz-credential=[^&]{5,}/gi,
-  /x-amz-signature=[^&]{5,}/gi,
+  // Percent-encoded spellings are matched too (pass 59): a gateway that puts
+  // the URL inside a query value re-encodes the whole thing, so the delimiter
+  // arrives as `%3D` (`...%3FX-Amz-Credential%3DAKIA...`). The literal-only
+  // patterns missed every one of those, and the presigned URL for an extend job
+  // is handed to the provider/relay as `video_url` — a 2xx-then-error or an
+  // echoed request body put the 1-hour signature, access-key id and session
+  // token into Job.error and Sentry unredacted. The value class deliberately
+  // runs to the next RAW `&` (an encoded `%26` is consumed), which over-masks
+  // rather than under-masks.
+  /x-amz-credential(?:=|%3D)[^&\s]{5,}/gi,
+  /x-amz-signature(?:=|%3D)[^&\s]{5,}/gi,
   // The third presign parameter: temporary S3/MinIO credentials (STS, R2,
   // scoped service accounts) carry a session token, and it is itself a
   // credential — a gateway that echoes a presigned URL into Job.error or a
   // console line would leak it. lib/sentry-scrub already lists it; the two
   // scrubbers cover the same set.
-  /x-amz-security-token=[^&]{5,}/gi,
+  /x-amz-security-token(?:=|%3D)[^&\s]{5,}/gi,
   // Email addresses are PII in this codebase: Sentry's own query scrubber
   // already rewrites `email=`/`q=` parameters (lib/sentry-scrub.ts), but the
   // auth/transaction mail path passes `mailTo: user@example.com` as a CONTEXT

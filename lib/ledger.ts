@@ -1544,6 +1544,16 @@ export async function adminClawbackTx(
       );
       r.remaining = r.amount;
     }
+    // A NEGATIVE remaining predates the CHECK constraint (it is NOT VALID) and
+    // only scripts/repair-credit-invariant.ts should ever see it. This loop used
+    // to treat it as takable credit: take = min(-5, needed) = -5, `decrement:
+    // -5` INCREASED the row from -5 to 0 (minting 5 row-credits with no GRANT
+    // ledger row), and `needed -= take` demanded 5 MORE from the other grants —
+    // so a clawback of $X debited X+5, wrote a ledger row of -(X+5) for an
+    // admin request of -X, and left User.credits below SUM(remaining) (probed).
+    // There is nothing to take from a negative lot and nothing to repair here;
+    // skip it and let the remaining amount come from rows that hold credits.
+    if (r.remaining <= 0) continue;
     const take = Math.min(r.remaining, needed);
     await tx.creditGrant.update({
       where: { id: r.id },

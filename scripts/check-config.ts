@@ -39,8 +39,10 @@ const ENV_EXAMPLE = ".env.example";
 // them: they wire one container to its neighbour's own configuration, they are
 // not operator knobs. Each needs a reason — the point of this file.
 const INTERNAL_FORWARDED: Record<string, string> = {
-  MINIO_ROOT_USER: "minio/minio server's own credential name (fed from S3_ACCESS_KEY_ID)",
-  MINIO_ROOT_PASSWORD: "minio/minio server's own credential name (fed from S3_SECRET_ACCESS_KEY)",
+  MINIO_ROOT_USER:
+    "minio/minio server's own credential name; single.yml wires it the OTHER way (server → app S3_ACCESS_KEY_ID), so the old 'fed from S3_ACCESS_KEY_ID' reason was backwards (pass 59)",
+  MINIO_ROOT_PASSWORD:
+    "minio/minio server's own credential name; single.yml wires it the OTHER way (server → app S3_SECRET_ACCESS_KEY)",
   PGHOST: "postgres client's own variable, set from the service hostname",
   PGPORT: "postgres client's own variable",
   PGUSER: "postgres client's own variable (fed from POSTGRES_USER)",

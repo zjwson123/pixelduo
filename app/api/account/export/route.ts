@@ -30,7 +30,7 @@ export async function POST(req: Request) {
     // Bounded take so a hoarded account cannot force an unbounded response —
     // one past the cap, so truncation is detectable.
     const take = EXPORT_ROW_LIMIT + 1;
-    const [user, ledgerRows, images, jobs, orders, grants, apiKeys, feedback] = await Promise.all([
+    const [user, ledgerRows, images, jobs, orders, grantRows, apiKeys, feedback] = await Promise.all([
       prisma.user.findUnique({
         where: { id: userId },
         select: { id: true, email: true, name: true, credits: true, plan: true, planRenewsAt: true, createdAt: true },
@@ -194,6 +194,13 @@ export async function POST(req: Request) {
       }),
     ]);
     const ledger = ledgerRows.map((e) => (e.refType === "admin" ? { ...e, refId: null } : e));
+    // The same operator identifier rides on the grants array: adminGrantTx
+    // writes the grant with refType "admin" and refId = the acting admin's
+    // User.id (lib/ledger.ts). The ledger block above is sanitised; grants were
+    // the third table carrying the id and the only one that still returned it
+    // verbatim — the same cross-account identifier class passes 43/44 closed for
+    // LedgerEntry and Feedback (pass 59).
+    const grants = grantRows.map((g) => (g.refType === "admin" ? { ...g, refId: null } : g));
     // A failure recorded before pass 47's write-time mask can still carry
     // provider-echoed credentials; the export is a read path like the three job
     // views, so it applies the same read-time mask (see redactJobError).

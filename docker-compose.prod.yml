@@ -9,6 +9,16 @@
 # then: docker compose -f docker-compose.prod.yml up -d
 name: pixelduo-prod
 
+# App containers run as `node` and need no Linux capabilities; dropping ALL and
+# refusing privilege escalation blocks lateral movement (CAP_NET_RAW spoofing of
+# DB/Redis/S3 traffic) if a dependency or libvips is compromised. Caddy is
+# excluded from cap_drop because 80/443 need NET_BIND_SERVICE (pass 59).
+x-app-hardening: &app-hardening
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
 x-appenv: &appenv
   DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
   REDIS_URL: ${REDIS_URL:?set REDIS_URL}
@@ -131,12 +141,17 @@ services:
   # which needs no tables, so the container healthcheck and Caddy both passed
   # while every application route answered `relation "User" does not exist`.
   migrate:
+    <<: *app-hardening
     image: ${IMAGE_WORKER:-image-gen-worker:latest}
     command: npx prisma migrate deploy
     environment: *appenv
     restart: "no"
 
   caddy:
+    # No cap_drop: binding 80/443 needs NET_BIND_SERVICE. no-new-privileges
+    # still applies.
+    security_opt:
+      - no-new-privileges:true
     image: caddy:2-alpine
     ports:
       - "80:80"
@@ -158,6 +173,7 @@ services:
     restart: unless-stopped
 
   web:
+    <<: *app-hardening
     image: ${IMAGE_WEB:-image-gen-web:latest}
     environment: *appenv
     expose:
@@ -175,6 +191,7 @@ services:
     restart: unless-stopped
 
   worker:
+    <<: *app-hardening
     image: ${IMAGE_WORKER:-image-gen-worker:latest}
     environment:
       <<: *appenv
@@ -185,6 +202,7 @@ services:
     restart: unless-stopped
 
   rollover:
+    <<: *app-hardening
     image: ${IMAGE_WORKER:-image-gen-worker:latest}
     # Every pass is chained with && and a failure ends the container (instead of
     # `;`, which discarded each exit status and looped forever): a persistent

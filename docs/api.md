@@ -70,7 +70,10 @@ through `queued → polling → done` (async provider task, typically 1–3 min)
   responses per account and 128 per instance, with a 2-minute idle deadline
   (HTTP 429 `too-many-streams` with `Retry-After`). Read each body; a client
   that opens responses and never consumes them holds a storage handle until the
-  idle deadline retires it.
+  idle deadline retires it. The last quarter of the instance ceiling (32 slots)
+  is a fair-share reserve: an account already holding 8 streams cannot take
+  from it, so one or two stream-parking accounts cannot blank every other
+  tenant's media.
 - Credits are pre-authed at submit and refunded on failure
 - Content safety: prompts are filtered (400 `blocked:…`); images pass the same
   post-generation moderation as the web app

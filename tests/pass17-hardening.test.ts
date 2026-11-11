@@ -469,8 +469,13 @@ describe("readBodyCapped (pass 17)", () => {
     // The cap-after-buffering shape (`res.arrayBuffer()` then a length check)
     // allocated whatever the upstream sent; the streaming helper is the fix, and
     // this pins that the script uses it rather than checking after the fact.
+    // Pass 59 moved the importer onto fetchPublicBuffer, which streams through
+    // the same readBodyCapped under the same maxBytes cap — and also validates
+    // each redirect hop (the global fetch followed 20 of them unguarded, then
+    // published the bytes as a shared Template image).
     const source = await fsp.readFile(path.join(process.cwd(), "scripts/import-cases.ts"), "utf8");
-    expect(source).toContain("readBodyCapped(res, MAX_CASE_BYTES)");
+    expect(source).toContain("fetchPublicBuffer(url, { timeoutMs: 30_000, maxBytes: MAX_CASE_BYTES })");
+    expect(source).not.toContain("await fetch(");
     // No whole-body read: the cap has to be enforced while the stream arrives.
     expect(source).not.toMatch(/await res\.arrayBuffer\(\)/);
   });

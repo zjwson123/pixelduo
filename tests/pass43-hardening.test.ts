@@ -172,10 +172,17 @@ describe("pass 43 — Stripe dispute lifecycle", () => {
       expect(e.reinstatedDisputeId).toBe("dp_won");
       expect(e.disputedAmountUsd).toBeUndefined();
     }
-    // A lost chargeback changes nothing: the money stays withdrawn.
-    expect(await verify("charge.dispute.closed", { id: "dp_lost", status: "lost", amount: 4999 })).toEqual(
-      IGNORED_WEBHOOK,
-    );
+    // A lost chargeback is the TERMINAL record of money the merchant lost. It
+    // used to be ignored on the theory that `created` already counted the
+    // funds; pass 59 counts it too, because provider delivery is not
+    // guaranteed — when created/updated/funds_withdrawn never arrived, this was
+    // the only evidence of the chargeback and the order kept its credits. The
+    // route's per-dispute marker (`disputed:<id>`) makes it a no-op when an
+    // earlier delivery was counted.
+    const lost = await parsed(verify("charge.dispute.closed", { id: "dp_lost", status: "lost", amount: 4999 }));
+    expect(lost.type).toBe("refunded");
+    expect(lost.disputedAmountUsd).toBe(49.99);
+    expect(lost.disputeId).toBe("dp_lost");
   });
 });
 
