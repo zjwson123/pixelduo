@@ -65,6 +65,14 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
           await tx.verificationToken.deleteMany({ where: { userId: id } });
           await tx.creditReminder.deleteMany({ where: { userId: id } });
           await tx.apiKey.deleteMany({ where: { userId: id } });
+          // PaymentEvent has no FK to Order (lib/payments writes it before an
+          // order always exists), so the cascade below leaves the account's
+          // payment-event trail behind. Same wipe as the self-service route
+          // (pass 60): a subquery, not a bound id list, so an account with more
+          // orders than the 32,767-parameter ceiling is still erased.
+          await tx.$executeRaw(
+            Prisma.sql`DELETE FROM "PaymentEvent" WHERE "orderId" IN (SELECT id FROM "Order" WHERE "userId" = ${id})`,
+          );
           await tx.user.delete({ where: { id: id } });
         },
       },

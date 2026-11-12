@@ -30,7 +30,7 @@ export async function POST(req: Request) {
     // Bounded take so a hoarded account cannot force an unbounded response —
     // one past the cap, so truncation is detectable.
     const take = EXPORT_ROW_LIMIT + 1;
-    const [user, ledgerRows, images, jobs, orders, grantRows, apiKeys, feedback] = await Promise.all([
+    const [user, ledgerRows, images, jobs, orders, grantRows, apiKeys, feedback, checkins] = await Promise.all([
       prisma.user.findUnique({
         where: { id: userId },
         select: { id: true, email: true, name: true, credits: true, plan: true, planRenewsAt: true, createdAt: true },
@@ -192,6 +192,18 @@ export async function POST(req: Request) {
           handledAt: true,
         },
       }),
+      // Daily check-in history (pass 60). It is user-owned data — the days the
+      // account claimed and the credits each claim granted — and it was the one
+      // table with a userId the export still omitted, against
+      // docs/compliance/privacy.md's "可导出您的全部数据". The ledger records
+      // the credit movement but not the CLAIM (or the days already claimed and
+      // refused), so the history is not reconstructible from the other tables.
+      prisma.checkin.findMany({
+        where: { userId },
+        orderBy: { date: "asc" },
+        take,
+        select: { id: true, date: true, credits: true, createdAt: true },
+      }),
     ]);
     const ledger = ledgerRows.map((e) => (e.refType === "admin" ? { ...e, refId: null } : e));
     // The same operator identifier rides on the grants array: adminGrantTx
@@ -205,7 +217,7 @@ export async function POST(req: Request) {
     // provider-echoed credentials; the export is a read path like the three job
     // views, so it applies the same read-time mask (see redactJobError).
     const safeJobs = jobs.map((j) => ({ ...j, error: redactJobError(j.error) }));
-    const tables = { ledger, images, jobs: safeJobs, orders, grants, apiKeys, feedback };
+    const tables = { ledger, images, jobs: safeJobs, orders, grants, apiKeys, feedback, checkins };
     const truncated = Object.values(tables).some((rows) => rows.length > EXPORT_ROW_LIMIT);
     const data = Object.fromEntries(
       Object.entries(tables).map(([name, rows]) => [

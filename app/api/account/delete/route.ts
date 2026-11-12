@@ -183,6 +183,18 @@ export async function POST(req: Request) {
           // ApiKey has no FK relation (by design, hash-only table), so it needs an
           // explicit wipe or key metadata survives the erasure request.
           await tx.apiKey.deleteMany({ where: { userId } });
+          // PaymentEvent has no FK to Order either (it is the webhook dedupe /
+          // audit row, written before an order is always resolvable), so the
+          // cascade below would leave the account's whole payment-event trail —
+          // provider, event id, order id, amounts — behind a deleted user, with
+          // no row left to connect it to. It is the third no-FK table and the
+          // only one the erasure still missed (pass 60). The subquery runs
+          // before the user delete (the Order rows still name the user), and SQL
+          // rather than a bound id list because an account can carry more orders
+          // than the 32,767-parameter ceiling.
+          await tx.$executeRaw(
+            Prisma.sql`DELETE FROM "PaymentEvent" WHERE "orderId" IN (SELECT id FROM "Order" WHERE "userId" = ${userId})`,
+          );
           await tx.user.delete({ where: { id: userId } });
         },
       },

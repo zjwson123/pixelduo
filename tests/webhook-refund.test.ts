@@ -70,7 +70,14 @@ describe("payment webhook refund handling", () => {
     // past the bound the event is persisted, acked and captured for an operator,
     // because a failure streak is what gets the one payment endpoint disabled.
     const eventId = `evt-unresolved-${Date.now()}`;
-    const body = { eventId, status: "refunded", providerOrderId: "pi-never-recorded" };
+    // The retry budget is keyed on the STABLE identity of the unresolvable
+    // payment (pass 59), not on the event id — so this fixture's
+    // providerOrderId must be unique per run, exactly like a real PaymentIntent.
+    // A fixed value left 25 hits in Redis for 7 days: the first run of the day
+    // passed, and every later run found the budget already spent and got a 200
+    // where it asserts the first delivery is a 500 (probed while re-running the
+    // suite after adding pass 60).
+    const body = { eventId, status: "refunded", providerOrderId: `pi-never-recorded-${Date.now()}` };
     const statuses: number[] = [];
     for (let i = 0; i < 27; i++) statuses.push((await webhookPOST(webhookRequest(body))).status);
     // The first deliveries are 5xx (the paid event may still be retrying)…

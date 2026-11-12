@@ -177,6 +177,76 @@ test("password reset: the emailed link rotates the credential and kills sessions
   expect(await v1Status(page, key)).toBe(401);
 });
 
+test("revoke-sessions retires a reset link requested before it, and recovery still works after", async ({
+  page,
+}) => {
+  test.setTimeout(90_000);
+  test.skip(!mailDir, "requires MAIL_DEV_DIR so the emailed link can be read");
+  const email = `lifecycle-revoke-link-${Date.now()}@test.dev`;
+  const oldPassword = "password123";
+  await register(page, email, oldPassword);
+
+  // A reset link issued BEFORE "sign out everywhere". That action is what an
+  // owner reaches for after suspecting a compromised mailbox/browser, so the
+  // link (a bearer artifact with a 1h TTL) must not outlive the revocation.
+  await page.goto("/forgot-password");
+  await page.fill("#email", email);
+  await page.click('button[type="submit"]');
+  await expect(page.locator("p", { hasText: "a reset link is on its way" })).toBeVisible();
+  const staleLink = await mailLink(email, "/reset-password?token=");
+  const staleToken = new URL(staleLink).searchParams.get("token");
+  expect(staleToken).toBeTruthy();
+
+  const revoked = await page.evaluate(async () => {
+    const r = await fetch("/api/auth/revoke-sessions", { method: "POST" });
+    return r.status;
+  });
+  expect(revoked).toBe(200);
+
+  // The stale link is dead: the reset route answers invalid-token, not a new
+  // password. (The session is revoked too, but that endpoint needs no cookie.)
+  const stale = await page.evaluate(async (token) => {
+    const r = await fetch("/api/auth/reset-password", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token, password: "hijacked-password" }),
+    });
+    return { status: r.status, body: await r.json() };
+  }, staleToken);
+  expect(stale.status).toBe(400);
+  expect(stale.body.error).toContain("invalid-token");
+
+  // Recovery is not bricked: requesting a fresh link after the revocation
+  // still yields a working reset. The mail file is append-only, so drop it
+  // first or mailLink would return the retired link again.
+  fs.rmSync(path.join(mailDir!, `${email}.txt`), { force: true });
+  await page.goto("/forgot-password");
+  await page.fill("#email", email);
+  await page.click('button[type="submit"]');
+  await expect(page.locator("p", { hasText: "a reset link is on its way" })).toBeVisible();
+  const freshLink = await mailLink(email, "/reset-password?token=");
+  const freshToken = new URL(freshLink).searchParams.get("token");
+  const fresh = await page.evaluate(async (token) => {
+    const r = await fetch("/api/auth/reset-password", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token, password: "password456-new" }),
+    });
+    return r.status;
+  }, freshToken);
+  expect(fresh).toBe(200);
+
+  // The old password no longer signs in; the fresh one does.
+  await page.goto("/login");
+  await page.fill("#email", email);
+  await page.fill("#password", oldPassword);
+  await page.click('button[type="submit"]');
+  await expect(page.locator(".form-error")).toBeVisible();
+  await page.fill("#password", "password456-new");
+  await page.click('button[type="submit"]');
+  await page.waitForURL("**/studio");
+});
+
 test("refund webhook: credits are revoked once, replays are deduped, a late paid event cannot re-grant", async ({
   page,
 }) => {
@@ -359,6 +429,18 @@ test("daily check-in credits once per day", async ({ page }) => {
   expect(second.body.balance).toBe(32);
   const user = await prisma.user.findUnique({ where: { email } });
   expect(user?.credits).toBe(32);
+
+  // The check-in history is part of "all your data": the day claimed and its
+  // credits are in the export, which is what lib/compliance promises.
+  const exported = await page.evaluate(async () => {
+    const r = await fetch("/api/account/export", { method: "POST" });
+    return { status: r.status, body: await r.json() };
+  });
+  expect(exported.status).toBe(200);
+  const row = await prisma.checkin.findFirstOrThrow({ where: { userId: user!.id } });
+  expect(exported.body.data.checkins).toEqual([
+    expect.objectContaining({ date: row.date, credits: 2 }),
+  ]);
 });
 
 test("edit: an uploaded reference image produces a result that stays private", async ({ page, request }) => {
