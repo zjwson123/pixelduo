@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { dbNow } from "@/lib/ledger";
 import { randomUUID } from "crypto";
 
 // The route-level case needs a session. Same harness as pass18: mock only
@@ -376,8 +377,12 @@ describe("refunded moderation refusals are bounded", () => {
     return user.id;
   }
 
-  // The same row failJob's terminal branch writes for a flagged output.
-  async function recordRefusal(userId: string, createdAt = new Date(), error?: string) {
+  // The same row failJob's terminal branch writes for a flagged output. Prisma fills @default(now())
+  // from the WRITING process's clock, not the database's, while the budget is judged on dbNow(); this
+  // suite tolerates up to a second of host↔DB skew, so an app-clock stamp can sit in the future and
+  // push the derived wait past its own 24h window (observed 86401s). Stamp the fixture with the
+  // database clock instead, keeping the explicit stamp for the skew cases.
+  async function recordRefusal(userId: string, createdAt?: Date, error?: string) {
     await prisma.job.create({
       data: {
         userId,
@@ -387,7 +392,7 @@ describe("refunded moderation refusals are bounded", () => {
         costCredits: 10,
         images: "[]",
         error: error ?? MODERATION_REFUSAL_MESSAGE,
-        createdAt,
+        createdAt: createdAt ?? (await dbNow(prisma)),
       },
     });
   }
@@ -417,6 +422,19 @@ describe("refunded moderation refusals are bounded", () => {
     // rather than resurrecting the budget.
     await recordRefusal(userId);
     expect((await moderationRefusalBudget(userId)).ok).toBe(false);
+  });
+
+  it("a row stamped ahead of the database clock never reports a wait past the window", async () => {
+    const userId = await makeUser("future");
+    // The budget is derived from dbNow(); a legacy/foreign row can carry an app-clock stamp that is
+    // ahead of the database. The wait it implies must still be capped at the window it is derived from
+    // (a Retry-After beyond the 24h policy confuses clients and breaks the endpoint's contract).
+    const ahead = new Date(Date.now() + 5_000);
+    for (let i = 0; i < MODERATION_REFUSAL_LIMIT; i++) await recordRefusal(userId, ahead);
+    const budget = await moderationRefusalBudget(userId);
+    expect(budget.ok).toBe(false);
+    expect(budget.retryAfterSec).toBeGreaterThan(0);
+    expect(budget.retryAfterSec!).toBeLessThanOrEqual(MODERATION_REFUSAL_WINDOW_MS / 1000);
   });
 
   it("does not charge other accounts for one account's refusals", async () => {

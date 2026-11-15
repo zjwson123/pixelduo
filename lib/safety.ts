@@ -195,7 +195,20 @@ export async function moderationRefusalBudget(userId: string): Promise<Moderatio
   });
   if (rows.length < MODERATION_REFUSAL_LIMIT) return { ok: true, refused: rows.length };
   const oldest = rows[0].createdAt.getTime();
-  const retryAfterSec = Math.max(1, Math.ceil((oldest + MODERATION_REFUSAL_WINDOW_MS - now.getTime()) / 1000));
+  // Job.createdAt is stamped by the WRITING process (Prisma fills @default(now()) client-side; failJob
+  // also writes new Date()), while `now` above is the database's clock. When those clocks disagree — a
+  // suspended VM, an NTP step, a worker on another host — the oldest row can sit slightly in the future
+  // and the derived wait rounds UP past the window itself (observed 86401/86406s, i.e. a Retry-After
+  // beyond the 24h policy). The window is the contract: clamp the reported wait to it. The budget still
+  // counts the row (excluding future rows would reopen the provider-spend loop under a lagging clock),
+  // and rows written by the same compose host share its clock, so the shift is normally sub-second.
+  const retryAfterSec = Math.max(
+    1,
+    Math.min(
+      MODERATION_REFUSAL_WINDOW_MS / 1000,
+      Math.ceil((oldest + MODERATION_REFUSAL_WINDOW_MS - now.getTime()) / 1000),
+    ),
+  );
   return { ok: false, refused: rows.length, retryAfterSec };
 }
 
