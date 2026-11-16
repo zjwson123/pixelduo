@@ -441,7 +441,7 @@ describe("compose configuration covers what the code reads (pass 18)", () => {
         .replace(/\/backups/g, dir)
         // Keep the shape, drop the two things that cannot run here: pg_dump (the
         // rotation is what is under test) and the daily sleep.
-        .replace(/pg_dump -Fc -f (\S+);/, "touch $1;")
+        .replace(/pg_dump -Fc -f \$TMP && pg_restore -l \$TMP \| grep -q "TABLE DATA"/, "touch $TMP")
         .replace(/sleep \d+;/, "exit 0;");
       await new Promise<void>((resolve) => {
         execFile("sh", ["-c", script], { env: { ...process.env, BACKUP_KEEP: "2" } }, () => resolve());

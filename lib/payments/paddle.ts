@@ -55,11 +55,14 @@ export class PaddleProvider implements PaymentProvider {
     if (isProductionRuntime() && !opts?.client && !webhookOnly && key && !key.startsWith("pdl_live_")) {
       throw new Error("PADDLE_API_KEY must be a live key (pdl_live_…) in production — sandbox keys only work with PADDLE_ENVIRONMENT=sandbox");
     }
-    const secret = opts?.webhookSecret ?? process.env.PADDLE_WEBHOOK_SECRET;
+    // Same trim rule as StripeProvider (pass 61): a whitespace-only placeholder
+    // passed the boot gate as "not configured" while this constructor treated it
+    // as the HMAC key. A blank value is missing, and the key is the trimmed one.
+    const secret = (opts?.webhookSecret ?? process.env.PADDLE_WEBHOOK_SECRET ?? "").trim();
     if (isProductionRuntime() && !opts?.client && !webhookOnly && !secret) {
       throw new Error("PADDLE_WEBHOOK_SECRET is required when PAYMENT_PROVIDER=paddle in production");
     }
-    this.webhookSecret = secret ?? "";
+    this.webhookSecret = secret;
     this.webhookOnly = webhookOnly && !opts?.client;
     // verifyWebhook is an in-repo HMAC and never touches this client. The
     // dummy key only satisfies the SDK constructor when the old provider's API

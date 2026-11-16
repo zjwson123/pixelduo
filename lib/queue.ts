@@ -581,13 +581,20 @@ export async function failJob(
     // Terminal failure = DLQ; refund the held credits. CAS from the observed
     // status: two concurrent recovery sweeps (or a sweep racing a completion)
     // must not both pass — the refund would run twice, or run after delivery.
+    //
+    // finishedAt is the refusal INSTANT and the timestamp moderationRefusalBudget
+    // measures its 24h window from (pass 61), so it is stamped by the database,
+    // not by this process: the budget compares it against dbNow(), and an
+    // app-clock stamp made the two disagree — under a lagging worker clock every
+    // refusal fell outside the window and the provider-spend loop reopened.
+    const finishedAt = await dbNow(tx);
     const claim = await tx.job.updateMany({
       where: casWhere,
       data: {
         status: "failed",
         attempts: nextAttempts,
         error: errorText,
-        finishedAt: new Date(),
+        finishedAt,
         heartbeatAt: null,
       },
     });

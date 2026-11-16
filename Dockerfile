@@ -177,6 +177,9 @@ RUN --mount=type=bind,from=builder,source=/app,target=/b \
       ./*.md docker-compose*.yml Caddyfile Dockerfile \
       *.db *.db-journal prisma/*.db prisma/*.db-journal \
       ./*.tsbuildinfo \
+ && find . -path ./node_modules -prune -o -type f \
+      \( -name .env -o -name '.env.*' -o -name '*.db' -o -name '*.db-journal' -o -name '*.sqlite' -o -name '*.sqlite3' \) \
+      -exec rm -f {} \; \
  && chown -R node:node /app
 # Never run as root: a compromise (sharp/libvips, a dependency) must not get
 # uid 0 inside the container.
@@ -212,6 +215,9 @@ RUN --mount=type=bind,source=.,target=/ctx \
       app components next.config.mjs proxy.ts instrumentation.ts instrumentation-client.ts \
       sentry.server.config.ts sentry.edge.config.ts vitest.config.ts vitest.setup.ts \
       playwright.config.ts tsconfig.json next-env.d.ts prisma/seed.ts \
+ && find . -path ./node_modules -prune -o -type f \
+      \( -name .env -o -name '.env.*' -o -name '*.db' -o -name '*.db-journal' -o -name '*.sqlite' -o -name '*.sqlite3' \) \
+      -exec rm -f {} \; \
  && chown -R node:node /app
 RUN npx prisma generate
 # `prisma generate` runs AFTER the .env prune above and writes a fresh client

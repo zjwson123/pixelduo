@@ -377,12 +377,13 @@ describe("refunded moderation refusals are bounded", () => {
     return user.id;
   }
 
-  // The same row failJob's terminal branch writes for a flagged output. Prisma fills @default(now())
-  // from the WRITING process's clock, not the database's, while the budget is judged on dbNow(); this
-  // suite tolerates up to a second of host↔DB skew, so an app-clock stamp can sit in the future and
-  // push the derived wait past its own 24h window (observed 86401s). Stamp the fixture with the
-  // database clock instead, keeping the explicit stamp for the skew cases.
-  async function recordRefusal(userId: string, createdAt?: Date, error?: string) {
+  // The same row failJob's terminal branch writes for a flagged output. The
+  // budget measures FINISHED time on the database clock (pass 61) — createdAt is
+  // the submission instant, stamped by the writing process — so the fixture
+  // stamps finishedAt the way failJob now does and keeps the explicit stamp for
+  // the skew cases.
+  async function recordRefusal(userId: string, finishedAt?: Date, error?: string) {
+    const stamp = finishedAt ?? (await dbNow(prisma));
     await prisma.job.create({
       data: {
         userId,
@@ -392,7 +393,8 @@ describe("refunded moderation refusals are bounded", () => {
         costCredits: 10,
         images: "[]",
         error: error ?? MODERATION_REFUSAL_MESSAGE,
-        createdAt: createdAt ?? (await dbNow(prisma)),
+        createdAt: stamp,
+        finishedAt: stamp,
       },
     });
   }

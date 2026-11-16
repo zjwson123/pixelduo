@@ -13,7 +13,15 @@ set -euo pipefail
 umask 077
 
 CONTAINER="${1:-}"
-DB="${2:-${PGDATABASE:-pixelduo}}"
+# POSTGRES_DB first: it is the documented knob that builds DATABASE_URL and
+# the one the compose `backup` service uses (pass 61). This script read
+# PGDATABASE — a name .env.example never mentions — and otherwise hard-coded
+# "pixelduo", so on a deployment that renamed the database the documented
+# incident command either failed with "database pixelduo does not exist" or,
+# if a stale pixelduo database existed, dumped and rotated the WRONG database
+# into ./backups and printed success. PGDATABASE stays as the last fallback for
+# an existing runbook; an explicit second argument still wins.
+DB="${2:-${POSTGRES_DB:-${PGDATABASE:-pixelduo}}}"
 DB_USER="${DB_USER:-${POSTGRES_USER:-pixelduo}}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 BACKUP_DIR="${BACKUP_DIR:-backups}"

@@ -3,7 +3,7 @@ import { ADMIN_GUARD_LOCK, assertAnotherAdminRemains, requireAdmin } from "@/lib
 import { ok, fail, enforceUserRateLimit, refuseNul } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { GRANT_LOCK_ORDER } from "@/lib/ledger";
-import { eraseUserArtifacts } from "@/lib/erasure";
+import { eraseUserArtifacts, scrubOperatorReferencesTx } from "@/lib/erasure";
 import { captureError } from "@/lib/observability";
 
 // Full account removal (GDPR-style) including stored images + orphan rows.
@@ -73,6 +73,10 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
           await tx.$executeRaw(
             Prisma.sql`DELETE FROM "PaymentEvent" WHERE "orderId" IN (SELECT id FROM "Order" WHERE "userId" = ${id})`,
           );
+          // Same no-FK operator references as the self-service route (pass 61):
+          // an erased admin must not remain named on other accounts' ledger,
+          // grant and feedback rows.
+          await scrubOperatorReferencesTx(tx, id);
           await tx.user.delete({ where: { id: id } });
         },
       },

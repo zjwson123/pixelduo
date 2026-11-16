@@ -220,6 +220,10 @@ const PG_DUMP_SHIM = [
   "exit 0",
 ].join("\n");
 
+// The dump loop proves the archive contains table data before renaming it
+// (pass 61); this shim is the "a real dump" answer.
+const PG_RESTORE_SHIM = ["#!/bin/sh", 'echo "TABLE DATA public User postgres"', "exit 0"].join("\n");
+
 const MC_SHIM = [
   "#!/bin/sh",
   '[ "$1" = "ls" ] && { echo object.bin; exit 0; }',
@@ -256,6 +260,7 @@ function runBackupLoop(
     .replace("sleep 86400;", "exit 0;");
   // The object loop writes into <dir>/objects; the dump loop into <dir>.
   const bin = shimDir(service === "backup" ? "pg_dump" : "mc", service === "backup" ? PG_DUMP_SHIM : MC_SHIM);
+  if (service === "backup") fs.writeFileSync(path.join(bin, "pg_restore"), PG_RESTORE_SHIM, { mode: 0o755 });
   const res = spawnSync("sh", ["-c", script], {
     encoding: "utf8",
     env: {

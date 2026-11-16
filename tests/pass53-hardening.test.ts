@@ -157,6 +157,10 @@ describe("the moderation budget uses the database clock", () => {
         images: "[]",
         error: MODERATION_REFUSAL_MESSAGE,
         createdAt: new Date(),
+        // The budget measures the refusal instant (finishedAt), stamped by the
+        // database in production; a real stamp here is "recent" to dbNow even
+        // when the faked app clock jumps forward (pass 61).
+        finishedAt: new Date(),
       },
     });
 

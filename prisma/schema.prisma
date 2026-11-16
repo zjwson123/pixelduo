@@ -133,6 +133,11 @@ model LedgerEntry {
   // "paid renewal 500s and the retry stream re-runs it" outcome pass 18 fixed
   // the bind-variable ceiling for.
   @@index([userId, refId])
+  // The erasure scrub (pass 61) nulls this operator id on OTHER accounts' rows;
+  // without the index that is a full-table scan inside the 60s erasure
+  // transaction. Same for the admin grant refId pair below.
+  @@index([actorId])
+  @@index([refType, refId])
 }
 
 // Credit grants with expiry (commercial policy):
@@ -170,6 +175,8 @@ model CreditGrant {
   @@index([expiresAt])
   @@index([refId])
   @@index([cycleOrderId])
+  // Erasure scrub: admin grants whose refId is the deleted operator (pass 61).
+  @@index([refType, refId])
 }
 
 model Job {
@@ -396,4 +403,8 @@ model Feedback {
 
   @@index([status, createdAt])
   @@index([userId])
+  // Erasure scrub (pass 61): the closing operator's id is nulled on other
+  // accounts' feedback rows; an unindexed scan here runs inside the erasure
+  // transaction.
+  @@index([handledBy])
 }

@@ -278,7 +278,13 @@ function ipv6Private(host: string): boolean {
   if (a === 0x2001 && b === 0x0db8) return true; // 2001:db8::/32 documentation
   if (a === 0x2001 && b === 0x0000) return true; // 2001::/32 Teredo
   if (a === 0x0100 && b === 0 && c === 0 && d === 0) return true; // 100::/64 discard-only
-  if (a === 0x0064 && b === 0xff9b && c === 0 && d === 0 && e === 0 && f === 0) return true; // NAT64
+  // The whole 64:ff9b::/32 translation space, not just the well-known
+  // 64:ff9b::/96 (pass 61). RFC 8215's LOCAL-USE prefix is 64:ff9b:1::/48 —
+  // its third hextet is 1, so the old exact /96 test answered PUBLIC and let a
+  // compromised provider point the worker at an internal IPv4 through the
+  // host's NAT64 translator (`64:ff9b:1::a9fe:a9fe` = 169.254.169.254). Nothing
+  // legitimate reaches a provider over a translation prefix; refuse the space.
+  if (a === 0x0064 && b === 0xff9b) return true; // NAT64 (64:ff9b::/32, incl. 64:ff9b:1::/48)
   if (a === 0x2002) return true; // 6to4 (embeds an IPv4)
   return false;
 }

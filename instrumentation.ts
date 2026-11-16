@@ -123,8 +123,21 @@ export function assertProductionConfig(env: NodeJS.ProcessEnv = process.env): vo
   const PUBLISHED_WEBHOOK_SECRETS = ["whsec_test", "whsec_ci", "pdl_ntfset_test", "pdl_whsec_test", "pdl_whsec_ci"];
   if (!testDeployment) {
     for (const varName of ["STRIPE_WEBHOOK_SECRET", "PADDLE_WEBHOOK_SECRET"]) {
-      const value = (env[varName] ?? "").trim().toLowerCase();
-      if (!value) continue;
+      const raw = env[varName] ?? "";
+      // Unset (or explicitly empty) is "not configured" — a deployment using
+      // the other provider legitimately leaves this alone, and a selected
+      // provider with no secret is refused by its constructor. Set-but-BLANK is
+      // not "not configured": it is a placeholder that used to pass this gate
+      // while the provider constructor accepted the raw whitespace as the HMAC
+      // key (pass 61). Refuse it here, where the operator sees the variable's
+      // name at boot.
+      if (!raw) continue;
+      const value = raw.trim().toLowerCase();
+      if (!value) {
+        throw new Error(
+          `${varName} is set but blank (whitespace only) — a whitespace signing key is a published key. Set the secret from the provider dashboard, or unset the variable if this provider is not in use`,
+        );
+      }
       if (
         value.length < 16 ||
         PUBLISHED_WEBHOOK_SECRETS.includes(value) ||

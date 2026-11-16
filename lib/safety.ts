@@ -25,7 +25,10 @@ const BLOCKED: Array<{ re: RegExp; reason: string }> = [
   { re: /(血腥|暴力|折磨|肢解)/, reason: "violence" },
   // `childporn` (one word) and the plural/traditional forms were the other
   // trivial evasions: the old rule required a space after child/children.
-  { re: /\b(child(?:ren)?\s*(?:abuse|porn(?:ography)?|sexual)|minor.*sexual|underage)\b/i, reason: "child-safety" },
+  // `underage(?:d)?` covers the inflected spelling; `\b` alone stopped before
+  // the `d` in "underaged" (and at `_` in "underage_girl", which the separated
+  // form below normalises to a space).
+  { re: /\b(child(?:ren)?\s*(?:abuse|porn(?:ography)?|sexual)|minor.*sexual|underage(?:d)?)\b/i, reason: "child-safety" },
   { re: /((儿童|兒童).*(色情|性)|未成年.*色情)/, reason: "child-safety" },
   { re: /\b(weapons?|bombs?|explosives?|assassinations?)\b/i, reason: "weapons" },
   { re: /(武器|炸弹|炸彈|爆炸物|刺杀|刺殺)/, reason: "weapons" },
@@ -108,8 +111,49 @@ export interface SafetyResult {
   reason?: string;
 }
 
+// ASCII separators and lookalike scripts (pass 61). The rules above are written
+// with `\b`, and JS's `\w` includes `_` and digits: `child_porn`, `bomb_making`,
+// `naked_woman`, `sex_video`, `underage_girl` and `nsfw_art` all returned ok
+// because no word boundary exists between a letter and `_`. The rule set also
+// only folded NFKC, so a lookalike letter from another script (`nаked` with
+// Cyrillic а, `bоmb` with Cyrillic о) never reached the English word.
+//
+// Two extra views of the prompt close those spellings without loosening the
+// rules for ordinary prose:
+//
+//  - `separated` turns every non-letter into a space. `child_porn` becomes
+//    "child porn", so the existing `child\s*porn` rule matches; `bomb_making`
+//    becomes "bomb making", so `\bbombs?\b` matches; a newline in a Chinese
+//    evasion becomes a space, so `儿童.*性` no longer needs the `s` flag.
+//  - `foldHomoglyphs` maps the common Cyrillic/Greek letters that render as a
+//    Latin letter, plus the leetspeak digits used in these spellings, before
+//    the rules run. This is deliberately a small table, not a complete Unicode
+//    confusables list: it covers the letters that make a blocked English word
+//    legible again, and nothing legitimate in the product's two UI languages
+//    depends on the distinction (Chinese is unaffected; Cyrillic/Greek prose is
+//    only used for matching, never rewritten in the prompt).
+//
+// The word list remains a speed bump, not the control: the output audit is the
+// control. But a speed bump that `_` defeats is not a speed bump.
+const CONFUSABLES: Record<string, string> = {
+  // Cyrillic letters visually identical to Latin ones.
+  а: "a", в: "b", е: "e", ё: "e", і: "i", ї: "i", ј: "j", к: "k", м: "m",
+  н: "h", о: "o", п: "n", р: "p", с: "c", т: "t", у: "y", х: "x", ѕ: "s",
+  һ: "h", ԁ: "d", ԛ: "q", ԝ: "w", ӏ: "l", ɡ: "g", ѵ: "v", ѡ: "w", г: "r",
+  д: "d", ь: "b",
+  // Greek letters with the same shape.
+  α: "a", β: "b", ε: "e", ι: "i", κ: "k", ν: "v", ο: "o", ρ: "p", τ: "t",
+  υ: "u", χ: "x", ω: "w", ϲ: "c", ϳ: "j", η: "n", μ: "u",
+  // Leetspeak spellings of the same words.
+  "0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t",
+};
+
+function foldHomoglyphs(text: string): string {
+  return text.replace(/[\u0370-\u03FF\u0400-\u04FF0-9]/g, (c) => CONFUSABLES[c] ?? c);
+}
+
 export function checkPrompt(prompt: string): SafetyResult {
-  // Both forms are tested: a rule may match either (the collapse can join words
+  // Several forms are tested: a rule may match any (the collapse can join words
   // a Chinese-language rule expects apart, and the raw form is what a future
   // rule with its own punctuation handling will want). The RAW form is the
   // format-control-stripped one — `nudi\u200bty` only matches `\bnudity\b`
@@ -118,11 +162,21 @@ export function checkPrompt(prompt: string): SafetyResult {
   // blocked word into the word, and running the strip AFTER it also removes the
   // default-ignorable characters the fold can emit (U+FFA0 HALFWIDTH HANGUL
   // FILLER folds to U+1160 HANGUL CHOSEONG FILLER). The prompt itself is not
-  // rewritten — only this copy.
-  const stripped = stripFormatControls(prompt.normalize("NFKC"));
+  // rewritten — only these copies. Lowercasing is for the confusable table,
+  // whose keys are lowercase; every rule is case-insensitive anyway.
+  const lower = prompt.normalize("NFKC").toLowerCase();
+  const folded = foldHomoglyphs(lower);
+  const stripped = stripFormatControls(folded);
   const collapsed = collapseLetterSpacing(stripped);
+  // The separated form comes from the UNFOLDED text: the confusable table maps
+  // digits to letters for leetspeak, which would turn `weapon1` into `weaponi`
+  // before the separator pass could see the digit boundary. `[^\p{L}]+` treats
+  // every digit and punctuation mark as a separator, so `weapon1` becomes
+  // "weapon" while `p0rn` is still caught by the folded form.
+  const plain = stripFormatControls(lower);
+  const separated = plain.replace(/[^\p{L}]+/gu, " ").replace(/\s+/g, " ").trim();
   for (const rule of BLOCKED) {
-    if (rule.re.test(stripped) || rule.re.test(collapsed)) {
+    if (rule.re.test(stripped) || rule.re.test(collapsed) || rule.re.test(separated)) {
       return { ok: false, reason: rule.reason };
     }
   }
@@ -172,36 +226,46 @@ export interface ModerationRefusalBudget {
 
 /** Whether the account may still submit a generation, and for how long not. */
 export async function moderationRefusalBudget(userId: string): Promise<ModerationRefusalBudget> {
-  // The window is measured on the DATABASE's clock (pass 53), like every other
-  // deadline that compares against a DB-stamped column: Job.createdAt is
-  // `now()` from Postgres, and judging it with Date.now() meant a web process
-  // whose clock ran ahead by a day saw a cutoff in the future and counted ZERO
-  // refusals — reopening the provider-spend loop this budget closes — while a
-  // clock behind over-refused. A skew of minutes only shifted the window.
+  // The window is measured on the DATABASE's clock, against a column the
+  // database stamps — not against Job.createdAt (pass 61). createdAt is filled
+  // by Prisma from the WRITING process's clock, so comparing it with dbNow()
+  // mixed two clocks: a worker 24h behind the database had every refusal
+  // filtered out (rows.length stayed 0, the budget never fired and the
+  // provider-spend loop this function closes reopened), and even with aligned
+  // clocks createdAt is the SUBMISSION time, so a job that waited a day in the
+  // queue and was refused now was already outside the window.
+  //
+  // failJob's terminal branch now stamps finishedAt with dbNow(), in the same
+  // transaction that writes the refusal marker and the refund. That is the
+  // refusal instant on the database's clock, which is the fact this window is
+  // made of. Legacy rows written before that change carry an app-clock
+  // finishedAt; the clamp below still caps the wait it implies, and a past-dated
+  // legacy row can only shorten a window it is leaving anyway.
   const now = await dbNow(prisma);
   const cutoff = new Date(now.getTime() - MODERATION_REFUSAL_WINDOW_MS);
-  // At most LIMIT rows, oldest first: the index is (userId, createdAt), so the
-  // scan stops as soon as the budget is known to be spent.
+  // At most LIMIT rows, oldest first: the scan can stop as soon as the budget
+  // is known to be spent.
   const rows = await prisma.job.findMany({
     where: {
       userId,
       status: "failed",
       error: { startsWith: MODERATION_REFUSAL_ERROR_PREFIX },
-      createdAt: { gte: cutoff },
+      finishedAt: { gte: cutoff },
     },
-    orderBy: { createdAt: "asc" },
+    orderBy: { finishedAt: "asc" },
     take: MODERATION_REFUSAL_LIMIT,
-    select: { createdAt: true },
+    select: { finishedAt: true },
   });
   if (rows.length < MODERATION_REFUSAL_LIMIT) return { ok: true, refused: rows.length };
-  const oldest = rows[0].createdAt.getTime();
-  // Job.createdAt is stamped by the WRITING process (Prisma fills @default(now()) client-side; failJob
-  // also writes new Date()), while `now` above is the database's clock. When those clocks disagree — a
-  // suspended VM, an NTP step, a worker on another host — the oldest row can sit slightly in the future
-  // and the derived wait rounds UP past the window itself (observed 86401/86406s, i.e. a Retry-After
-  // beyond the 24h policy). The window is the contract: clamp the reported wait to it. The budget still
-  // counts the row (excluding future rows would reopen the provider-spend loop under a lagging clock),
-  // and rows written by the same compose host share its clock, so the shift is normally sub-second.
+  // The filter above guarantees a non-null finishedAt; the fallback only keeps
+  // the arithmetic total for the type checker.
+  const oldest = rows[0].finishedAt?.getTime() ?? now.getTime();
+  // Both sides are the database's clock now, but a row written by a process
+  // whose clock ran ahead (a legacy app-stamped finishedAt, or a future deploy
+  // regression) can still sit in the future and round the wait past the window
+  // itself (observed 86401/86406s). The window is the contract: clamp the
+  // reported wait to it. The budget still counts the row — excluding future
+  // rows would reopen the provider-spend loop under a lagging clock.
   const retryAfterSec = Math.max(
     1,
     Math.min(

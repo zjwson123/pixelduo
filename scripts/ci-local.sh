@@ -8,6 +8,29 @@ set -euo pipefail
 # shared host or self-hosted runner (pass 39).
 umask 077
 
+# A fixed /tmp path is a symlink target for a co-tenant or another job on a
+# self-hosted runner: every redirect below opens it with O_TRUNC and would
+# follow the link, writing live reset/verification links where the attacker
+# chose. umask 077 cannot repair a path that already exists. Create each log
+# exclusively and refuse a planted path; the redirects keep their literal names
+# (pass 61).
+secure_log() {
+  local f="$1"
+  if [ -L "$f" ] || { [ -e "$f" ] && [ ! -O "$f" ]; }; then
+    echo "refusing to log through '$f': it is a symlink or not owned by this user (a planted /tmp path would publish live tokens)" >&2
+    exit 1
+  fi
+  rm -f "$f"
+  if ! ( set -C; : > "$f" ) 2>/dev/null; then
+    echo "refusing to log through '$f': it could not be created exclusively (another process re-created it)" >&2
+    exit 1
+  fi
+  chmod 600 "$f"
+}
+for log in /tmp/pd-ci-docker.log /tmp/pd-ci-build.log /tmp/pd-ci-app.log /tmp/pd-ci-worker.log /tmp/pd-ci-app-verify.log; do
+  secure_log "$log"
+done
+
 export DATABASE_URL="postgresql://pixelduo:pixelduo@localhost:5432/pixelduo_test"
 export TEST_DATABASE_URL="$DATABASE_URL"
 export NEXTAUTH_SECRET="5c1f8e2a94b7d03f6ae4c81d2795bf30e6a1c47d8b92f650"
@@ -35,6 +58,7 @@ cleanup() {
   # (pass 34): CI removes it in a separate step after the assertion, and a
   # failure or Ctrl-C here would otherwise leave a fake .env in the checkout.
   if [ -n "${PLANTED_ENV:-}" ]; then rm -f .env prisma/dev.db; fi
+  if [ -n "${PLANTED_NESTED_DB:-}" ]; then rm -f lib/ci-planted.db; fi
   kill ${APP_PID:-} ${APP2_PID:-} ${WORKER_PID:-} 2>/dev/null || true
   for p in ${STARTED_PORTS[@]+"${STARTED_PORTS[@]}"}; do
     pids="$(lsof -ti "tcp:$p" 2>/dev/null || true)"
@@ -78,6 +102,14 @@ done
 [ "$audited" = 1 ] || { echo "[audit] the registry audit endpoint stayed unavailable — refusing to report a runtime tree it never checked"; exit 1; }
 
 echo "[2/9] container images (deps + web + worker, artifact asserted)"
+# A nested SQLite file no .dockerignore pattern reached (they were all anchored
+# to the context root) is what the worker image's recursive prune must remove
+# (pass 61). Plant one before the build so the artifact assertion below has
+# material to look at on a fresh clone; the trap removes it on every exit path.
+if [ ! -e lib/ci-planted.db ]; then
+  printf 'SQLite format 3\000ci-planted' > lib/ci-planted.db
+  PLANTED_NESTED_DB=1
+fi
 # Mirrors CI's `docker` job. The build is the deploy artifact and it had been
 # broken for three weeks with nothing in this script able to see it: `npm ci`
 # cannot install this lockfile without .npmrc, and no Dockerfile stage copied it,
@@ -297,6 +329,14 @@ docker run --rm --entrypoint sh pd-ci-worker -c '
   for f in /app/.env /app/.env.local /app/.env.production; do
     if [ -e "$f" ]; then echo "dotenv in image: $f"; exit 1; fi
   done
+  # Pass 61: the plant at the top of this script is what gives the recursive
+  # prune something to remove. A slashless *.db pattern only reaches the
+  # context root, so a database under lib/ used to ship with this gate green.
+  test ! -e /app/lib/ci-planted.db
+  if find /app -path /app/node_modules -prune -o -type f \( -name "*.db" -o -name "*.db-journal" -o -name "*.sqlite" -o -name "*.sqlite3" \) -print | grep -q .; then
+    find /app -path /app/node_modules -prune -o -type f \( -name "*.db" -o -name "*.db-journal" -o -name "*.sqlite" -o -name "*.sqlite3" \) -print
+    echo "SQLite database in image"; exit 1
+  fi
   # Pass 39: the worker regenerates its Prisma client AFTER the .env prune, so
   # it needs the pass-38 rewrite too; and the source/config names the web stage
   # refuses must not ride along in the registry-pushed image.

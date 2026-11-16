@@ -30,7 +30,7 @@
 // config as well as deleting the files. Every deployed configuration passes its
 // environment explicitly — docker compose, or the host's own process
 // environment.
-import { readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import os from "node:os";
 import { neuterPrismaDotenv } from "./prisma-dotenv.mjs";
@@ -39,10 +39,35 @@ import { neuterPrismaDotenv } from "./prisma-dotenv.mjs";
 // the real artifact or a scratch directory under the OS temp dir (pass 39). The
 // script deletes recursively; an invocation with $HOME or / would remove
 // credentials and databases outside any build tree.
-const root = resolve(process.argv[2] ?? ".next/standalone");
+//
+// The containment test is on the REAL path (pass 61). `resolve()` only
+// normalises `..`; it follows neither symlinks nor an intermediate link. A
+// scratch argument such as /tmp/scratch that is itself a symlink to / passed
+// `startsWith(tempRoot)` and the walk then deleted `.env`/`*.db` through it and
+// `rmSync(root/app)` removed /app — the exact destructive shape the guard was
+// added for. The lexical path may not be a symlink, and the resolved root must
+// still be the artifact or under the resolved temp root.
+const lexical = resolve(process.argv[2] ?? ".next/standalone");
 const allowedStandalone = resolve(".next/standalone");
-const tempRoot = resolve(os.tmpdir());
-if (root !== allowedStandalone && !root.startsWith(tempRoot + sep)) {
+const tempRoot = realpathSync(os.tmpdir());
+let root = lexical;
+try {
+  if (lstatSync(lexical).isSymbolicLink()) {
+    console.error(`[prune-standalone] refusing to prune ${lexical} — the root itself is a symlink`);
+    process.exit(1);
+  }
+  root = realpathSync(lexical);
+} catch {
+  // A missing artifact (an interrupted build) is not a reason to fail; walk()
+  // is a no-op and the build-host leak gates are the authority on the result.
+}
+let allowedReal = allowedStandalone;
+try {
+  allowedReal = realpathSync(allowedStandalone);
+} catch {
+  // Not built yet.
+}
+if (root !== allowedReal && !root.startsWith(tempRoot + sep)) {
   console.error(
     `[prune-standalone] refusing to prune ${root} — the root must be .next/standalone or a directory under ${tempRoot}`,
   );

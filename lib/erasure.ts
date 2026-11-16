@@ -68,6 +68,31 @@ export interface ErasureSteps {
   deleteRows: (tx: Prisma.TransactionClient) => Promise<void>;
 }
 
+// Remove this account's User.id from rows OTHER accounts own (pass 61).
+//
+// LedgerEntry.actorId, an admin grant's refId and Feedback.handledBy are plain
+// strings with no foreign key — deliberately, so the audit trail survives an
+// operator's own row changes — which also means the User cascade cannot reach
+// them. Erasing an admin therefore left their primary key on every account they
+// had granted credits to or closed feedback for, after the erasure promised the
+// account was gone. The application never returns those columns to the affected
+// users today (the export nulls admin refIds, /api/ledger omits actorId), so
+// this is erasure completeness rather than a live disclosure — but the residue
+// is exactly what an erasure request is about.
+export async function scrubOperatorReferencesTx(
+  tx: Prisma.TransactionClient,
+  userId: string,
+): Promise<void> {
+  await tx.ledgerEntry.updateMany({ where: { actorId: userId }, data: { actorId: null } });
+  await tx.ledgerEntry.updateMany(
+    { where: { refType: "admin", refId: userId }, data: { refId: null } },
+  );
+  await tx.creditGrant.updateMany(
+    { where: { refType: "admin", refId: userId }, data: { refId: null } },
+  );
+  await tx.feedback.updateMany({ where: { handledBy: userId }, data: { handledBy: null } });
+}
+
 export async function eraseUserArtifacts(
   userId: string,
   steps: ErasureSteps,

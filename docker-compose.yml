@@ -387,6 +387,11 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      # A dump of the pre-migration database is schema-less but exits 0 and
+      # would be renamed as the newest backup, rotating a real one out (pass
+      # 61). The migrate one-shot must have finished before the first dump.
+      migrate:
+        condition: service_completed_successfully
     environment:
       PGHOST: db
       PGUSER: ${POSTGRES_USER:-pixelduo}
@@ -417,8 +422,12 @@ services:
         case "$$BACKUP_KEEP" in ""|*[!0-9]*) ROTATE=0; echo "[backup] FAILED: BACKUP_KEEP must be a non-negative integer (got $$BACKUP_KEEP) — rotation is SKIPPED and every previous dump is kept" >&2;; esac;
         STAMP=$$(date +%Y%m%d-%H%M%S);
         TMP=/backups/.pixelduo-$${STAMP}.partial;
-        if pg_dump -Fc -d "$$PGDATABASE" -f $$TMP; then
-          mv $$TMP /backups/pixelduo-$${STAMP}.dump.gz;
+        # pg_restore -l proves the archive contains table data before it is
+        # renamed (pass 61): an empty or schema-less database (a fresh volume
+        # racing migrate, or a renamed POSTGRES_DB) dumps cleanly, exits 0 and
+        # would rotate a real backup out. The mv is part of the same chain, so
+        # a failed rename cannot reach rotation and still report success.
+        if pg_dump -Fc -d "$$PGDATABASE" -f $$TMP && pg_restore -l $$TMP | grep -q "TABLE DATA" && mv $$TMP /backups/pixelduo-$${STAMP}.dump.gz; then
           # `BACKUP_KEEP > 0 ? … + 1 : 2` rather than the bare `+ 1` (pass 37):
           # tail -n +1 prints EVERY line, so BACKUP_KEEP=0 — the natural spelling
           # of "no retention", and what a whitespace-only value collapses to —
@@ -454,6 +463,12 @@ services:
     depends_on:
       storage:
         condition: service_healthy
+      # The bucket is created by init-storage, which waits only on storage
+      # health (pass 61). Without this ordering a fresh deployment mirrored a
+      # bucket that did not exist yet, logged FAILED, and slept a day — so the
+      # first object snapshot was absent for 24h.
+      init-storage:
+        condition: service_completed_successfully
     environment:
       BACKUP_S3_ENDPOINT: http://storage:9000
       BACKUP_S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-pixelduo}
@@ -496,6 +511,11 @@ services:
         enc() { _s="$$1"; _o=""; while [ -n "$$_s" ]; do _c="$${_s%"$${_s#?}"}"; _s="$${_s#?}"; case "$$_c" in [a-zA-Z0-9._~-]) _o="$$_o$$_c";; %) _o="$${_o}%25";; @) _o="$${_o}%40";; :) _o="$${_o}%3A";; /) _o="$${_o}%2F";; [?]) _o="$${_o}%3F";; [#]) _o="$${_o}%23";; " ") _o="$${_o}%20";; *) _o="$$_o$$_c";; esac; done; printf "%s" "$$_o"; };
         setup_src() { case "$$BACKUP_S3_ENDPOINT" in *://*) ;; *) return 1;; esac; _scheme="$${BACKUP_S3_ENDPOINT%%://*}"; _rest="$${BACKUP_S3_ENDPOINT#*://}"; MC_HOST_src="$${_scheme}://$$(enc "$$BACKUP_S3_ACCESS_KEY_ID"):$$(enc "$$BACKUP_S3_SECRET_ACCESS_KEY")@$${_rest}"; export MC_HOST_src; };
         setup_tgt() { case "$$BACKUP_TARGET_ENDPOINT" in *://*) ;; *) return 1;; esac; _scheme="$${BACKUP_TARGET_ENDPOINT%%://*}"; _rest="$${BACKUP_TARGET_ENDPOINT#*://}"; MC_HOST_tgt="$${_scheme}://$$(enc "$$BACKUP_TARGET_ACCESS_KEY_ID"):$$(enc "$$BACKUP_TARGET_SECRET_ACCESS_KEY")@$${_rest}"; export MC_HOST_tgt; };
+        # A bare bucket name, exactly what scripts/backup-objects.sh requires
+        # (pass 61). mc reads alias/bucket/prefix, so a value with a slash is
+        # not "empty" but addresses a different bucket or prefix; the old check
+        # here only rejected the empty string.
+        valid_bucket() { case "$$1" in ""|[!a-z0-9]*|*[!a-z0-9.-]*) return 1;; *) return 0;; esac; };
         umask 077;
         HOME=/tmp;
         export HOME;
@@ -515,15 +535,22 @@ services:
         if ! setup_src; then
           echo "[backup-objects] FAILED at $${STAMP} — cannot configure the source alias (BACKUP_S3_ENDPOINT needs a scheme, e.g. http://storage:9000)" >&2;
         elif mc mirror --overwrite --remove src/$${BACKUP_S3_BUCKET} /backups/objects/.$${STAMP}.partial && [ "$$(mc ls --recursive --quiet /backups/objects/.$${STAMP}.partial 2>/dev/null | wc -l | tr -d " ")" -gt 0 ]; then
-          mv /backups/objects/.$${STAMP}.partial /backups/objects/$${STAMP};
-          # Same clamp as the dump rotation above (pass 37): KEEP=0 must not
-          # delete the snapshot this run just renamed into place. Only our
-          # YYYYMMDD-HHMMSS snapshots are candidates; anything else in this
-          # directory belongs to the operator (pass 55). An invalid KEEP skips
-          # the rotation entirely (pass 58).
-          if [ "$$ROTATE" = 1 ]; then ls -1t /backups/objects/ | while read -r f; do case "$$f" in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]) echo "$$f";; esac; done | tail -n +$$((BACKUP_KEEP > 0 ? BACKUP_KEEP + 1 : 2)) | while read -r f; do rm -rf /backups/objects/$$f; done; fi;
-          OK=1;
-          if [ "$$ROTATE" = 1 ]; then echo "[backup-objects] $${STAMP} mirrored (keep $$((BACKUP_KEEP > 0 ? BACKUP_KEEP : 1)))"; else echo "[backup-objects] $${STAMP} mirrored; rotation skipped because BACKUP_KEEP is invalid (every previous snapshot is kept)"; fi;
+          # The rename is gated (pass 61): a failed mv used to fall through to
+          # the rotation and the "mirrored" line anyway, deleting an older real
+          # snapshot while the new one stayed a hidden .partial.
+          if mv /backups/objects/.$${STAMP}.partial /backups/objects/$${STAMP}; then
+            # Same clamp as the dump rotation above (pass 37): KEEP=0 must not
+            # delete the snapshot this run just renamed into place. Only our
+            # YYYYMMDD-HHMMSS snapshots are candidates; anything else in this
+            # directory belongs to the operator (pass 55). An invalid KEEP skips
+            # the rotation entirely (pass 58).
+            if [ "$$ROTATE" = 1 ]; then ls -1t /backups/objects/ | while read -r f; do case "$$f" in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]) echo "$$f";; esac; done | tail -n +$$((BACKUP_KEEP > 0 ? BACKUP_KEEP + 1 : 2)) | while read -r f; do rm -rf /backups/objects/$$f; done; fi;
+            OK=1;
+            if [ "$$ROTATE" = 1 ]; then echo "[backup-objects] $${STAMP} mirrored (keep $$((BACKUP_KEEP > 0 ? BACKUP_KEEP : 1)))"; else echo "[backup-objects] $${STAMP} mirrored; rotation skipped because BACKUP_KEEP is invalid (every previous snapshot is kept)"; fi;
+          else
+            rm -rf /backups/objects/.$${STAMP}.partial;
+            echo "[backup-objects] FAILED at $${STAMP} — the snapshot could not be renamed into place, rotation skipped (the previous snapshots are untouched)" >&2;
+          fi;
         else
           rm -rf /backups/objects/.$${STAMP}.partial;
           # The count arm is what catches `mc mirror` exiting 0 on an EMPTY
@@ -535,12 +562,14 @@ services:
         if [ -n "$${BACKUP_TARGET_ENDPOINT}" ]; then
           if [ "$$OK" != 1 ]; then
             echo "[backup-objects] off-site mirror SKIPPED at $${STAMP}: no local snapshot was written this run (see the FAILED line above)" >&2;
-          elif [ -z "$${BACKUP_TARGET_BUCKET}" ]; then
-            # Without a bucket name `tgt//$STAMP` makes mc CREATE a bucket named
-            # after the timestamp, and the rotation below then deletes
-            # timestamp-named buckets on the remote store. The restore script
-            # already refuses a bare/empty target; the backup side must too.
-            echo "[backup-objects] off-site mirror FAILED at $${STAMP} (BACKUP_TARGET_BUCKET is empty; the local snapshot is complete)" >&2;
+          elif ! valid_bucket "$${BACKUP_TARGET_BUCKET}"; then
+            # Without a bare bucket name `tgt//$STAMP` makes mc CREATE a bucket
+            # named after the timestamp, and the rotation below then deletes
+            # timestamp-named buckets on the remote store. A slash-bearing value
+            # is not empty but addresses a different bucket/prefix. The manual
+            # script and the restore script already refuse both; the compose
+            # loop is the adjacent copy that did not (pass 61).
+            echo "[backup-objects] off-site mirror FAILED at $${STAMP} (BACKUP_TARGET_BUCKET is empty or not a bare lowercase bucket name; the local snapshot is complete)" >&2;
           elif ! setup_tgt; then
             echo "[backup-objects] off-site mirror FAILED at $${STAMP} (cannot configure the target alias; the local snapshot is complete)" >&2;
           else

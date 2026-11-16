@@ -18,6 +18,7 @@ import { PrismaClient } from "@prisma/client";
 import { getStorage, newStorageKey } from "../lib/storage";
 import { storeContentType, extensionForContentType } from "../lib/media-type";
 import { fetchPublicBuffer } from "../lib/store";
+import { resolveLocalImagesDir, safeCaseFilename } from "./import-case-local";
 
 // Largest case image worth storing; also the streaming read cap below.
 const MAX_CASE_BYTES = 25 * 1024 * 1024;
@@ -39,8 +40,10 @@ function safeSourceUrl(u: unknown): string | null {
 const prisma = new PrismaClient();
 const RAW_BASE = "https://raw.githubusercontent.com/freestylefly/awesome-gpt-image-2/main/data/images";
 // Local clone path — if the repo is cloned nearby, read images from disk
-// instead of GitHub raw (avoids CDN rate-limiting on bulk import).
-const LOCAL_IMAGES = "/tmp/awesome-gpt-image-2/data/images";
+// instead of GitHub raw (avoids CDN rate-limiting on bulk import). The images
+// directory is validated as a real subdirectory of this root before any file is
+// opened; see scripts/import-case-local.ts.
+const LOCAL_CLONE = "/tmp/awesome-gpt-image-2";
 
 interface CaseEntry {
   id: number;
@@ -97,11 +100,20 @@ function costFor(model: "gpt" | "seedream"): { credits: number; quality: string 
 
 async function downloadImage(caseId: number, srcPath: string): Promise<string | null> {
   // srcPath is "/images/caseN.jpg"
-  const filename = path.basename(srcPath);
+  const filename = safeCaseFilename(srcPath);
+  if (!filename) {
+    console.warn(`[import] skipping case ${caseId}: unusable image path`);
+    return null;
+  }
   let buf: Buffer | null = null;
 
-  // 1. Local clone — fastest, no rate limits
-  const localPath = path.join(LOCAL_IMAGES, filename);
+  // 1. Local clone — fastest, no rate limits. The DIRECTORY is validated first
+  // (pass 61): O_NOFOLLOW closes a symlinked file, not a symlinked `data/images`.
+  // A third-party clone whose images directory links to the importer's repo
+  // root made `data/images/.env` a regular file below the checked path, and its
+  // bytes became a Template served to every signed-in account.
+  const localDir = resolveLocalImagesDir(LOCAL_CLONE);
+  const localPath = localDir ? path.join(localDir, filename) : null;
   // lstat, not stat: this script's own instructions tell the operator to clone a
   // THIRD-PARTY repository, and git stores and restores symlinks. A
   // `data/images/caseN.jpg` that is a symlink to `/app/.env` was followed by
@@ -118,20 +130,22 @@ async function downloadImage(caseId: number, srcPath: string): Promise<string | 
   // decide from the fd's own fstat; nlink === 1 rejects a hardlink, and
   // O_NONBLOCK keeps a FIFO from hanging the open.
   let localFd: FileHandle | null = null;
-  try {
-    localFd = await fsp.open(
-      localPath,
-      fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0),
-    );
-  } catch (e) {
-    // Missing is the normal "use the GitHub fallback" path. Anything else —
-    // ELOOP from O_NOFOLLOW on a symlink, a device/FIFO refusal — is a
-    // deliberate refusal, not a reason to quietly fetch from the network.
-    if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
-      console.warn(`[import] skipping ${filename}: not a regular file (symlink/device?)`);
-      return null;
+  if (localPath) {
+    try {
+      localFd = await fsp.open(
+        localPath,
+        fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0),
+      );
+    } catch (e) {
+      // Missing is the normal "use the GitHub fallback" path. Anything else —
+      // ELOOP from O_NOFOLLOW on a symlink, a device/FIFO refusal — is a
+      // deliberate refusal, not a reason to quietly fetch from the network.
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+        console.warn(`[import] skipping ${filename}: not a regular file (symlink/device?)`);
+        return null;
+      }
+      localFd = null;
     }
-    localFd = null;
   }
   if (localFd) {
     try {

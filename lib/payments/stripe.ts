@@ -37,11 +37,19 @@ export class StripeProvider implements PaymentProvider {
     // A missing webhook secret makes every verification fail (forgery-safe),
     // but checkout would keep accepting real money whose orders can never
     // fulfill — same fail-at-boot policy as the live-key check above.
-    const secret = opts?.webhookSecret ?? process.env.STRIPE_WEBHOOK_SECRET;
+    //
+    // Trim before the emptiness test (pass 61). `STRIPE_WEBHOOK_SECRET=" "` — a
+    // blank placeholder in a secrets manager or an env file — is truthy, so the
+    // provider accepted it as the HMAC key while the boot gate trimmed it to
+    // empty and skipped every placeholder/length check. Anyone could then sign
+    // a forged `checkout.session.completed` with a single space. A whitespace
+    // value is a missing value here, and the signing key is the trimmed value,
+    // which is what the dashboard's secret actually is.
+    const secret = (opts?.webhookSecret ?? process.env.STRIPE_WEBHOOK_SECRET ?? "").trim();
     if (isProductionRuntime() && !opts?.stripe && !webhookOnly && !secret) {
       throw new Error("STRIPE_WEBHOOK_SECRET is required when PAYMENT_PROVIDER=stripe in production");
     }
-    this.webhookSecret = secret ?? "";
+    this.webhookSecret = secret;
     this.webhookOnly = webhookOnly && !opts?.stripe;
     // A verifier-only instance exists for a provider SWITCH: refunds on orders
     // created under Stripe keep arriving after PAYMENT_PROVIDER moved, and

@@ -14,6 +14,14 @@ backups
 *.db-journal
 prisma/*.db
 prisma/*.db-journal
+# The same names at ANY depth (pass 61). A pattern without `/` is anchored to
+# the context root, so a SQLite file the tracer or a developer put under lib/ or
+# scripts/ stayed in the context and shipped in the worker image. The Dockerfile
+# prunes recursively too; this keeps the bytes out of the context entirely.
+**/*.db
+**/*.db-journal
+**/*.sqlite
+**/*.sqlite3
 # Every dotenv flavour, at ANY DEPTH. A pattern without `/` is anchored to the
 # context root and `*` does not cross directories, so `.env*` alone left
 # `prisma/.env` (a supported Prisma convention, and the place an operator may

@@ -12,6 +12,31 @@ set -euo pipefail
 umask 077
 cd "$(dirname "$0")/.."
 
+# A fixed path in /tmp is a symlink target for any co-tenant on the host: the
+# shell opens it with O_TRUNC, follows the link, and writes the app log — which
+# contains every verification/reset link the DevMailer prints — into a file the
+# attacker chose and can read. `umask 077` only affects files this script
+# CREATES; it cannot repair a pre-created path. Create each log exclusively
+# (noclobber) after proving the path is not a symlink and is ours; a planted
+# path is a refusal, not a silent write. (pass 61)
+LOG_APP=/tmp/pd-dev-app.log
+LOG_WORKER=/tmp/pd-dev-worker.log
+secure_log() {
+  local f="$1"
+  if [ -L "$f" ] || { [ -e "$f" ] && [ ! -O "$f" ]; }; then
+    echo "refusing to log through '$f': it is a symlink or not owned by this user (a planted /tmp path would publish live reset/verification links)" >&2
+    exit 1
+  fi
+  rm -f "$f"
+  if ! ( set -C; : > "$f" ) 2>/dev/null; then
+    echo "refusing to log through '$f': it could not be created exclusively (another process re-created it)" >&2
+    exit 1
+  fi
+  chmod 600 "$f"
+}
+secure_log "$LOG_APP"
+secure_log "$LOG_WORKER"
+
 # The running process's env is unreadable on macOS; .env supplies only part of
 # what the server needs, so the rest is reconstructed here (values match
 # docker-compose.yml's dev defaults + the MinIO container).
@@ -80,12 +105,12 @@ if [ -n "$(lsof -ti:3000 || true)" ]; then
   exit 1
 fi
 
-echo "[2/3] starting app + worker (logs: /tmp/pd-dev-app.log, /tmp/pd-dev-worker.log)"
+echo "[2/3] starting app + worker (logs: $LOG_APP, $LOG_WORKER)"
 # Loopback only: `next start` without -H binds 0.0.0.0, which on a laptop is a
 # dev server on every interface — no TLS, no edge, and the XFF trust model
 # assumes an edge proxy. Nothing here needs to be reachable from off-host.
-nohup npx next start -p 3000 -H 127.0.0.1 >/tmp/pd-dev-app.log 2>&1 &
-nohup npx tsx scripts/worker.ts >/tmp/pd-dev-worker.log 2>&1 &
+nohup npx next start -p 3000 -H 127.0.0.1 >"$LOG_APP" 2>&1 &
+nohup npx tsx scripts/worker.ts >"$LOG_WORKER" 2>&1 &
 
 echo "[3/3] verifying"
 for _ in $(seq 1 30); do
@@ -95,7 +120,7 @@ done
 health="$(curl -fsS http://localhost:3000/api/health)"
 echo "  health: $health"
 grep -q '"ok":true' <<<"$health" || { echo "ERROR: health not ok" >&2; exit 1; }
-grep -q 'media worker started' /tmp/pd-dev-worker.log || { echo "ERROR: worker did not start" >&2; tail -5 /tmp/pd-dev-worker.log >&2; exit 1; }
+grep -q 'media worker started' "$LOG_WORKER" || { echo "ERROR: worker did not start" >&2; tail -5 "$LOG_WORKER" >&2; exit 1; }
 echo "  pages:"
 for p in / /login /register; do
   printf '    %-10s %s\n' "$p" "$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:3000$p")"

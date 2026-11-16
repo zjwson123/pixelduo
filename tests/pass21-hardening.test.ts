@@ -404,8 +404,11 @@ describe("a failed database dump cannot masquerade as a good backup", () => {
       // is pass 27's in docker-compose.yml only: that file builds DATABASE_URL
       // from ${POSTGRES_DB}, so a literal name here stopped the dumps for any
       // renamed database; single.yml pins the literal name throughout.)
-      expect(loop).toMatch(/if pg_dump -Fc(?: -d "\$\$PGDATABASE")? -f \$\$TMP; then/);
-      expect(loop).toMatch(/mv \$\$TMP \/backups\/pixelduo-\$\$\{STAMP\}\.dump\.gz/);
+      // Pass 61: the dump is accepted only if it contains table data, and the
+      // rename is part of the same chain so a failed mv cannot rotate.
+      expect(loop).toMatch(
+        /if pg_dump -Fc(?: -d "\$\$PGDATABASE")? -f \$\$TMP && pg_restore -l \$\$TMP \| grep -q "TABLE DATA" && mv \$\$TMP \/backups\/pixelduo-\$\$\{STAMP\}\.dump\.gz; then/,
+      );
       expect(loop).toMatch(/FAILED/);
       // The rotation must sit inside the success branch, after the rename.
       const rm = loop.indexOf("tail -n +");

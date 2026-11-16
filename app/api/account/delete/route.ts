@@ -4,7 +4,7 @@ import { ApiError, enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped
 import { prisma } from "@/lib/prisma";
 import { passwordReauthRefusal } from "@/lib/auth";
 import { GRANT_LOCK_ORDER } from "@/lib/ledger";
-import { eraseUserArtifacts } from "@/lib/erasure";
+import { eraseUserArtifacts, scrubOperatorReferencesTx } from "@/lib/erasure";
 import { captureError } from "@/lib/observability";
 import { ADMIN_GUARD_LOCK, assertAnotherAdminRemains } from "@/lib/admin";
 import {
@@ -195,6 +195,11 @@ export async function POST(req: Request) {
           await tx.$executeRaw(
             Prisma.sql`DELETE FROM "PaymentEvent" WHERE "orderId" IN (SELECT id FROM "Order" WHERE "userId" = ${userId})`,
           );
+          // The no-FK operator references this account left on OTHER accounts'
+          // rows — the ledger's actorId, admin grant refIds and feedback's
+          // handledBy (pass 61). Only an admin can have written them, and the
+          // cascade cannot reach them.
+          await scrubOperatorReferencesTx(tx, userId);
           await tx.user.delete({ where: { id: userId } });
         },
       },

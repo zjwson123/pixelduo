@@ -30,10 +30,27 @@ export async function POST(req: Request) {
     // Bounded take so a hoarded account cannot force an unbounded response —
     // one past the cap, so truncation is detectable.
     const take = EXPORT_ROW_LIMIT + 1;
-    const [user, ledgerRows, images, jobs, orders, grantRows, apiKeys, feedback, checkins] = await Promise.all([
+    const [user, ledgerRows, images, jobs, orders, grantRows, apiKeys, feedback, checkins, reminders] =
+      await Promise.all([
       prisma.user.findUnique({
         where: { id: userId },
-        select: { id: true, email: true, name: true, credits: true, plan: true, planRenewsAt: true, createdAt: true },
+        // The account's own security state is part of the subject-access answer
+        // (pass 61): /api/me already returns emailVerified, totpEnabled and
+        // role, so withholding them from an export titled "all your data" told
+        // the user less than the settings page does. `sessionVersion` stays
+        // out — it is the revocation counter, not a fact about the account.
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          credits: true,
+          plan: true,
+          planRenewsAt: true,
+          emailVerified: true,
+          totpEnabled: true,
+          role: true,
+          createdAt: true,
+        },
       }),
       // Explicit select, and the operator columns are dropped for the same
       // reason /api/ledger drops them (pass 43): `actorId` names the admin who
@@ -204,6 +221,17 @@ export async function POST(req: Request) {
         take,
         select: { id: true, date: true, credits: true, createdAt: true },
       }),
+      // Credit-expiry reminder history (pass 61). CreditReminder is
+      // account-linked (both erasure paths delete it explicitly) and records
+      // mail the product sent about the user's own expiring lots; the ledger
+      // cannot reconstruct which reminder went out for which grant. It was the
+      // remaining user-owned table the export omitted.
+      prisma.creditReminder.findMany({
+        where: { userId },
+        orderBy: { sentAt: "asc" },
+        take,
+        select: { id: true, grantId: true, daysBefore: true, sentAt: true },
+      }),
     ]);
     const ledger = ledgerRows.map((e) => (e.refType === "admin" ? { ...e, refId: null } : e));
     // The same operator identifier rides on the grants array: adminGrantTx
@@ -217,7 +245,7 @@ export async function POST(req: Request) {
     // provider-echoed credentials; the export is a read path like the three job
     // views, so it applies the same read-time mask (see redactJobError).
     const safeJobs = jobs.map((j) => ({ ...j, error: redactJobError(j.error) }));
-    const tables = { ledger, images, jobs: safeJobs, orders, grants, apiKeys, feedback, checkins };
+    const tables = { ledger, images, jobs: safeJobs, orders, grants, apiKeys, feedback, checkins, reminders };
     const truncated = Object.values(tables).some((rows) => rows.length > EXPORT_ROW_LIMIT);
     const data = Object.fromEntries(
       Object.entries(tables).map(([name, rows]) => [
