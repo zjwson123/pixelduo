@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ADMIN_GUARD_LOCK, ADMIN_TX_OPTIONS, assertAnotherAdminRemains, requireAdmin } from "@/lib/admin";
+import { ADMIN_GUARD_LOCK, ADMIN_TX_OPTIONS, assertAdminActorTx, assertAnotherAdminRemains, requireAdminSession } from "@/lib/admin";
 import { enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, refuseNul, zodMessage, tooLarge } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 
@@ -11,7 +11,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     // %00 → U+0000 → SQLSTATE 22021 → masked 500 + captured incident; the
     // sibling leg of pass 25's body/query NUL guards.
     refuseNul(id);
-    const adminId = await requireAdmin();
+    const actor = await requireAdminSession();
+    const adminId = actor.id;
     // Privilege changes carry their own ACCOUNT-keyed ceiling (the acting
     // admin); the per-IP leg it also carried let one operator's traffic refuse
     // role changes to their neighbours.
@@ -45,11 +46,16 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       if (target.role === "admin" && body.role !== "admin") {
         await assertAnotherAdminRemains(tx, id);
       }
-      return tx.user.update({
+      const updated = await tx.user.update({
         where: { id: id },
         data: { role: body.role },
         select: { id: true, role: true },
       });
+      // The actor's authority is re-proven against the FINAL state (pass 62):
+      // a demotion/erasure/revocation that committed while this transaction
+      // waited on the guard lock must not let the queued request land.
+      await assertAdminActorTx(tx, actor);
+      return updated;
     }, ADMIN_TX_OPTIONS);
     return ok({ user: updated });
   } catch (e) {

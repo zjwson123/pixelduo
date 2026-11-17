@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ADMIN_TX_OPTIONS, requireAdmin } from "@/lib/admin";
+import { ADMIN_TX_OPTIONS, assertAdminActorTx, requireAdminSession } from "@/lib/admin";
 import { enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, refuseNul, zodMessage, tooLarge } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { adminGrantTx, adminClawbackTx } from "@/lib/ledger";
@@ -23,7 +23,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     // %00 → U+0000 → SQLSTATE 22021 → masked 500 + captured incident; the
     // sibling leg of pass 25's body/query NUL guards.
     refuseNul(id);
-    const adminId = await requireAdmin();
+    const actor = await requireAdminSession();
+    const adminId = actor.id;
     // ACCOUNT-keyed (the acting admin), and the only leg: the per-IP one it
     // carried alongside refused admin work to every operator behind a shared
     // egress, which on a one-operator install is the same person.
@@ -49,6 +50,12 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     await prisma.$transaction(async (tx) => {
       if (body.delta > 0) await adminGrantTx(tx, user.id, body.delta, body.note, adminId);
       else await adminClawbackTx(tx, user.id, -body.delta, body.note, adminId);
+      // Re-prove the operator against the final state (pass 62). This write
+      // records `actorId` on another account's ledger/grant; without the check,
+      // a request that passed the gate before a concurrent demotion, erasure or
+      // revoke-sessions could still commit — leaving that operator id on a row
+      // the erasure's scrub had already run past.
+      await assertAdminActorTx(tx, actor);
     }, ADMIN_TX_OPTIONS);
     const updated = await prisma.user.findUniqueOrThrow({ where: { id: user.id }, select: { credits: true } });
     return ok({ credits: updated.credits });

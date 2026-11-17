@@ -11,6 +11,29 @@ import fs from "node:fs";
 const PORT = Number(process.argv[2] ?? 2525);
 const OUT = process.argv[3] ?? "/tmp/pd-smtp-inbox.log";
 
+// Append without following a symlink. The default path is fixed, so a
+// co-tenant on a shared host can pre-create it as a symlink and capture the
+// live verification/reset links this sink receives — the class pass 61 closed
+// for ci-local.sh/dev-restart.sh and lib/mail.ts's log-only mailer. O_NOFOLLOW
+// makes the open fail with ELOOP instead. mode only applies when O_CREAT
+// actually creates the file, so keep it owner-only; an existing regular file's
+// mode is not changed.
+function appendOwnerOnly(text) {
+  let fd;
+  try {
+    fd = fs.openSync(
+      OUT,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND | fs.constants.O_NOFOLLOW,
+      0o600,
+    );
+    fs.writeFileSync(fd, text);
+  } catch (e) {
+    console.error(`[smtp-sink] refusing to write ${OUT}: ${e.code ?? e.message}`);
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
 net
   .createServer((sock) => {
     let inData = false;
@@ -32,8 +55,7 @@ net
 
         if (inData) {
           if (line === ".") {
-            fs.appendFileSync(
-              OUT,
+            appendOwnerOnly(
               [
                 `--- received ${new Date().toISOString()}`,
                 `envelope-from: ${envelopeFrom}`,
@@ -43,8 +65,6 @@ net
                 "===== END =====",
                 "",
               ].join("\n"),
-              // Live reset/verification links land here; owner-only (pass 39).
-              { mode: 0o600 },
             );
             message = "";
             inData = false;

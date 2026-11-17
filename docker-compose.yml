@@ -131,6 +131,7 @@ services:
       MIDDLEWARE_PAGE_LIMIT: ${MIDDLEWARE_PAGE_LIMIT:-}
       REGISTER_RATE_LIMIT: ${REGISTER_RATE_LIMIT:-}
       OAUTH_CALLBACK_RATE_LIMIT: ${OAUTH_CALLBACK_RATE_LIMIT:-}
+      WEBHOOK_RATE_LIMIT: ${WEBHOOK_RATE_LIMIT:-}
       OUTBOUND_TIMEOUT_MS: ${OUTBOUND_TIMEOUT_MS:-}
       # The endpoint half of the assistant's credential pair: lib/keys.ts
       # resolves key and endpoint together and ignores a half-set pair, so this
@@ -357,7 +358,7 @@ services:
       enc() { _s=\"$$1\"; _o=\"\"; while [ -n \"$$_s\" ]; do _c=\"$${_s%\"$${_s#?}\"}\"; _s=\"$${_s#?}\"; case \"$$_c\" in [a-zA-Z0-9._~-]) _o=\"$$_o$$_c\";; %) _o=\"$${_o}%25\";; @) _o=\"$${_o}%40\";; :) _o=\"$${_o}%3A\";; /) _o=\"$${_o}%2F\";; [?]) _o=\"$${_o}%3F\";; [#]) _o=\"$${_o}%23\";; \" \") _o=\"$${_o}%20\";; *) _o=\"$$_o$$_c\";; esac; done; printf '%s' \"$$_o\"; };
       MC_HOST_local=\"http://$$(enc \"$$S3_ACCESS_KEY_ID\"):$$(enc \"$$S3_SECRET_ACCESS_KEY\")@storage:9000\";
       export MC_HOST_local;
-      mc mb -p local/$${S3_BUCKET} &&
+      mc mb --ignore-existing -p local/$${S3_BUCKET} &&
       mc anonymous set none local/$${S3_BUCKET} &&
       echo 'minio bucket ready'"
 

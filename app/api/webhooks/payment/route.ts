@@ -1,7 +1,7 @@
 import { ok, fail, enforceRateLimit, readBodyCapped, tooLarge } from "@/lib/api";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { rateLimit } from "@/lib/rate-limit";
+import { envLimit, rateLimit } from "@/lib/rate-limit";
 import { fulfillOrder, revokeOrderCreditsTx, revokePlanEntitlementTx, dbNow } from "@/lib/ledger";
 import { getWebhookVerifiers } from "@/lib/payments";
 import type { IgnoredWebhook, PaymentWebhookEvent } from "@/lib/payments/types";
@@ -60,7 +60,14 @@ class DuplicatePaymentEvent extends Error {}
 // oversized bodies BEFORE buffering (same pattern as generate/edit/video).
 export async function POST(req: Request) {
   try {
-    const limited = await enforceRateLimit(req, "webhook", 60, 60_000);
+    // Overridable like every other limiter knob. The default is the flood bound
+    // the provider-facing endpoint has always used; the test suite raises it
+    // because its many webhook cases share one process-local "unknown" address,
+    // and a suite-order change could otherwise turn ordinary coverage into a
+    // 429 (pass 62 — the pass-22 suite was the first to hit it when file
+    // ordering shifted). `envLimit` falls back on a typo instead of disabling
+    // the bound.
+    const limited = await enforceRateLimit(req, "webhook", envLimit(process.env.WEBHOOK_RATE_LIMIT, 60), 60_000);
     if (limited) return limited;
     // readBodyCapped, not req.text(): the content-length pre-check alone is
     // bypassable with Transfer-Encoding: chunked, and req.text() buffers the

@@ -113,6 +113,7 @@ x-appenv: &appenv
   MIDDLEWARE_PAGE_LIMIT: ${MIDDLEWARE_PAGE_LIMIT:-}
   REGISTER_RATE_LIMIT: ${REGISTER_RATE_LIMIT:-}
   OAUTH_CALLBACK_RATE_LIMIT: ${OAUTH_CALLBACK_RATE_LIMIT:-}
+  WEBHOOK_RATE_LIMIT: ${WEBHOOK_RATE_LIMIT:-}
   OUTBOUND_TIMEOUT_MS: ${OUTBOUND_TIMEOUT_MS:-}
   # Image-generation keys for the DashScope (Aliyun) family. Its models are
   # disabled, but the key is still what lib/keys.ts resolves for that gateway.
@@ -148,8 +149,16 @@ services:
     restart: "no"
 
   caddy:
-    # No cap_drop: binding 80/443 needs NET_BIND_SERVICE. no-new-privileges
-    # still applies.
+    # The one capability Caddy needs is NET_BIND_SERVICE (ports 80/443); a
+    # blanket "no cap_drop because it needs one" kept the Docker default set —
+    # including NET_RAW and DAC_OVERRIDE — on the container that parses
+    # untrusted HTTP, which is a lateral-movement path onto the compose network
+    # carrying Postgres/Redis/S3 (pass 62). Drop everything and add the one
+    # capability back, like the app-hardening anchor does for web/worker.
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
     security_opt:
       - no-new-privileges:true
     image: caddy:2-alpine

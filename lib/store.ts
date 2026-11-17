@@ -179,6 +179,13 @@ function ipv4Private(v4: string): boolean {
   const [a, b, c] = o;
   if (a === 0 || a === 10 || a === 127) return true; // this-network, private, loopback
   if (a === 169 && b === 254) return true; // link-local
+  // Azure's WireServer/IMDS front end (pass 62). It is a host-internal service
+  // that answers on port 80, and it is not inside any blocklisted range: a
+  // compromised provider/gateway returning it as an artifact URL made
+  // saveRemoteVideo fetch guest-agent metadata and store it as the owner's
+  // "video". Other clouds' metadata addresses fall in ranges already refused
+  // (169.254/16, 100.64/10); this is the one that does not.
+  if (a === 168 && b === 63 && c === 129 && o[3] === 16) return true;
   if (a === 172 && b >= 16 && b <= 31) return true; // private
   if (a === 192 && b === 168) return true; // private
   if (a === 192 && b === 0) return true; // protocol assignments + TEST-NET-1
@@ -269,6 +276,14 @@ function ipv6Private(host: string): boolean {
   }
   // IPv4-COMPATIBLE ::/96 ("::7f00:1", "::a9fe:a9fe" — cloud metadata).
   if (a === 0 && b === 0 && c === 0 && d === 0 && e === 0 && f === 0) {
+    return ipv4Private(split32(((hi << 16) | lo) >>> 0));
+  }
+  // Deprecated IPv4-TRANSLATED ::ffff:0:0:0/96 (RFC 2765): `::ffff:0:a9fe:a9fe`
+  // is 169.254.169.254 embedded after the 0xffff marker. The mapped branch
+  // above only matches the [0,0,0,0,0,ffff,hi,lo] spelling, so WHATWG's
+  // normalisation of `[::ffff:0:169.254.169.254]` came back PUBLIC (pass 62).
+  // Any host with a SIIT/NAT46 mapper would dial the embedded address.
+  if (a === 0 && b === 0 && c === 0 && d === 0 && e === 0xffff && f === 0) {
     return ipv4Private(split32(((hi << 16) | lo) >>> 0));
   }
   if ((a & 0xfe00) === 0xfc00) return true; // fc00::/7 ULA

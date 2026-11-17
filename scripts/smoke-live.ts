@@ -18,6 +18,22 @@ const BASE = process.env.SMOKE_BASE_URL ?? "http://localhost:3000";
 const OUT = process.env.SMOKE_OUT ?? "/tmp/pd-smoke.png";
 const TIMEOUT_MS = Number(process.env.SMOKE_TIMEOUT_MS ?? 240_000);
 
+// Fixed default path, so a pre-planted symlink would make the script truncate
+// whatever it points at. Owner-only, and O_NOFOLLOW refuses the symlink itself
+// (pass 62 — the same class pass 61 closed in the shell scripts).
+function writeOwnerOnly(path: string, data: Buffer): void {
+  const fd = fs.openSync(
+    path,
+    fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | fs.constants.O_NOFOLLOW,
+    0o600,
+  );
+  try {
+    fs.writeFileSync(fd, data);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 // Cookie jar: next-auth's session is a cookie, and every API route needs it.
 const cookies = new Map<string, string>();
 function saveCookies(res: Response) {
@@ -134,7 +150,7 @@ async function main() {
   const isPng = buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47;
   const isJpeg = buf[0] === 0xff && buf[1] === 0xd8;
   if (!isPng && !isJpeg) die("files", `not a raster image (${type}, ${buf.length}B)`);
-  fs.writeFileSync(OUT, buf);
+  writeOwnerOnly(OUT, buf);
   pass("files", `${type} ${(buf.length / 1024).toFixed(0)}KB → ${OUT}`);
 
   const gallery = await call("/api/gallery").then((r) => r.json());

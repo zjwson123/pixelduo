@@ -135,9 +135,19 @@ function boundedTaskId(raw: unknown, label: string): string {
 // was mock traffic.
 export function mockImageProviderEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   if (env.MOCK_IMAGE_PROVIDER !== "1") return false;
-  if (isProductionRuntime(env) && env.PAYMENT_ALLOW_MOCK !== "1") {
+  // The escape hatch has to name a TEST DEPLOYMENT, not just carry the flag
+  // (pass 62). instrumentation.ts was hardened to require the mock payment
+  // provider alongside PAYMENT_ALLOW_MOCK (pass 51), but this adjacent gate
+  // still accepted the flag alone: a stale PAYMENT_ALLOW_MOCK in the environment
+  // of a deployment taking real money from Stripe/Paddle made the worker serve
+  // 1×1 stub images (and stub videos) for real credits — the exact fail-open
+  // the boot gate exists to stop, one gate over.
+  const testDeployment =
+    env.PAYMENT_ALLOW_MOCK === "1" &&
+    (env.PAYMENT_PROVIDER === undefined || env.PAYMENT_PROVIDER === "" || env.PAYMENT_PROVIDER === "mock");
+  if (isProductionRuntime(env) && !testDeployment) {
     throw new Error(
-      "mock-image-provider-not-allowed: MOCK_IMAGE_PROVIDER=1 is not allowed in production — it would serve stub images for real credits",
+      "mock-image-provider-not-allowed: MOCK_IMAGE_PROVIDER=1 is only allowed in production alongside PAYMENT_ALLOW_MOCK=1 and the mock payment provider — it would serve stub images for real credits",
     );
   }
   return true;

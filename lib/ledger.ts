@@ -336,14 +336,23 @@ export async function cycleUsageTx(
     // interactive budget, so a minute is generous; extra rows are harmless
     // because `consumption` is the authoritative attribution.
     const TX_START_ALLOWANCE_MS = 60_000;
-    const jobs = await tx.job.findMany({
-      where: {
-        userId,
-        createdAt: { gte: new Date(funding.createdAt.getTime() - TX_START_ALLOWANCE_MS) },
-      },
-      select: { id: true, consumption: true },
-    });
-    const jobIds = jobs.filter((j) => consumesGrant(j.consumption, funding.id)).map((j) => j.id);
+    // Filtered in SQL, not in JS (pass 62). This used to select `consumption`
+    // for every job the account created since the grant and filter with
+    // consumesGrant in memory: at cycle sizes the surrounding chunking already
+    // has to survive (pass 18 measured 33k-100k jobs), that materialises the
+    // whole cycle as JS objects inside the payment webhook's interactive
+    // transaction — memory and time that can exceed Prisma's 5s budget and
+    // make a paid renewal fail permanently (funding.createdAt is fixed, so the
+    // window never shrinks). The containment predicate selects exactly the
+    // rows `consumesGrant` did: each array element is checked for a matching
+    // `grantId`, and non-array/NULL values match nothing.
+    const jobRows = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+      SELECT id FROM "Job"
+      WHERE "userId" = ${userId}
+        AND "createdAt" >= ${new Date(funding.createdAt.getTime() - TX_START_ALLOWANCE_MS)}
+        AND "consumption" @> ${JSON.stringify([{ grantId: funding.id }])}::jsonb
+    `);
+    const jobIds = jobRows.map((j) => j.id);
     if (jobIds.length) {
       const spent: Array<{ type: string; creditsDelta: number; createdAt: Date }> = [];
       // Chunked, and this is load-bearing rather than tidy: Prisma sends an
@@ -463,7 +472,10 @@ export function idChunks<T>(items: T[], size = ID_CHUNK): T[][] {
 }
 
 // Did a job's pre-auth draw from this specific grant?
-function consumesGrant(consumption: unknown, grantId: string): boolean {
+// Kept (and exported for the test that pins the SQL containment equivalent) so
+// the JS definition of "this job drew on this grant" stays visible next to the
+// query that now implements it.
+export function consumesGrant(consumption: unknown, grantId: string): boolean {
   if (!Array.isArray(consumption)) return false;
   return consumption.some(
     (c) => typeof c === "object" && c !== null && (c as SpendConsumption).grantId === grantId,

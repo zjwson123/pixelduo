@@ -27,6 +27,28 @@ const PLACEHOLDER_SECRETS = [
 // repository can then mint a session JWT for any account, admin included.
 const PUBLISHED_CI_SECRET = "5c1f8e2a94b7d03f6ae4c81d2795bf30e6a1c47d8b92f650";
 
+// Can an http:// NEXTAUTH_URL reach only its own machine/LAN (pass 62)?
+//
+// The test-deployment escape hatch must not extend to a public hostname: an
+// internet-facing mock deployment would mint unprefixed, non-Secure auth
+// cookies, and a sibling subdomain of that name could plant them. Literal
+// checks only — this runs at boot, before any resolver is worth trusting, and
+// a hostname that needs DNS is not provably local.
+export function isLocalOrPrivateHostname(hostname: string): boolean {
+  const h = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (h === "localhost" || h.endsWith(".localhost") || h.endsWith(".local")) return true;
+  if (h === "::1") return true;
+  if (/^127\.\d+\.\d+\.\d+$/.test(h)) return true;
+  if (/^10\.\d+\.\d+\.\d+$/.test(h)) return true;
+  if (/^192\.168\.\d+\.\d+$/.test(h)) return true;
+  const m = /^172\.(\d+)\.\d+\.\d+$/.exec(h);
+  if (m && Number(m[1]) >= 16 && Number(m[1]) <= 31) return true;
+  // IPv6 ULA (fc00::/7) and link-local (fe80::/10).
+  if (/^f[cd][0-9a-f]{2}:/.test(h)) return true;
+  if (/^fe[89ab][0-9a-f]:/.test(h)) return true;
+  return false;
+}
+
 export function assertProductionConfig(env: NodeJS.ProcessEnv = process.env): void {
   // Fail closed on the ENVIRONMENT SPELLING, not on one exact string — see
   // lib/runtime-env.ts. These assertions used to run only when NODE_ENV was
@@ -105,6 +127,16 @@ export function assertProductionConfig(env: NodeJS.ProcessEnv = process.env): vo
       "EMAIL_VERIFY_AUTO=1 is not allowed in production — it auto-verifies registrations and grants the signup bonus",
     );
   }
+  // Same reasoning as EMAIL_VERIFY_AUTO, and the sibling gate the worker reads
+  // (lib/providers/index.ts mockImageProviderEnabled) now agrees with this one
+  // (pass 62): stub output for real credits is a test-only behaviour. Checking
+  // it here makes the misconfiguration a startup failure rather than a worker
+  // that boots and quietly serves 1×1 PNGs while checkout takes money.
+  if (env.MOCK_IMAGE_PROVIDER === "1" && !testDeployment) {
+    throw new Error(
+      "MOCK_IMAGE_PROVIDER=1 is only allowed in a test deployment (PAYMENT_ALLOW_MOCK=1 and PAYMENT_PROVIDER unset or mock) — it would serve stub images for real credits",
+    );
+  }
 
   // Webhook signing secrets are bearer-equivalent: whoever knows one can forge
   // `checkout.session.completed` / `transaction.completed` for a pending order
@@ -150,26 +182,39 @@ export function assertProductionConfig(env: NodeJS.ProcessEnv = process.env): vo
     }
   }
 
-  if (!testDeployment) {
-    // next-auth derives the cookie's Secure flag AND the __Secure- prefix from
-    // this URL's scheme alone (useSecureCookies = url.startsWith("https://")).
-    // An http:// value here fails silently: the app is healthy, HSTS is still
-    // sent, but the session cookie goes out without Secure — readable on any
-    // plaintext request to the domain — and every verification/reset email
-    // links to the wrong host.
-    //
-    // usableUrl rather than a prefix test, because "https://" (no host) and
-    // "https://pixelduo.ai " both start with the right eight characters: the
-    // first sends every generated link to nowhere and the second to a host that
-    // does not exist. A URL this process cannot parse and address is not a
-    // usable origin, and refusing to boot is the only signal that reaches the
-    // operator before a user does.
-    if (!usableUrl(env.NEXTAUTH_URL, ["https:"])) {
-      throw new Error(
-        "NEXTAUTH_URL must be a usable https:// URL (scheme + host) in production — next-auth issues a non-Secure session cookie (and mails http:// links) when it is not, and links built from a hostless value point nowhere",
-      );
-    }
+  // next-auth derives the cookie's Secure flag AND the __Host-/__Secure- prefix
+  // from this URL's scheme alone (useSecureCookies = url.startsWith("https://")).
+  // An http:// value here fails silently: the app is healthy, HSTS is still
+  // sent, but the session cookie goes out without Secure — readable on any
+  // plaintext request to the domain — and every verification/reset email links
+  // to the wrong host. It also reopens the pass-53 sibling-subdomain fixation:
+  // unprefixed `next-auth.session-token`/`next-auth.csrf-token` accept a Domain
+  // attribute, so a hostile sibling can plant them.
+  //
+  // The test-deployment hatch covers http:// ON A LOCAL/PRIVATE HOST only
+  // (pass 62). It was `if (!testDeployment)` around this whole block, so a
+  // mock deployment — the shipped local compose defaults, or a host-run
+  // instance — could be put on a real public domain over http with
+  // PAYMENT_ALLOW_MOCK=1 and mint those plantable cookies, which is the same
+  // class passes 53/57/58 fixed in the predicate itself. Loopback/private hosts
+  // are not addressable by a sibling-subdomain attacker, so they keep working.
+  //
+  // usableUrl rather than a prefix test, because "https://" (no host) and
+  // "https://pixelduo.ai " both start with the right eight characters: the
+  // first sends every generated link to nowhere and the second to a host that
+  // does not exist. A URL this process cannot parse and address is not a
+  // usable origin, and refusing to boot is the only signal that reaches the
+  // operator before a user does.
+  const authUrl = usableUrl(env.NEXTAUTH_URL, ["https:", "http:"]);
+  const testHttpAllowed =
+    testDeployment && authUrl?.protocol === "http:" && isLocalOrPrivateHostname(authUrl.hostname);
+  if (!authUrl || (authUrl.protocol !== "https:" && !testHttpAllowed)) {
+    throw new Error(
+      "NEXTAUTH_URL must be a usable https:// URL (scheme + host) in production — next-auth issues a non-Secure, unprefixed session cookie (and mails http:// links) when it is not, and links built from a hostless value point nowhere. An http:// URL is accepted only for a test deployment on a loopback/private host",
+    );
+  }
 
+  if (!testDeployment) {
     // Without SMTP_URL the mailer falls back to a stdout logger, so password
     // reset and email verification links — live account-takeover credentials —
     // are written to the container log while all auth mail for real users is

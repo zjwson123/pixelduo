@@ -159,9 +159,21 @@ for (const [cat, cfg] of Object.entries(CAT_BASES)) {
 
 async function main() {
   copyAssets();
-  await prisma.template.deleteMany({});
+  // Seeding is an UPSERT by default (pass 62). It used to delete every Template
+  // row first, so running the documented `npm run db:seed` against a database
+  // that also holds imported cases (scripts/import-cases.ts — up to 529 rows
+  // that this script cannot recreate) destroyed them and replaced the Explore
+  // gallery with the bundled set. `--reset` keeps the wipe for a deliberate
+  // fresh start; imported cases are still upserted below and are untouched.
+  const reset = process.argv.includes("--reset");
+  if (reset) await prisma.template.deleteMany({});
   for (const t of FINAL) {
-    await prisma.template.create({ data: t });
+    if (reset) {
+      await prisma.template.create({ data: t });
+    } else {
+      const { id, ...rest } = t;
+      await prisma.template.upsert({ where: { id }, create: t, update: rest });
+    }
   }
   const byCat = new Map<string, number>();
   for (const t of FINAL) byCat.set(t.cat, (byCat.get(t.cat) ?? 0) + 1);

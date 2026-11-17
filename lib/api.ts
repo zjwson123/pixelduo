@@ -293,7 +293,14 @@ export async function enforceRateLimit(
   limit: number,
   windowMs: number,
 ): Promise<NextResponse | null> {
-  const r = await rateLimit(`${scope}:${clientIp(req)}`, limit, windowMs);
+  // `ip:` is part of the key, not decoration (pass 62): the source address is
+  // an unvalidated header value in a deployment that does not sit behind the
+  // documented edge, and a flat `${scope}:${ip}` let `X-Forwarded-For:
+  // notify-global` collide with the feedback notification ceiling's own key
+  // (`feedback:notify-global`) — five posts then spend the global mail budget
+  // for everyone. The namespace means a header value can only ever address a
+  // bucket inside this route's IP family.
+  const r = await rateLimit(`${scope}:ip:${clientIp(req)}`, limit, windowMs);
   if (!r.ok) {
     return errorResponse(
       { ok: false, error: "rate-limited" },
@@ -471,7 +478,13 @@ export function parseJsonBody(raw: string): unknown {
 }
 
 function refuseNulDeep(value: unknown, depth: number): void {
-  if (depth > 32) return; // Bounded like the body cap: no recursion bombs.
+  // Bounded like the body cap: no recursion bombs. Refuse rather than return
+  // (pass 62) — silently stopping the walk left a NUL or lone surrogate nested
+  // deeper than 32 unchecked, so the guard's promise depended on every schema
+  // staying flat. No legitimate body of this app's routes is 32 levels deep.
+  if (depth > 32) {
+    throw new ApiError(400, "invalid-input: request body is nested too deeply");
+  }
   if (typeof value === "string") {
     refuseNul(value);
     return;

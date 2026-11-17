@@ -77,6 +77,16 @@ export async function GET(req: Request, { params }: { params: Promise<{ key: str
   } catch (e) {
     return fail(e);
   }
+  // A key is a storage key ("img/<uuid>.png"), never an absolute path. A
+  // percent-encoded leading slash (`%2Ftemplates/x.png`) decoded into one and
+  // matched a seeded Template.img (stored as "/templates/x.png" for the PUBLIC
+  // asset), while the storage driver strips the slash and reads a different
+  // object — a lookup/storage disagreement that would serve any bucket object
+  // sitting at the relative key to every signed-in user (pass 62). Refuse the
+  // shape instead of guessing which half was meant.
+  if (!key || key.startsWith("/")) {
+    return new NextResponse("not found", { status: 404, headers: NO_STORE });
+  }
   // requireUserId (not raw getServerSession) so a partial 2FA session or a
   // stale JWT revoked via sessionVersion can't read files. Bearer API keys
   // authenticate too — v1 API responses under the local storage driver hand

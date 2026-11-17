@@ -16,6 +16,12 @@ export async function POST(req: Request) {
     // (the token routes compare `consumedAt: null`), but every other token
     // write in lib/tokens.ts uses the database's now, so this one does too.
     const now = await dbNow(prisma);
+    // Tokens written by pre-userId versions of this app carry userId = null
+    // (the column is nullable). "Sign out everywhere" matched only `userId`,
+    // so those legacy rows for this address stayed live for the rest of their
+    // TTL (pass 62). The email arm is the same address — the user row was read
+    // from the session, not from the request — and is the only way to find them.
+    const me = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } });
     // "Revoke everything" must include API keys — they are a parallel
     // credential that outlives JWT session versions.
     //
@@ -35,7 +41,10 @@ export async function POST(req: Request) {
       }),
       prisma.apiKey.updateMany({ where: { userId, revokedAt: null }, data: { revokedAt: new Date() } }),
       prisma.verificationToken.updateMany({
-        where: { userId, consumedAt: null },
+        where: {
+          consumedAt: null,
+          OR: me ? [{ userId }, { userId: null, email: me.email }] : [{ userId }],
+        },
         data: { consumedAt: now },
       }),
     ]);

@@ -1,6 +1,12 @@
 process.env.DATABASE_URL =
   process.env.TEST_DATABASE_URL ?? "postgresql://pixelduo:pixelduo@localhost:5432/pixelduo_test";
 process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379";
+// Every webhook test file shares one process-local "unknown" address, and the
+// suite calls POST /api/webhooks/payment from ~20 files. At the production
+// default (60/min) a change in file ordering can put enough deliveries inside
+// one window to answer an ordinary test with 429 (pass 62). The env knob exists
+// for real bursts too; tests simply raise it.
+process.env.WEBHOOK_RATE_LIMIT = process.env.WEBHOOK_RATE_LIMIT ?? "100000";
 
 import { beforeAll } from "vitest";
 import { prisma } from "./lib/prisma";

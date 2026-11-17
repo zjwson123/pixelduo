@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { requireAdmin } from "@/lib/admin";
+import { assertAdminActorTx, requireAdmin, requireAdminSession } from "@/lib/admin";
 import { ok, fail, enforceUserRateLimit, refuseNul, errorResponse } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { getStorage } from "@/lib/storage";
@@ -109,7 +109,8 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
     // %00 → U+0000 → SQLSTATE 22021 → masked 500 + captured incident; the
     // sibling leg of pass 25's body/query NUL guards.
     refuseNul(id);
-    const adminId = await requireAdmin();
+    const actor = await requireAdminSession();
+    const adminId = actor.id;
     const limited = await enforceUserRateLimit(adminId, "admin-image-delete", 60, 60_000);
     if (limited) return fail(limited);
     const image = await prisma.image.findUnique({ where: { id: id } });
@@ -126,6 +127,12 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
     // blob stayed live (reachable by any still-valid presigned URL) and no
     // re-run could find it — the row was already gone. fail() reports it and
     // the row survives, so the admin can retry.
+    //
+    // Authority is re-proven immediately before the irreversible half (pass
+    // 62): the gate at the top of the request can be superseded while the
+    // lookup above runs, and a blob delete cannot be rolled back by the
+    // transaction-based re-check the other admin writes use.
+    await assertAdminActorTx(prisma, actor);
     await getStorage().delete(image.url);
     // The row delete is a CAS on the id, not `delete()` (pass 38). The read
     // above and the storage round trip between it and the delete leave a wide

@@ -165,8 +165,8 @@ describe("pass 22 — /api/files charges the account, not the shared egress", ()
     getServerSession.mockResolvedValue({ user: { id: user.id, sv: user.sessionVersion } });
 
     // The neighbour: the source address's anonymous bucket is gone.
-    await spend(`files:${ip}`);
-    expect((await rateLimit(`files:${ip}`, 600, 60_000)).ok).toBe(false);
+    await spend(`files:ip:${ip}`);
+    expect((await rateLimit(`files:ip:${ip}`, 600, 60_000)).ok).toBe(false);
 
     const res = await getFile(reqFrom(ip), { params: Promise.resolve({ key: ["nope.png"] }) });
     // Pre-fix this was 429: the request was charged to the spent egress bucket
@@ -198,7 +198,7 @@ describe("pass 22 — /api/files charges the account, not the shared egress", ()
     const ip = "203.0.113.78";
     getServerSession.mockResolvedValue(null);
 
-    await spend(`files:${ip}`);
+    await spend(`files:ip:${ip}`);
     const res = await getFile(reqFrom(ip), { params: Promise.resolve({ key: ["nope.png"] }) });
     // No credential to key on: the source address is still the only dimension,
     // and it must be charged before the API-key lookup.

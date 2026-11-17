@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import { prisma } from "./prisma";
 import { dbNow } from "./ledger";
 import { sendCreditExpiryEmail } from "./mail";
@@ -48,21 +49,53 @@ export async function sendExpiryReminders(scope?: { userId?: string }): Promise<
     const daysLeft = Math.max(1, Math.ceil((g.expiresAt!.getTime() - now.getTime()) / DAY_MS));
     const bucket = BUCKETS.find((b) => daysLeft <= b);
     if (!bucket) continue;
-    const user = await prisma.user.findUnique({ where: { id: g.userId }, select: { email: true } });
-    if (!user) continue;
+    // Claim the reminder BEFORE sending: two overlapping cron runs would
+    // otherwise both pass the existence check and the user gets the same
+    // reminder twice. The unique (grantId, daysBefore) row is the claim; a
+    // failed send releases it so the next run retries.
+    //
+    // The claim and the account's liveness are ONE transaction that locks the
+    // User row FOR KEY SHARE (pass 62). CreditReminder has no foreign key to
+    // User (so it survives operator row changes by design), which also meant
+    // the window between the old findUnique and the INSERT could straddle an
+    // erasure: the erasure deleted the reminders it could see and then the
+    // user, and this INSERT committed afterwards — a permanent row (and a
+    // mail to the erased address) for an account that was promised deleted.
+    // FOR KEY SHARE conflicts with the erasure's final User FOR UPDATE, so the
+    // two serialize: whichever commits first, the other sees its result.
+    let email: string | null = null;
     try {
-      // Claim the reminder BEFORE sending: two overlapping cron runs would
-      // otherwise both pass the existence check and the user gets the same
-      // reminder twice. The unique (grantId, daysBefore) row is the claim; a
-      // failed send releases it so the next run retries.
-      await prisma.creditReminder.create({
-        data: { grantId: g.id, userId: g.userId, daysBefore: bucket },
+      email = await prisma.$transaction(async (tx) => {
+        const rows = await tx.$queryRaw<Array<{ email: string }>>(
+          Prisma.sql`SELECT email FROM "User" WHERE id = ${g.userId} FOR KEY SHARE`,
+        );
+        if (!rows[0]) return null;
+        await tx.creditReminder.create({
+          data: { grantId: g.id, userId: g.userId, daysBefore: bucket },
+        });
+        return rows[0].email;
       });
     } catch {
-      continue; // already claimed by a concurrent run
+      continue; // already claimed by a concurrent run, or the account is gone
+    }
+    if (!email) continue;
+    // The claim guarantees the account existed at commit time, but the SMTP
+    // send below is outside the transaction and erasure can land between them.
+    // Re-check before handing the address to the mailer; the residue row, if
+    // the erasure ran in this gap, is removed by the erasure's own sweep (it
+    // deletes reminders before the User row).
+    const stillExists = await prisma.user.findUnique({
+      where: { id: g.userId },
+      select: { id: true },
+    });
+    if (!stillExists) {
+      await prisma.creditReminder
+        .deleteMany({ where: { grantId: g.id, daysBefore: bucket } })
+        .catch(() => undefined);
+      continue;
     }
     try {
-      await sendCreditExpiryEmail(user.email, bucket, g.remaining);
+      await sendCreditExpiryEmail(email, bucket, g.remaining);
       sent += 1;
     } catch (e) {
       await prisma.creditReminder

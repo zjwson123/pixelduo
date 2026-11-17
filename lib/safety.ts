@@ -80,8 +80,17 @@ const BLOCKED: Array<{ re: RegExp; reason: string }> = [
 //    can itself emit default-ignorable characters (U+FFA0 → U+1160), and
 //    stripping after it removes those in the same pass. The user's own prompt
 //    is never rewritten; only the copy the rules read is.
+//
+// Pass 62 widened it once more, from the invisible-letter class to every
+// character that occupies no word position: a C0/C1 control (except the
+// whitespace controls — tab/newline/CR are SEPARATORS the separated view
+// needs, and stripping them would turn "bomb\nmaking" into "bombmaking"),
+// U+2800 BRAILLE PATTERN BLANK, and the emoji skin-tone modifiers. A single
+// `nud\u0001e`, `nud\u2800e` or `nud\u{1F3FB}e` defeated all three views while
+// rendering (or at least transmitting) as "nude"; video output has no audit, so
+// this word list is the only pre-filter there.
 const FORMAT_CONTROLS =
-  /[\p{Cf}\p{Default_Ignorable_Code_Point}\u{FE00}-\u{FE0F}\u{E0100}-\u{E01EF}\u{FFF9}-\u{FFFB}]/gu;
+  /[\p{Cf}\p{Default_Ignorable_Code_Point}\u{FE00}-\u{FE0F}\u{E0100}-\u{E01EF}\u{FFF9}-\u{FFFB}\u2800\u{1F3FB}-\u{1F3FF}\u0000-\u0008\u000E-\u001F\u007F-\u009F]/gu;
 
 export function stripFormatControls(text: string): string {
   return text.replace(FORMAT_CONTROLS, "");

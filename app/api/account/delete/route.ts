@@ -178,7 +178,14 @@ export async function POST(req: Request) {
         },
         deleteRows: async (tx) => {
           await tx.backupCode.deleteMany({ where: { userId } });
-          await tx.verificationToken.deleteMany({ where: { userId } });
+          // VerificationToken.userId is nullable, and a token written by an
+          // older version of the app (or by a path that had no user row yet)
+          // would survive a deleteMany keyed only on it (pass 62). The address
+          // arm catches those; it is the account's own address, read from the
+          // authenticated user row above.
+          await tx.verificationToken.deleteMany({
+            where: { OR: [{ userId }, { userId: null, email: user.email }] },
+          });
           await tx.creditReminder.deleteMany({ where: { userId } });
           // ApiKey has no FK relation (by design, hash-only table), so it needs an
           // explicit wipe or key metadata survives the erasure request.

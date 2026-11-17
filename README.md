@@ -49,7 +49,7 @@
 npm install
 docker compose up -d db storage        # Postgres + MinIO
 npm run db:migrate                     # 应用迁移（dev）
-npm run db:seed                        # 160 条模板 + 素材
+npm run db:seed                        # 160 条模板 + 素材（增量 upsert，不删已导入案例；--reset 才清空模板表）
 npm run dev                            # http://localhost:3000
 ```
 

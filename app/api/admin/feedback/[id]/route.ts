@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, refuseNul, zodMessage, tooLarge } from "@/lib/api";
-import { requireAdmin } from "@/lib/admin";
+import { assertAdminActorTx, requireAdminSession } from "@/lib/admin";
 import { prisma } from "@/lib/prisma";
 
 const schema = z.object({ status: z.enum(["new", "done"]) });
@@ -14,7 +14,8 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     // %00 → U+0000 → SQLSTATE 22021 → masked 500 + captured incident; the
     // sibling leg of pass 25's body/query NUL guards.
     refuseNul(id);
-    const adminId = await requireAdmin();
+    const actor = await requireAdminSession();
+    const adminId = actor.id;
     const limited = await enforceUserRateLimit(adminId, "admin-feedback-write", 60, 60_000);
     if (limited) return fail(limited);
     const bodyRaw = await readBodyCapped(req, 4 * 1024);
@@ -22,13 +23,22 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     const body = schema.parse(parseJsonBody(bodyRaw.raw));
     // updateMany with the id in the predicate: a P2025 on an unknown id would
     // otherwise surface as a 500 instead of a 404.
-    const res = await prisma.feedback.updateMany({
-      where: { id },
-      data: {
-        status: body.status,
-        handledAt: body.status === "done" ? new Date() : null,
-        handledBy: body.status === "done" ? adminId : null,
-      },
+    //
+    // The operator's authority is re-proven in the same transaction (pass 62):
+    // `handledBy` is an operator id on a row the erasure scrub reaches only
+    // while the actor is still being erased — a queued PATCH landing after that
+    // scrub left the id behind.
+    const res = await prisma.$transaction(async (tx) => {
+      const updated = await tx.feedback.updateMany({
+        where: { id },
+        data: {
+          status: body.status,
+          handledAt: body.status === "done" ? new Date() : null,
+          handledBy: body.status === "done" ? adminId : null,
+        },
+      });
+      if (updated.count > 0) await assertAdminActorTx(tx, actor);
+      return updated;
     });
     if (res.count === 0) return fail(new Error("item-not-found"));
     return ok({ updated: true });
