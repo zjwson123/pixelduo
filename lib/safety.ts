@@ -182,7 +182,15 @@ export function checkPrompt(prompt: string): SafetyResult {
   // before the separator pass could see the digit boundary. `[^\p{L}]+` treats
   // every digit and punctuation mark as a separator, so `weapon1` becomes
   // "weapon" while `p0rn` is still caught by the folded form.
-  const plain = stripFormatControls(lower);
+  //
+  // It is taken from the RAW lowercased text, not the stripped one (pass 62):
+  // stripping a control GLUES its neighbours back together — `bomb\u0000making`
+  // became "bombmaking", which no single-word rule matches, so an invisible
+  // character could join two blocked words and slip through. In this view every
+  // control is a boundary, exactly like `_` and `-`; words whose halves were
+  // split by an invisible character are still covered by the stripped view
+  // above (`nud\u0001e` -> "nude").
+  const plain = lower;
   const separated = plain.replace(/[^\p{L}]+/gu, " ").replace(/\s+/g, " ").trim();
   for (const rule of BLOCKED) {
     if (rule.re.test(stripped) || rule.re.test(collapsed) || rule.re.test(separated)) {

@@ -111,6 +111,18 @@ describe("pass 62 — invisible characters cannot split a blocked word", () => {
     expect(checkPrompt("bomb\tmaking").ok).toBe(false);
   });
 
+  it("cannot JOIN two words across an invisible character either", () => {
+    // The strip class removes a control and glues the halves back together ("bomb"+"making" ->
+    // "bombmaking"), which no single-word rule matches; the separated view therefore has to see
+    // the raw text, where every control is a boundary like `_` and `-` already are.
+    expect(checkPrompt("bomb\u0000making").ok).toBe(false);
+    expect(checkPrompt("sex\u0000video").ok).toBe(false);
+    expect(checkPrompt("naked\u0000woman").ok).toBe(false);
+    expect(checkPrompt("nud\u2800e woman").ok).toBe(false);
+    // Invisible-joined single words stay covered by the stripped view.
+    expect(checkPrompt("nud\u0001e woman").ok).toBe(false);
+  });
+
   it("does not block ordinary prose or an invisible character alone", () => {
     for (const prompt of ["Essex", "sextant", "nudibranch", "underagents", "a calm lake", "\u2800"]) {
       expect(checkPrompt(prompt).ok, prompt).toBe(true);
