@@ -66,7 +66,7 @@ const BLOCKED: Array<{ re: RegExp; reason: string }> = [
   { re: /(色情|裸露|裸体|裸體|成人内容|成人內容|裸照|性暗示)/, reason: "adult-content" },
   {
     re: new RegExp(
-      `\\b(?:gore|gory|${spacedWord("blood")}[\\s._*-]*bath(?:s|es)?|mutilation|torture|dismember)\\w*\\b`,
+      `\\b(?:gore|gory|${spacedWord("blood")}[\\s._*-]*bath(?:s|es)?|mutilat\\w*|torture|dismember)\\w*\\b`,
       "i",
     ),
     reason: "violence",
@@ -89,8 +89,8 @@ const BLOCKED: Array<{ re: RegExp; reason: string }> = [
   { re: /((儿童|兒童).*(色情|性)|未成年.*色情)/, reason: "child-safety" },
   {
     re: new RegExp(
-      `\\b(?:${spacedWord("bomb")}(?:s|ing|ed|er|ers|ings)?|` +
-        `${spacedWord("weapon")}(?:s|ize[ds]?|izing)?|` +
+      `\\b(?:${spacedWord("bomb")}(?:s|ing|ed|er|ers|ings|ard(?:s|ed|ing|ment|ments)?)?|` +
+        `${spacedWord("weapon")}(?:s|ry|ize[ds]?|izing)?|` +
         `${spacedWord("explosive")}(?:s|ly)?|` +
         `${spacedWord("assassin")}(?:s|ate[ds]?|ating|ations?)?)\\b`,
       "i",

@@ -103,6 +103,28 @@ describe("pass 63 — the prompt filter sees ordinary spellings, not just stems"
     }
   });
 
+  it("blocks the inflections the same stems still let through", () => {
+    // Weapon/gore nouns and verbs built from the same stem but not in the
+    // alternation: `weapon(?:s|ize…)` missed "weaponry", `bomb(?:s|ing…)`
+    // missed "bombard(ment)", and the gore rule pinned only the noun
+    // "mutilation", so the verb "mutilated" passed.
+    const blocked = [
+      "weaponry in the armory",
+      "a naval bombardment",
+      "bombard the coastline",
+      "mutilated bodies",
+      "mutilate the victim",
+    ];
+    for (const prompt of blocked) {
+      expect(checkPrompt(prompt).ok, JSON.stringify(prompt)).toBe(false);
+    }
+    // "bombardier" is a beetle, not an inflection of "bombard": the stem list
+    // must not swallow it.
+    for (const prompt of ["a bombardier beetle on a leaf", "a cozy cafe at golden hour"]) {
+      expect(checkPrompt(prompt).ok, JSON.stringify(prompt)).toBe(true);
+    }
+  });
+
   it("keeps the false-positive guards already pinned", () => {
     const allowed = [
       "Essex county landscape",
