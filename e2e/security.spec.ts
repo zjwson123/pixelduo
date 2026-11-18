@@ -31,3 +31,33 @@ test.describe("malformed request paths", () => {
     expect(res.status()).toBe(401);
   });
 });
+
+// Pass 63: a same-site sibling origin could send a simple text/plain POST that
+// carried the Lax session cookie, spent the victim's account-keyed bucket and
+// only then met readBodyCapped's 415. The refusal must happen in the proxy,
+// before any bucket, and the browser's Sec-Fetch-Site label is what identifies
+// it. This exercises the wired middleware, not just the predicate.
+test.describe("foreign browser mutations", () => {
+  test("a same-site POST is refused before auth and the account limiter", async ({ request }) => {
+    const res = await request.post("/api/generate", {
+      headers: { "content-type": "application/json", "sec-fetch-site": "same-site" },
+      data: { prompt: "a calm lake", model: "gpt", quality: "medium" },
+      failOnStatusCode: false,
+    });
+    expect(res.status()).toBe(403);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("cross-site-request");
+  });
+
+  test("an ordinary same-origin request is not blocked by that guard", async ({ request }) => {
+    // No session, so the route's own guard answers 401 — which proves the
+    // request got past the proxy.
+    const res = await request.post("/api/generate", {
+      headers: { "content-type": "application/json", "sec-fetch-site": "same-origin" },
+      data: { prompt: "a calm lake", model: "gpt", quality: "medium" },
+      failOnStatusCode: false,
+    });
+    expect(res.status()).toBe(401);
+  });
+});

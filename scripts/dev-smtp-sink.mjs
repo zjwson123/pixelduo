@@ -15,9 +15,13 @@ const OUT = process.argv[3] ?? "/tmp/pd-smtp-inbox.log";
 // co-tenant on a shared host can pre-create it as a symlink and capture the
 // live verification/reset links this sink receives — the class pass 61 closed
 // for ci-local.sh/dev-restart.sh and lib/mail.ts's log-only mailer. O_NOFOLLOW
-// makes the open fail with ELOOP instead. mode only applies when O_CREAT
-// actually creates the file, so keep it owner-only; an existing regular file's
-// mode is not changed.
+// makes the open fail with ELOOP instead.
+//
+// O_NOFOLLOW only covers the path ITSELF (pass 63): a pre-created regular file
+// at the default /tmp path passed it, and mode 0600 applies only at creation,
+// so a 0666 file from an earlier run kept receiving tokens readable by every
+// local account. fstat proves the opened object is a single-link regular file
+// owned by this user, then fchmod pins it 0600 before anything is written.
 function appendOwnerOnly(text) {
   let fd;
   try {
@@ -26,6 +30,12 @@ function appendOwnerOnly(text) {
       fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND | fs.constants.O_NOFOLLOW,
       0o600,
     );
+    const st = fs.fstatSync(fd);
+    const uid = typeof process.getuid === "function" ? process.getuid() : null;
+    if (!st.isFile() || st.nlink !== 1 || (uid !== null && st.uid !== uid)) {
+      throw new Error("not a single-link regular file owned by this user");
+    }
+    fs.fchmodSync(fd, 0o600);
     fs.writeFileSync(fd, text);
   } catch (e) {
     console.error(`[smtp-sink] refusing to write ${OUT}: ${e.code ?? e.message}`);

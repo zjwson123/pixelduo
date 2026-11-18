@@ -508,8 +508,12 @@ describe("pass 34 — the published-secret gate normalises before comparing", ()
     expect(() =>
       assertProductionConfig(productionEnv("Zq7pR2vX9mK4tL8wN3cB6hJ1yF5dG0aS7eU2iO4kM9nP")),
     ).not.toThrow();
+    // The CI runtime is a LOOPBACK test deployment (pass 63): the mock flag
+    // alone does not exempt a public origin from the published-key refusal.
     const ciEnv = productionEnv(PUBLISHED);
     ciEnv.PAYMENT_ALLOW_MOCK = "1";
+    expect(() => assertProductionConfig(ciEnv)).toThrow(/published/i);
+    ciEnv.NEXTAUTH_URL = "http://localhost:3100";
     expect(() => assertProductionConfig(ciEnv)).not.toThrow();
   });
 });

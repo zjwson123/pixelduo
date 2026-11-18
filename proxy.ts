@@ -243,6 +243,47 @@ function invalidPath() {
   );
 }
 
+// A browser-labelled foreign request that MUTATES an API route (pass 63).
+//
+// The JSON routes refuse a non-JSON body in readBodyCapped, but that check runs
+// AFTER the route's account limiter (and after the sessionVersion read), so a
+// same-site sibling origin — the threat model passes 45/53/58 already take
+// seriously — could send simple `text/plain` form/fetch POSTs that carry the
+// Lax session cookie, drain the victim's per-account bucket with 415s, and
+// keep 2FA setup/disable, key minting, self-erasure and 2FA completion
+// answering 429. Refusing here, before ANY bucket is charged, is both the
+// earlier and the correct layer: the browser's own label cannot be chosen by
+// page script, and this layer is the only one every /api request crosses.
+//
+// Requests without Sec-Fetch-* are non-browser clients (curl, scripts, the
+// provider webhooks) and are left alone, exactly like refuseCrossSiteRequest.
+// OAuth/OIDC callbacks are cross-site POSTs by design and are exempt; their
+// CSRF token is NextAuth's, not this layer's. A same-site GET is not blocked:
+// only state-changing methods are, and top-level navigation stays usable.
+const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+export function foreignBrowserMutation(
+  method: string,
+  path: string,
+  secFetchSite: string | null,
+): boolean {
+  if (SAFE_METHODS.has(method.toUpperCase())) return false;
+  if (!path.startsWith("/api/")) return false;
+  if (secFetchSite !== "same-site" && secFetchSite !== "cross-site") return false;
+  if (path === "/api/auth/callback" || path.startsWith("/api/auth/callback/")) return false;
+  return true;
+}
+
+function crossSiteRejected() {
+  return NextResponse.json(
+    {
+      ok: false,
+      error:
+        "cross-site-request: a browser request from another site cannot change state on this endpoint",
+    },
+    { status: 403, headers: { "Cache-Control": "private, no-store" } },
+  );
+}
+
 export async function proxy(req: NextRequest) {
   // Last XFF entry = client IP appended by the trusted edge proxy; earlier
   // entries are client-spoofable (see lib/rate-limit.ts clientIp).
@@ -259,6 +300,11 @@ export async function proxy(req: NextRequest) {
   const path = req.nextUrl.pathname;
   const isApi = path.startsWith("/api");
   const isAuth = isApi && path.startsWith("/api/auth");
+  // BEFORE every bucket (pass 63): a refused foreign mutation must not spend
+  // the victim's account budget — spending it is the attack this blocks.
+  if (foreignBrowserMutation(req.method, path, req.headers.get("sec-fetch-site"))) {
+    return crossSiteRejected();
+  }
   // The authenticated SHELLS (pass 34). Until now the matcher covered /api/*
   // only, so these pages were the one place a request could do the full unit of
   // work — JWT decrypt, a sessionVersion read (plus role, for /admin), a React

@@ -144,7 +144,18 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
     // (admin/feedback/[id], admin/users/[id], gallery DELETE) all use a
     // predicate-carrying deleteMany for exactly this; probed, the pre-fix
     // shape answered 200-then-500 on 6 of 6 rounds.
-    const gone = await prisma.image.deleteMany({ where: { id: image.id } });
+    //
+    // The commit-time re-check is in the SAME transaction as the row delete
+    // (pass 63): the pass-62 check above runs before the storage round trip,
+    // and an erasure/revocation of this operator that commits during that
+    // round trip would otherwise still let the takedown be recorded under an
+    // actor who was no longer authorized. The blob is already gone by then;
+    // the row is what carries the operator's name, and it now rolls back so a
+    // still-authorized operator can re-run the takedown.
+    const gone = await prisma.$transaction(async (tx) => {
+      await assertAdminActorTx(tx, actor);
+      return tx.image.deleteMany({ where: { id: image.id } });
+    });
     if (gone.count === 0) return fail(new Error("image-not-found"));
     return ok({ deleted: true });
   } catch (e) {

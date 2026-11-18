@@ -103,10 +103,23 @@ export function assertProductionConfig(env: NodeJS.ProcessEnv = process.env): vo
   const providerName = env.PAYMENT_PROVIDER ?? "";
   const testDeployment =
     env.PAYMENT_ALLOW_MOCK === "1" && (providerName === "" || providerName === "mock");
+  // Resolved here because the published-secret exemption below needs the host
+  // as well as the flag (pass 63). The URL itself is checked further down; this
+  // is the same parse, not a second policy.
+  const authUrl = usableUrl(env.NEXTAUTH_URL, ["https:", "http:"]);
   // The published CI secret is checked against testDeployment rather than
   // against the placeholder list above: CI and ci-local.sh legitimately use it
   // to boot a production build, so it may only be rejected where it would be a
   // real deployment's signing key.
+  //
+  // A test deployment is not enough on a PUBLIC host (pass 63). `PAYMENT_
+  // ALLOW_MOCK=1 PAYMENT_PROVIDER=mock NEXTAUTH_SECRET=<published>
+  // NEXTAUTH_URL=https://app.example.com` passed this gate — the mock flags
+  // only say "no real money", not "nobody outside this machine can reach it" —
+  // and every session JWT for that deployment, admin included, is forgeable by
+  // anyone who has read the repository. The exemption is now a test deployment
+  // on a loopback/private host, which is what CI and ci-local.sh are; a public
+  // test deployment must generate its own secret, which costs nothing.
   //
   // Normalised (pass 34): the placeholder check beside it already lowercases
   // and substring-matches, so it survives case and stray characters — this one
@@ -117,7 +130,9 @@ export function assertProductionConfig(env: NodeJS.ProcessEnv = process.env): vo
   // included — for the price of trying a handful of spellings. Trim and fold
   // case before comparing; the constant is lowercase hex, so nothing legitimate
   // is caught by this.
-  if (secret.trim().toLowerCase() === PUBLISHED_CI_SECRET && !testDeployment) {
+  const localTestOrigin =
+    testDeployment && authUrl !== null && isLocalOrPrivateHostname(authUrl.hostname);
+  if (secret.trim().toLowerCase() === PUBLISHED_CI_SECRET && !localTestOrigin) {
     throw new Error(
       "NEXTAUTH_SECRET is the value published in .github/workflows/ci.yml and scripts/ci-local.sh — it is public knowledge, so anyone could forge a session for any account. Generate a fresh one with `openssl rand -base64 32`",
     );
@@ -204,8 +219,8 @@ export function assertProductionConfig(env: NodeJS.ProcessEnv = process.env): vo
   // first sends every generated link to nowhere and the second to a host that
   // does not exist. A URL this process cannot parse and address is not a
   // usable origin, and refusing to boot is the only signal that reaches the
-  // operator before a user does.
-  const authUrl = usableUrl(env.NEXTAUTH_URL, ["https:", "http:"]);
+  // operator before a user does. (authUrl was resolved above for the
+  // published-secret host check.)
   const testHttpAllowed =
     testDeployment && authUrl?.protocol === "http:" && isLocalOrPrivateHostname(authUrl.hostname);
   if (!authUrl || (authUrl.protocol !== "https:" && !testHttpAllowed)) {

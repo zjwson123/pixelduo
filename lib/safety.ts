@@ -8,6 +8,34 @@ import { prisma } from "./prisma";
 import { dbNow } from "./ledger";
 import { fetch as pinnedFetch } from "undici";
 
+// Two more evasions, both probed on the pass-62 code (pass 63):
+//
+//  - a word split after two or more letters (`chi ld abuse`, `child por
+//    nography`, `b omb making`, `nu de woman`, `under-age girl`, `under age
+//    girl`) was invisible to all three views. collapseLetterSpacing only joins
+//    runs of SINGLE letters (`n u d e`), and the separated view turns a space
+//    into a token boundary — so the rules above require the letters of a stem
+//    to be contiguous. `spacedWord` tolerates separators between every pair of
+//    letters; the leading/trailing \b is what keeps it out of ordinary prose
+//    (the "under age" in "under a gentle sky" is not followed by a boundary
+//    after its final `e`, so it does not match "underage").
+//  - ordinary inflections that were simply never listed: `bombing`, `bomber`,
+//    `bombed`, `weaponize`, `assassinate`, `nudist`, `nudism`, `nakedness`,
+//    `sexting`. They are ordinary spellings of words already on the list.
+//
+// The word list remains a speed bump, not the control (see the note below); a
+// determined writer can still evade any finite phrase list. But a spelling a
+// human reads as the blocked word — including the plain hyphenated
+// `under-age` — has to be on it for the video path, where no output audit
+// exists.
+const SEP = "[\\s._*-]*";
+function spacedWord(word: string): string {
+  return word
+    .split("")
+    .map((c) => c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join(SEP);
+}
+
 const BLOCKED: Array<{ re: RegExp; reason: string }> = [
   // Inflections, not just the dictionary spellings (pass 51): the old
   // alternation matched `nude`/`porn` but not `nudes`/`pornos`, and `\b` after
@@ -17,20 +45,58 @@ const BLOCKED: Array<{ re: RegExp; reason: string }> = [
   // blanket `\w*`: `\bsex\w*` would also block "sextant", and a false positive
   // on a legitimate astronomy prompt is not free. porn/erotic/explicit use
   // `\w*` because no ordinary word shares those stems.
-  { re: /\b(sex(?:s|ual(?:ly|ized|ization)?|y)?|nude\w*|nudity|naked|porn\w*|erotic\w*|nsfw|explicit\w*)\b/i, reason: "adult-content" },
+  //
+  // `nude(?:s|ly|ness)?` replaces `nude\w*` so the split-word form can be
+  // alternated without letting `nu de` swallow a following word: `nude\w*`
+  // after a spaced stem would match "nu delicious" ("nu de" + "licious"), and
+  // the number of suffix spellings is small enough to enumerate.
+  {
+    re: new RegExp(
+      `\\b(?:sex(?:s|ual(?:ly|ized|ization)?|y|ting|ted)?|${spacedWord("sex")}|` +
+        `${spacedWord("nude")}(?:s|ly|ness)?|nudity|${spacedWord("nudity")}|` +
+        `nudist|${spacedWord("nudist")}|nudism|${spacedWord("nudism")}|` +
+        `naked(?:ness)?|${spacedWord("naked")}(?:ness)?|` +
+        `porn\\w*|${spacedWord("porn")}\\w*|erotic\\w*|nsfw|explicit\\w*)\\b`,
+      "i",
+    ),
+    reason: "adult-content",
+  },
   // Traditional spellings are the same words (pass 51): `裸體` and `成人內容`
   // render identically to the blocked simplified forms and were not matched.
   { re: /(色情|裸露|裸体|裸體|成人内容|成人內容|裸照|性暗示)/, reason: "adult-content" },
-  { re: /\b(gore|gory|bloodbath|mutilation|torture|dismember)\w*\b/i, reason: "violence" },
+  {
+    re: new RegExp(
+      `\\b(?:gore|gory|${spacedWord("blood")}[\\s._*-]*bath(?:s|es)?|mutilation|torture|dismember)\\w*\\b`,
+      "i",
+    ),
+    reason: "violence",
+  },
   { re: /(血腥|暴力|折磨|肢解)/, reason: "violence" },
   // `childporn` (one word) and the plural/traditional forms were the other
   // trivial evasions: the old rule required a space after child/children.
   // `underage(?:d)?` covers the inflected spelling; `\b` alone stopped before
   // the `d` in "underaged" (and at `_` in "underage_girl", which the separated
   // form below normalises to a space).
-  { re: /\b(child(?:ren)?\s*(?:abuse|porn(?:ography)?|sexual)|minor.*sexual|underage(?:d)?)\b/i, reason: "child-safety" },
+  {
+    re: new RegExp(
+      `\\b(?:${spacedWord("child")}[\\s._*-]*(?:ren)?[\\s._*-]*` +
+        `(?:abuse|${spacedWord("abuse")}|porn\\w*|${spacedWord("porn")}\\w*|sexual)|` +
+        `minor.*sexual|${spacedWord("underage")}(?:d)?)\\b`,
+      "i",
+    ),
+    reason: "child-safety",
+  },
   { re: /((儿童|兒童).*(色情|性)|未成年.*色情)/, reason: "child-safety" },
-  { re: /\b(weapons?|bombs?|explosives?|assassinations?)\b/i, reason: "weapons" },
+  {
+    re: new RegExp(
+      `\\b(?:${spacedWord("bomb")}(?:s|ing|ed|er|ers|ings)?|` +
+        `${spacedWord("weapon")}(?:s|ize[ds]?|izing)?|` +
+        `${spacedWord("explosive")}(?:s|ly)?|` +
+        `${spacedWord("assassin")}(?:s|ate[ds]?|ating|ations?)?)\\b`,
+      "i",
+    ),
+    reason: "weapons",
+  },
   { re: /(武器|炸弹|炸彈|爆炸物|刺杀|刺殺)/, reason: "weapons" },
 ];
 

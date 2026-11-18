@@ -404,8 +404,20 @@ describe("published CI secret (pass 13)", () => {
     expect(() => assertProductionConfig({ ...base, NEXTAUTH_SECRET: CI_SECRET } as NodeJS.ProcessEnv)).toThrow(
       /published in .github\/workflows\/ci.yml/,
     );
+    // Pass 63: the mock flag alone no longer exempts a PUBLIC origin — a
+    // deployment anyone can reach with a published signing key is forgeable
+    // for every account, admin included.
     expect(() =>
       assertProductionConfig({ ...base, NEXTAUTH_SECRET: CI_SECRET, PAYMENT_ALLOW_MOCK: "1" } as NodeJS.ProcessEnv),
+    ).toThrow(/published in .github\/workflows\/ci.yml/);
+    // What CI and ci-local.sh actually are: a loopback origin.
+    expect(() =>
+      assertProductionConfig({
+        ...base,
+        NEXTAUTH_URL: "http://localhost:3100",
+        NEXTAUTH_SECRET: CI_SECRET,
+        PAYMENT_ALLOW_MOCK: "1",
+      } as NodeJS.ProcessEnv),
     ).not.toThrow();
     // Pass 42: length was the only entropy check, so 48 copies of one
     // character passed while carrying ~1 bit. A real `openssl rand` value has

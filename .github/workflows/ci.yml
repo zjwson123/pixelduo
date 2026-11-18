@@ -59,6 +59,12 @@ jobs:
               echo "[audit] registry audit endpoint unavailable (attempt $attempt/3) — retrying"
               sleep 5
             else
+              # A high finding with NO published patch is allowed only through
+              # the documented, expiring exception (lib/audit-policy.ts): the
+              # package rides a build-time-only path and BOTH shipped images
+              # assert it is absent. The script re-reads the machine report and
+              # fails for anything it does not explain.
+              if npx tsx scripts/audit-runtime.ts; then exit 0; fi
               exit 1
             fi
           done
@@ -349,6 +355,12 @@ jobs:
             # shell string, and a stray quote ends it early — pass 33.)
             test -e /app/node_modules/.prisma/client/index.js
             grep -q "\"schemaEnvPath\": null" /app/node_modules/.prisma/client/index.js
+            # The audit gate exception (pass 63): picomatch has no patched
+            # release, is reached only by the Sentry BUILD-time rollup plugin,
+            # and the standalone trace never carried the package (the vendored
+            # next/dist/compiled copy is a different artifact).
+            test ! -e /app/node_modules/picomatch
+            test ! -e /app/node_modules/@rollup
             # The Next runtime dotenv loader (pass 39): BaseServer calls
             # loadEnvConfig on the standalone directory, so a .env restored
             # beside the tree was still parsed at runtime even after the Prisma
@@ -438,6 +450,10 @@ jobs:
             test ! -e /app/node_modules/playwright
             test ! -e /app/node_modules/playwright-core
             test ! -e /app/node_modules/@playwright
+            # Pass 63: the runtime audit gate exception rides on the Sentry
+            # build-time bundler plugin; the shipped tree must not carry it.
+            test ! -e /app/node_modules/@rollup
+            test ! -e /app/node_modules/picomatch
             # ...while the two devDependencies this image EXECUTES must still be
             # here: tsx (worker + maintenance loop) and the Prisma CLI (migrate).
             test -e /app/node_modules/tsx

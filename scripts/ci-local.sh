@@ -96,6 +96,10 @@ for attempt in 1 2 3; do
     echo "[audit] registry audit endpoint unavailable (attempt $attempt/3) — retrying"
     sleep 5
   else
+    # Same exception path as ci.yml: only a GHSA with no published patch,
+    # build-time-only, and absent from both shipped images (lib/audit-policy.ts,
+    # Dockerfile runtime-deps + the image gates below).
+    if npx tsx scripts/audit-runtime.ts; then audited=1; break; fi
     exit 1
   fi
 done
@@ -211,6 +215,10 @@ docker run --rm --entrypoint sh pd-ci-web -c '
   # string, and a stray quote ends it early — pass 33.)
   test -e /app/node_modules/.prisma/client/index.js
   grep -q "\"schemaEnvPath\": null" /app/node_modules/.prisma/client/index.js
+  # The audit gate exception (pass 63): picomatch has no patched release, is
+  # build-time-only for Sentry, and the standalone trace never carried it.
+  test ! -e /app/node_modules/picomatch
+  test ! -e /app/node_modules/@rollup
   grep -q "__NEXT_PROCESSED_ENV" /app/server.js
   for f in /app/.env /app/.env.local /app/.env.production; do
     if [ -e "$f" ]; then echo "dotenv in image: $f"; exit 1; fi
@@ -286,6 +294,10 @@ docker run --rm --entrypoint sh pd-ci-worker -c '
   test ! -e /app/node_modules/playwright
   test ! -e /app/node_modules/playwright-core
   test ! -e /app/node_modules/@playwright
+  # Pass 63: the runtime audit gate exception rides on the Sentry build-time
+  # bundler plugin; the shipped tree must not carry it.
+  test ! -e /app/node_modules/@rollup
+  test ! -e /app/node_modules/picomatch
   # ...while the two devDependencies this image EXECUTES must still be here:
   # tsx (worker + maintenance loop) and the Prisma CLI (the migrate service).
   test -e /app/node_modules/tsx

@@ -90,6 +90,17 @@ if [ -z "$CONTAINER" ]; then
     fi
     CONTAINER="$(printf '%s\n' "$FOUND" | sed '/^$/d' | head -n1)"
     echo "[backup] using '$CONTAINER' (the only running compose 'db' service)" >&2
+    # "Exactly one" is not "this checkout" (pass 63). The DEV stack is also
+    # exactly one compose db, so a host running both dumped the dev database
+    # into the production checkout's backups/ and rotated the oldest production
+    # dumps out — while printing success. The compose label records the project
+    # directory; when present it must be this checkout. Pass the container
+    # explicitly when a stack is managed from another directory on purpose.
+    PROJECT_DIR="$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' "$CONTAINER" 2>/dev/null || true)"
+    if [ -n "$PROJECT_DIR" ] && [ "$(cd "$PROJECT_DIR" 2>/dev/null && pwd -P)" != "$(pwd -P)" ]; then
+      echo "[backup] '$CONTAINER' belongs to the compose project at '$PROJECT_DIR', not this checkout ($(pwd -P)) — pass the intended container explicitly: ./scripts/backup.sh <container> [database]" >&2
+      exit 1
+    fi
   fi
   if ! docker inspect "$CONTAINER" >/dev/null 2>&1; then
     echo "[backup] container '$CONTAINER' does not exist — pass the intended container explicitly: ./scripts/backup.sh <container> [database]" >&2
@@ -97,7 +108,24 @@ if [ -z "$CONTAINER" ]; then
   fi
 fi
 
+# A symlinked destination would make the chmod/dump/rotation below act on
+# whatever it points at (and a co-tenant who can write the parent directory can
+# plant it). Same rule pass 61 applied to the /tmp log paths: refuse, do not
+# follow.
+if [ -L "$BACKUP_DIR" ]; then
+  echo "[backup] '$BACKUP_DIR' is a symlink — refusing to write backups through it" >&2
+  exit 1
+fi
 mkdir -p "$BACKUP_DIR"
+# umask only affects files CREATED after it is set (pass 63): an existing
+# 0755 directory and the 0644 dumps an earlier version wrote kept their modes,
+# so the complete copy of the database stayed readable by every local account.
+# Tighten the directory and every dump this directory already holds, not just
+# the one this run writes. This fails loudly (set -e) if the files belong to
+# another user — the operator has to fix ownership rather than keep publishing
+# them.
+chmod 700 "$BACKUP_DIR"
+find "$BACKUP_DIR" -maxdepth 1 -type f \( -name '*.sql.gz' -o -name '*.dump.gz' \) -exec chmod 600 {} +
 OUT="$BACKUP_DIR/${DB}-${STAMP}.sql.gz"
 TMP="$BACKUP_DIR/.${DB}-${STAMP}.partial"
 
@@ -134,6 +162,7 @@ if [ "$BYTES" -lt 1024 ]; then
   exit 1
 fi
 mv "$TMP" "$OUT"
+chmod 600 "$OUT"
 echo "backup written: $OUT ($(du -h "$OUT" | cut -f1))"
 
 # Rotate old backups

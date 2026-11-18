@@ -545,7 +545,18 @@ async function writeOffExcessTx(
   const user = await tx.user.findUnique({ where: { id: userId }, select: { credits: true } });
   if (!user) throw new Error("user-not-found");
   await tx.creditGrant.update({ where: { id: grantId }, data: { remaining: target } });
-  const delta = Math.max(target - current, -user.credits);
+  // The clamp's sign must come from the write-off, not from a negative
+  // balance (pass 63). `Math.max(target - current, -user.credits)` with
+  // credits < 0 produced a POSITIVE delta: writeOffExcessTx would then MINT
+  // credits while repairing an over-holding grant. addCreditsTx refuses any
+  // negative outcome, so no app path can create such a balance — but this is
+  // the repair function for a database that already drifted, and "the repair
+  // mints credits" is the wrong direction to be wrong in. Floor the balance
+  // at zero, exactly like revokeOrderCreditsTx's debit clamp: with a negative
+  // balance the delta is 0, addCreditsTx's own balance check then refuses the
+  // transaction, and the drift is left to scripts/repair-credit-invariant.ts
+  // rather than papered over with new credits.
+  const delta = Math.max(target - current, -Math.max(0, user.credits));
   await addCreditsTx(
     tx,
     userId,

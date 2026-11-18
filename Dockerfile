@@ -42,13 +42,25 @@ RUN npm ci
 # here is absent, so a future dependency that reintroduces one of them as a
 # RUNTIME package fails the build loudly instead of silently re-bloating the
 # artifact with advisories no gate measures.
+# Pass 63 adds @rollup/* and picomatch. They are build-time dependencies of
+# @sentry/nextjs's webpack plugin (it uses rollup-commonjs to wrap the SDK's
+# modules), so nothing in lib/, scripts/ or app/ imports either at runtime, and
+# the only files that name @sentry/nextjs on the server are instrumentation.ts
+# and sentry.*.config.ts — all deleted from this image. They still sit in the
+# LOCKFILE's production scope (picomatch has GHSA-fc5q-39xc-vjpf, high, with no
+# patched release published), so the audit gate cannot clear them by itself;
+# the gate's documented exception is valid only while both shipped images
+# assert these names absent, which is why they are removed HERE and asserted in
+# ci.yml / ci-local.sh. The web image never traced them (verified: only Next's
+# own vendored next/dist/compiled/picomatch is present, not this package).
 FROM deps AS runtime-deps
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 RUN rm -rf \
       node_modules/vitest node_modules/@vitest \
       node_modules/vite node_modules/vite-node node_modules/tinypool \
-      node_modules/playwright node_modules/playwright-core node_modules/@playwright
+      node_modules/playwright node_modules/playwright-core node_modules/@playwright \
+      node_modules/@rollup node_modules/picomatch
 
 # ---------- builder ----------
 FROM node:24-alpine AS builder

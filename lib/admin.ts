@@ -38,15 +38,23 @@ export async function requireAdminSession(): Promise<AdminActor> {
 // Called AFTER the writes (just before commit) so the final state is what is
 // checked: a demotion or erasure that committed while this transaction ran is
 // visible (each statement takes a fresh snapshot), and the transaction rolls
-// back. A plain read, not a lock: taking the actor's row lock here would add a
-// new lock edge against every money writer that updates User credits, while the
-// residue problem is already solved by checking after the writes — if erasure
-// of the actor commits first, this sees it; if this transaction commits first,
-// erasure's scrub runs afterwards and nulls the reference.
+// back.
+//
+// It also takes the actor's row lock before reading (pass 63). "Visible" is
+// not enough for an erasure that is still IN FLIGHT: under READ COMMITTED a
+// plain SELECT cannot see the uncommitted cascade, so a write that inserted
+// actorId while the erase transaction sat between its scrub and its commit
+// passed this check and left the operator id on another account's row after
+// the erase committed — the exact residue pass 61's scrub exists to remove.
+// FOR KEY SHARE blocks on erasure's User FOR UPDATE (this wait then finds no
+// row and rolls back) and is compatible with the FOR NO KEY UPDATE every
+// credits/plan writer takes, so the money path gains no contention. The
+// API-key mint's owner lock uses the same mode for the same reason.
 export async function assertAdminActorTx(
   tx: Prisma.TransactionClient | typeof prisma,
   actor: AdminActor,
 ): Promise<void> {
+  await tx.$queryRaw(Prisma.sql`SELECT id FROM "User" WHERE id = ${actor.id} FOR KEY SHARE`);
   const user = await tx.user.findUnique({
     where: { id: actor.id },
     select: { role: true, sessionVersion: true },

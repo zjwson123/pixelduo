@@ -89,7 +89,25 @@ export TARGET_ENDPOINT TARGET_ACCESS TARGET_SECRET TARGET_BUCKET KEEP
 # directory is missing, Docker creates it owned by root and the container
 # (now uid $(id -u)) cannot write into it — the same failure the compose
 # services document. mkdir here makes the owner the operator who ran this.
+# Refuse a symlinked mount source first: the chmod/recursive sweep below would
+# otherwise act on whatever it points at, and the container mount would follow
+# it too. Same rule pass 61 applied to the /tmp log paths.
+if [ -L "$PWD/backups" ] || [ -L "$PWD/backups/objects" ]; then
+  echo "[backup-objects] backups/ or backups/objects is a symlink — refusing to write through it" >&2
+  exit 1
+fi
 mkdir -p "$PWD/backups"
+# umask only covers what this run creates (pass 63). Snapshots written by the
+# pre-pass-55 script are the ones that matter: they landed root-owned or 0644
+# and nothing ever revisits their modes, so the full user-image/video tree
+# stayed readable by every local account. Tighten the directory and any
+# existing tree before the new snapshot lands. Best-effort on the tree: a
+# root-owned legacy snapshot belongs to the operator, but the new snapshot is
+# still owner-only by umask.
+chmod 700 "$PWD/backups"
+if [ -d "$PWD/backups/objects" ] && ! chmod -R go-rwx "$PWD/backups/objects" 2>/dev/null; then
+  echo "[backup-objects] warning: could not tighten every existing snapshot (root-owned?); this run's snapshot is owner-only" >&2
+fi
 
 # The uid is the invoking user's, not root: the snapshot tree (every user image
 # and video, unencrypted) landed root-owned when this script ran, and the

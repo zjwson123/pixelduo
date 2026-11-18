@@ -52,17 +52,46 @@ class DevMailer implements Mailer {
       // reset link to a file they own (or append to an operator file). The
       // directory must be a real directory and the file is opened O_NOFOLLOW —
       // a planted link now fails loudly instead of silently receiving the token.
+      //
+      // Ownership and modes are checked, not assumed (pass 63). O_NOFOLLOW
+      // only rejects a symlink; a pre-created 0777 DIRECTORY or a regular
+      // 0666 FILE passes it, and `mode: 0o600` applies only at creation — a
+      // file left by an earlier run (or planted by a co-tenant who could write
+      // the world-writable directory) kept receiving live reset links with its
+      // old permissions. The directory is chmod-ed owner-only after proving it
+      // is ours (so filenames, which carry the recipient address, are not
+      // listable), and the opened file is fstat-ed for owner, type and
+      // single-link, then fchmod-ed 0600.
       const dirStat = fs.lstatSync(dir, { throwIfNoEntry: false });
       if (dirStat && !dirStat.isDirectory()) {
         throw new Error(`MAIL_DEV_DIR '${dir}' is not a real directory (symlink?) — refusing to write auth mail there`);
       }
-      if (!dirStat) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      const uid = typeof process.getuid === "function" ? process.getuid() : null;
+      if (dirStat) {
+        if (uid !== null && dirStat.uid !== uid) {
+          throw new Error(`MAIL_DEV_DIR '${dir}' is not owned by this process — refusing to write auth mail there`);
+        }
+        fs.chmodSync(dir, 0o700);
+      } else {
+        fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      }
       const fd = fs.openSync(
         path.join(dir, `${safe}.txt`),
         fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND | (fs.constants.O_NOFOLLOW ?? 0),
         0o600,
       );
       try {
+        const fileStat = fs.fstatSync(fd);
+        if (
+          !fileStat.isFile() ||
+          fileStat.nlink !== 1 ||
+          (uid !== null && fileStat.uid !== uid)
+        ) {
+          throw new Error(
+            `MAIL_DEV_DIR '${dir}' holds a file that is not a single-link owned regular file — refusing to write auth mail there`,
+          );
+        }
+        fs.fchmodSync(fd, 0o600);
         fs.writeSync(
           fd,
           `Subject: ${subject}\n${replyTo ? `Reply-To: ${replyTo}\n` : ""}${text}\n\n---\n`,

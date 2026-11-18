@@ -91,6 +91,13 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
           // grant and feedback rows.
           await scrubOperatorReferencesTx(tx, id);
           await tx.user.delete({ where: { id: id } });
+          // LAST, after every write (pass 63). The early re-proof in lockRows
+          // ran before the storage sweep, which can take seconds; an erasure of
+          // THIS operator that commits during it must roll the row deletes back,
+          // and a plain read here would not see an erasure that is still in
+          // flight (assertAdminActorTx's FOR KEY SHARE makes it wait). Same
+          // final-state rule the other admin writes already use.
+          await assertAdminActorTx(tx, actor);
         },
       },
       {
