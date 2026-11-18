@@ -351,6 +351,58 @@ export async function authMailBudgetAvailable(kind: AuthMailKind): Promise<boole
   return r.ok;
 }
 
+// Work that must run AFTER the HTTP response, but is still real work (pass 40's
+// forgot-password timing fix: the reservation, token rotation and send moved off
+// the response path so the two branches cannot be told apart by their duration).
+//
+// Tracking it gives tests a deterministic way to wait for in-flight work instead
+// of sleeping: a previous test's detached reservation used to land after the next
+// test's `clearResetMailBudget()`, repopulate the bucket and make a later peek
+// answer "cannot-send-mail" (the pass-40 flake seen on CI). Production behaviour
+// is unchanged — the task already catches and reports its own failures.
+const afterResponseWork = new Set<Promise<unknown>>();
+
+export function runAfterResponse(task: () => Promise<void>): void {
+  // A hung downstream (Redis retry loop, SMTP black hole) would otherwise pin one settled-never
+  // promise per request for the process lifetime; past the cap the task still runs, it is only
+  // unobservable to the test hook.
+  if (afterResponseWork.size >= 1_000) {
+    void task().catch(() => {});
+    return;
+  }
+  let p: Promise<unknown> | null = null;
+  p = task()
+    .catch(() => {})
+    .finally(() => {
+      if (p) afterResponseWork.delete(p);
+    });
+  afterResponseWork.add(p);
+}
+
+/** Test hook: how many detached post-response tasks are still in flight. */
+export function _pendingAfterResponseWork(): number {
+  return afterResponseWork.size;
+}
+
+/**
+ * Test hook: wait (bounded) for detached post-response tasks to settle.
+ *
+ * Bounded on purpose: a test can mock one of the task's steps to never resolve
+ * (pass 40 pins that the response does not wait for `createToken`, and its mock
+ * returns a promise that never settles). The budget reservation is the FIRST
+ * step of the task, so giving it a moment to land and then clearing the bucket
+ * is enough — a flush that insisted on completion would hang the suite.
+ */
+export async function _awaitAfterResponseWork(timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (afterResponseWork.size > 0 && Date.now() < deadline) {
+    await Promise.race([
+      Promise.allSettled([...afterResponseWork]),
+      new Promise((resolve) => setTimeout(resolve, Math.max(1, Math.min(deadline - Date.now(), 100)))),
+    ]);
+  }
+}
+
 // Reserve one slot in a stream's hourly budget. False means "do not send":
 // check this BEFORE creating the token a mail would carry, so a suppressed send
 // cannot invalidate a link the user already has.

@@ -3,7 +3,12 @@ import { enforceRateLimit, errorResponse, fail, ok, parseJsonBody, readBodyCappe
 import { rateLimit } from "@/lib/rate-limit";
 import { prisma } from "@/lib/prisma";
 import { createToken } from "@/lib/tokens";
-import { sendResetPasswordEmail, reserveAuthMailSend, authMailBudgetAvailable } from "@/lib/mail";
+import {
+  sendResetPasswordEmail,
+  reserveAuthMailSend,
+  authMailBudgetAvailable,
+  runAfterResponse,
+} from "@/lib/mail";
 import { captureError } from "@/lib/observability";
 
 const schema = z.object({ email: z.string().email().max(120) });
@@ -71,7 +76,7 @@ export async function POST(req: Request) {
       // had. It is reported rather than swallowed, because the rotation that
       // never happens is invisible otherwise and the client can request another
       // link.
-      void (async () => {
+      runAfterResponse(async () => {
         try {
           if (!(await reserveAuthMailSend("reset"))) {
             captureError(new Error("forgot-password lost the reset-mail reservation race after the pre-check"), {
@@ -84,7 +89,7 @@ export async function POST(req: Request) {
         } catch (e) {
           captureError(e, { scope: "forgot-password-rotate" });
         }
-      })();
+      });
     }
     return ok({ sent: true });
   } catch (e) {

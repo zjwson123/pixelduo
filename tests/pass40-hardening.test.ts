@@ -42,7 +42,7 @@ vi.mock("../lib/tokens", async (importOriginal) => {
 
 const { POST: forgotPOST } = await import("../app/api/auth/forgot-password/route");
 const { prisma } = await import("../lib/prisma");
-const { authMailBudgetAvailable } = await import("../lib/mail");
+const { authMailBudgetAvailable, _awaitAfterResponseWork } = await import("../lib/mail");
 const { _resetLimiterForTests } = await import("../lib/rate-limit");
 
 const stamp = `${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
@@ -58,6 +58,12 @@ function forgotReq(email: string, ip = `198.18.${(process.pid % 200) + 1}.${(ipS
 }
 
 async function clearResetMailBudget() {
+  // A previous test's post-response work (reserve + rotate + send) runs after its HTTP response
+  // returned. Let it land before clearing, or its reservation repopulates the bucket we just
+  // cleared and a later budget peek answers 400 "cannot-send-mail" (the pass-40 flake on CI).
+  // Bounded: this file mocks createToken to never resolve (the response must not wait for it), so
+  // the task cannot settle; its reservation is the first step and lands well inside the bound.
+  await _awaitAfterResponseWork(1_000);
   if (redis) await redis.del("rl:authmail:reset");
 }
 
