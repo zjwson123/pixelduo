@@ -43,6 +43,32 @@ export function authCookiePrefix(): string {
   return secureAuthCookies() ? "__Host-" : "";
 }
 
+// Whether next-auth will accept a callbackUrl value at all.
+//
+// This mirrors `isValidHttpUrl` in next-auth/core/lib/assert.js, and the mirror
+// has to be exact: assertConfig validates BOTH the `callbackUrl` query parameter
+// and the callback-url cookie on EVERY /api/auth/* request, before the CSRF
+// token and before any callback we define — so a value it rejects becomes a
+// 500 "There is a problem with the server configuration", not something the
+// redirect callback below can rescue (pass 64). The rule: a value starting with
+// "/" resolves against the deployment base; anything else must parse as a URL
+// on its own and carry an http(s) scheme. `//host/x` counts as relative here
+// because next-auth treats it that way; our redirect callback is what refuses a
+// foreign origin later.
+export function authCallbackUrlAcceptable(raw: string, base: string): boolean {
+  try {
+    const parsed = new URL(raw, raw.startsWith("/") ? base : undefined);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+/** The one cookie name whose value next-auth's assertConfig validates. */
+export function authCallbackCookieName(): string {
+  return authCookies().callbackUrl.name;
+}
+
 export interface AuthCookieOption {
   name: string;
   options: {

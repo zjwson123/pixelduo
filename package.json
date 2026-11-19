@@ -55,7 +55,8 @@
     "@sentry/bundler-plugins": {
       "glob": "^14.0.3"
     },
-    "qs": "^6.17.0"
+    "qs": "^6.17.0",
+    "deepmerge-ts": "^8.0.2"
   },
   "allowScripts": {
     "@prisma/client@6.16.2": true,

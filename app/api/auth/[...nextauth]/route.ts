@@ -1,8 +1,10 @@
 import NextAuth from "next-auth";
 import { NextRequest } from "next/server";
 import { authOptions } from "@/lib/auth";
-import { fail, enforceRateLimit, readBodyCapped, tooLarge, refuseNul } from "@/lib/api";
+import { ApiError, fail, enforceRateLimit, readBodyCapped, tooLarge, refuseNul } from "@/lib/api";
 import { envLimit } from "@/lib/rate-limit";
+import { authCallbackCookieName, authCallbackUrlAcceptable, secureAuthCookies } from "@/lib/auth-cookies";
+import { siteBase } from "@/lib/site";
 
 const handler = NextAuth(authOptions);
 
@@ -94,6 +96,86 @@ async function decodedNextAuth(ctx: Parameters<typeof handler>[1]): Promise<stri
   return (await params)?.nextauth;
 }
 
+// next-auth's assertConfig validates a `callbackUrl` it cannot parse into a
+// 500 — "There is a problem with the server configuration" — and it does so
+// BEFORE the CSRF token, the session and any callback we define (pass 64).
+// Pass 41 added a same-origin-only redirect callback, but assertConfig runs at
+// a layer the callback cannot reach: its test exercised the callback directly
+// and never the endpoint, so the anonymous 500 stayed live. A GET of
+// `/api/auth/session?callbackUrl=foo` answered 500 from an <img> tag, one log
+// line per request, and `javascript:`/`https://` (no host) behaved the same.
+//
+// The value comes from two places and they need different answers:
+//   - the QUERY STRING is this request's input. A malformed one is client
+//     garbage, so it is a 400 before next-auth looks at it. Every duplicate is
+//     checked: next-auth reads the LAST one (`Object.fromEntries`), while
+//     searchParams.get() returns the FIRST, so checking only the first would
+//     leave `?callbackUrl=/studio&callbackUrl=foo` answering the 500 again.
+//   - the COOKIE is state, not input. Refusing every auth request while it is
+//     bad would lock the browser out of sign-in entirely, with no in-app way
+//     to clear it — and the prefix does not protect the name: `__Host-`
+//     forbids Domain but not PORT, so another service on this host can set it.
+//     It is cleared here and the caller retries once.
+function authCallbackUrlRefusal(req: NextRequest | Request) {
+  const base = siteBase();
+  // `new URL(req.url)`, not req.nextUrl: the wrapper is also invoked directly
+  // (tests, scripts) with a plain Request, which has no nextUrl — that turned
+  // the guard itself into a TypeError.
+  // Empty is falsy in next-auth's own guard (`callbackUrlParam && …`), so it is
+  // ignored rather than refused — mirror that instead of 400-ing a harmless
+  // `?callbackUrl=`.
+  const badQuery = new URL(req.url).searchParams
+    .getAll("callbackUrl")
+    .some((value) => value !== "" && !authCallbackUrlAcceptable(value, base));
+  const cookieName = authCallbackCookieName();
+  const badCookies = callbackCookieValues(req, cookieName).filter(
+    (value) => value !== "" && !authCallbackUrlAcceptable(value, base),
+  );
+  if (!badQuery && badCookies.length === 0) return null;
+  const refused = fail(
+    new ApiError(
+      400,
+      badQuery
+        ? "invalid-input: callbackUrl is not a valid URL"
+        : "invalid-input: the sign-in callback cookie was invalid and has been cleared — retry the sign-in",
+    ),
+  );
+  // The browser may have sent several copies of the name; one Set-Cookie with
+  // an expired value clears the name for all of them.
+  if (badCookies.length > 0) {
+    refused.cookies.set(cookieName, "", {
+      maxAge: 0,
+      path: "/",
+      httpOnly: true,
+      sameSite: "lax",
+      secure: secureAuthCookies(),
+    });
+  }
+  return refused;
+}
+
+// The values of one cookie, matching what next-auth itself will read.
+//
+// A NextRequest parses the Cookie header for us (RequestCookies, the same
+// `cookie` package next-auth's adapter uses). A plain Request — the tests call
+// the exported handler directly — has no `.cookies`, so the header is parsed
+// here; duplicates are kept (a browser may send several of one name and
+// next-auth's Object.fromEntries keeps the last).
+function callbackCookieValues(req: NextRequest | Request, name: string): string[] {
+  const cookies = (req as NextRequest).cookies;
+  if (cookies) {
+    return cookies.getAll().filter((c) => c.name === name).map((c) => c.value);
+  }
+  const header = req.headers.get("cookie") ?? "";
+  const values: string[] = [];
+  for (const part of header.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq < 0 || part.slice(0, eq).trim() !== name) continue;
+    values.push(part.slice(eq + 1).trim());
+  }
+  return values;
+}
+
 // Per-IP cap on ALL NextAuth endpoints (credentials login, CSRF/session
 // fetches, OAuth hops). The per-account lockout (lib/login-guard.ts) stops
 // targeted brute force, but without this one IP can password-spray thousands
@@ -126,6 +208,10 @@ async function limited(req: NextRequest, ctx: Parameters<typeof handler>[1]) {
   } catch (e) {
     return fail(e);
   }
+  // Before delegation, because assertConfig would turn an unparsable value
+  // into a 500 (see authCallbackUrlRefusal).
+  const callbackRefusal = authCallbackUrlRefusal(req);
+  if (callbackRefusal) return callbackRefusal;
   if (isOAuthCallback(nextauth, new URL(req.url).pathname)) {
     const oauth = await enforceRateLimit(
       req,

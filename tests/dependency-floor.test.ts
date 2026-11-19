@@ -83,10 +83,24 @@ const FLOORS: Record<string, string> = {
  *   glob 3.0.0 - 14.0.1 GHSA-3g3m-2fjr-6pw4 — the patched 14.0.2 also pulls
  *                       minimatch ^11.0.2, which clears GHSA-g3hv-75wg-m249
  *                       (minimatch < 11.0.1) transitively.
+ *   deepmerge-ts <8.0.0 GHSA-ggr8-5vv4-36mx — stack exhaustion when merging
+ *                       recursive object graphs (CWE-674). Reached through
+ *                       @prisma/config, which the Prisma CLI loads to read a
+ *                       prisma.config.ts. That package is a DEV dependency, so
+ *                       `npm audit --omit=dev` cannot see it — but the WORKER
+ *                       image ships the Prisma CLI (the migrate service runs it),
+ *                       which is exactly the pass-49 mismatch between "the
+ *                       lockfile's production scope" and "what the artifact
+ *                       carries". The merge input is local config, so this is
+ *                       artifact hygiene rather than a remote path, and the
+ *                       override is verified against the CLI (`prisma validate`
+ *                       + `migrate status` + the suite's own migrate deploy):
+ *                       v8 exports the same `deepmerge` the config loader calls.
  */
 const TRANSITIVE_FLOORS: Record<string, string> = {
   qs: "6.17.0",
   glob: "14.0.2",
+  "deepmerge-ts": "8.0.0",
 };
 
 /**

@@ -61,3 +61,44 @@ test.describe("foreign browser mutations", () => {
     expect(res.status()).toBe(401);
   });
 });
+
+// Pass 64: next-auth's assertConfig validates `callbackUrl` (query and cookie)
+// before CSRF, the session and our redirect callback, and answers a 500
+// "There is a problem with the server configuration" for anything it cannot
+// parse — anonymously, from a GET an <img> tag can send. This is the real
+// next-auth path (unit tests mock the handler): the wrapper must refuse first,
+// and a poisoned cookie must be cleared rather than failing every auth request
+// for the life of the browser session.
+test.describe("next-auth callbackUrl", () => {
+  test("a malformed callbackUrl is a client error, not next-auth's 500", async ({ request }) => {
+    for (const value of ["foo", "javascript:alert(1)", "https://"]) {
+      const res = await request.get(`/api/auth/session?callbackUrl=${encodeURIComponent(value)}`, {
+        failOnStatusCode: false,
+      });
+      expect(res.status(), value).toBe(400);
+      const body = (await res.json()) as { ok: boolean; error: string };
+      expect(body.ok, value).toBe(false);
+      expect(body.error, value).toContain("invalid-input");
+    }
+    // Duplicates: next-auth reads the last value, so the first cannot be the
+    // one that is checked.
+    const dup = await request.get("/api/auth/session?callbackUrl=%2Fstudio&callbackUrl=foo", {
+      failOnStatusCode: false,
+    });
+    expect(dup.status()).toBe(400);
+  });
+
+  test("a poisoned callback-url cookie is cleared instead of bricking auth", async ({ request }) => {
+    // All three spellings the app can encounter; the configured one is the only
+    // one the wrapper checks, and it is what must be cleared.
+    const res = await request.get("/api/auth/session", {
+      headers: {
+        cookie:
+          "__Host-next-auth.callback-url=foo; __Secure-next-auth.callback-url=foo; next-auth.callback-url=foo",
+      },
+      failOnStatusCode: false,
+    });
+    expect(res.status()).toBe(400);
+    expect(res.headers()["set-cookie"] ?? "").toContain("callback-url=");
+  });
+});
