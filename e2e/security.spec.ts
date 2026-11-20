@@ -102,3 +102,20 @@ test.describe("next-auth callbackUrl", () => {
     expect(res.headers()["set-cookie"] ?? "").toContain("callback-url=");
   });
 });
+
+// Pass 65: Next's internal `/:path+/` 308 is resolved after the headers() rules
+// and discards them, so a trailing-slash token link answered a
+// heuristically-cacheable redirect whose Location carried the live single-use
+// token. `skipTrailingSlashRedirect` makes the page answer at the slash URL,
+// where the existing no-store rule (its regex already accepts the slash)
+// applies. This must be the built server: the redirect is routing, not a page.
+test.describe("token pages at a trailing slash", () => {
+  test("answer directly with no-store instead of redirecting the token", async ({ request }) => {
+    for (const path of ["/reset-password/?token=e2e-token", "/verify-email/?token=e2e-token"]) {
+      const res = await request.get(path, { failOnStatusCode: false, maxRedirects: 0 });
+      expect(res.status(), path).toBe(200);
+      expect(res.headers()["cache-control"], path).toContain("no-store");
+      expect(res.headers()["location"], path).toBeUndefined();
+    }
+  });
+});

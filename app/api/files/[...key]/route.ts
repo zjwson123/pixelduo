@@ -167,10 +167,43 @@ export async function GET(req: Request, { params }: { params: Promise<{ key: str
   // and handed to the response body, which releases it on completion, cancel,
   // read error or the idle deadline. Any path that does not hand it over must
   // release it here or in the catch.
-  let releaseSlot: (() => void) | null = null;
+  // A state object rather than a bare `let`: TypeScript's control-flow
+  // analysis cannot see an assignment made inside a closure and would narrow a
+  // bare binding to `null` at its call sites (`never` on the release call).
+  const heldSlot: { release: (() => void) | null } = { release: null };
+  const releaseHeldSlot = (): void => {
+    const release = heldSlot.release;
+    heldSlot.release = null;
+    release?.();
+  };
   let slot!: () => void;
   let range: { start: number; end: number } | null = null;
   let total: number | undefined;
+  // Both credential branches above assign uid, but a mutable binding is not
+  // narrowed inside a callback; capture the non-null owner once for the helper.
+  const owner = uid as string;
+  // One slot for EVERY storage operation below, metadata included (pass 65).
+  //
+  // HEAD and the Range size lookup used to run before this point, so a single
+  // account could issue 300 concurrent HEADs (or Range requests that all did
+  // the size call before the 64-slot per-owner cap refused them) and queue 300
+  // HeadObjects on the shared S3 agent — 192 sockets, 30s request timeout.
+  // That is exactly the pool-pinning outage pass 47/52 closed for bodies; the
+  // metadata half was left outside the cap. A refusal is the same retryable
+  // 429, before any storage call.
+  const takeStreamSlot = (): NextResponse | null => {
+    if (heldSlot.release) return null;
+    const acquired = acquireFileStreamSlot(owner);
+    if (!acquired) {
+      return errorResponse(
+        { ok: false, error: "too-many-streams" },
+        { status: 429, headers: { "Retry-After": "5" } },
+      );
+    }
+    heldSlot.release = acquired;
+    slot = acquired;
+    return null;
+  };
   try {
     // 1. User-owned generated image/video
     const image = await prisma.image.findFirst({ where: { userId: uid, url: key } });
@@ -200,10 +233,16 @@ export async function GET(req: Request, { params }: { params: Promise<{ key: str
     // lookup, so the ordinary image/thumbnail path is unchanged.
     const rangeHeader = req.headers.get("range");
     if (rangeHeader) {
+      const denied = takeStreamSlot();
+      if (denied) return denied;
       total = (await getStorage().size(key)) ?? undefined;
-      if (total === undefined) return new NextResponse("not found", { status: 404, headers: NO_STORE });
+      if (total === undefined) {
+        releaseHeldSlot();
+        return new NextResponse("not found", { status: 404, headers: NO_STORE });
+      }
       const parsed = parseRange(rangeHeader, total);
       if (parsed === "unsatisfiable") {
+        releaseHeldSlot();
         return new NextResponse("range not satisfiable", {
           status: 416,
           headers: { ...NO_STORE, "Content-Range": `bytes */${total}`, "Accept-Ranges": "bytes" },
@@ -222,10 +261,15 @@ export async function GET(req: Request, { params }: { params: Promise<{ key: str
     // account (its own gallery key, or a Template.img key listed by
     // /api/templates) pinned the whole pool: every media GET timed out and
     // /api/health's storage probe answered 503, so the container was reported
-    // unhealthy for every tenant. Metadata only, no slot and no body: the size
-    // is the one already fetched for a Range request, or a single HeadObject.
+    // unhealthy for every tenant. Metadata only, no BODY: the size is the one
+    // already fetched for a Range request, or a single HeadObject — but the
+    // metadata call itself still occupies an S3 socket, so it takes the same
+    // slot as a stream (pass 65) and gives it back before the response.
     if (req.method === "HEAD") {
+      const denied = takeStreamSlot();
+      if (denied) return denied;
       const size = total ?? (await getStorage().size(key)) ?? undefined;
+      releaseHeldSlot();
       if (size === undefined) return new NextResponse("not found", { status: 404, headers: NO_STORE });
       const headHeaders: Record<string, string> = {
         // Extension-derived: sniffing needs the bytes, and reading the first
@@ -256,20 +300,13 @@ export async function GET(req: Request, { params }: { params: Promise<{ key: str
     // flight, so an account that sends requests and never reads the bodies
     // could hold both until the process runs out of descriptors. The slot is
     // per account and per process; a refusal is a retryable 429 before any
-    // storage work happens.
-    const acquired = acquireFileStreamSlot(uid);
-    if (!acquired) {
-      return errorResponse(
-        { ok: false, error: "too-many-streams" },
-        { status: 429, headers: { "Retry-After": "5" } },
-      );
-    }
-    releaseSlot = acquired;
-    slot = acquired;
+    // storage work happens. A Range request already holds one from the size
+    // lookup above, so takeStreamSlot() is a no-op there.
+    const denied = takeStreamSlot();
+    if (denied) return denied;
     const streamed = await getStorage().getStream(key, range ?? undefined);
     if (!streamed) {
-      releaseSlot();
-      releaseSlot = null;
+      releaseHeldSlot();
       return new NextResponse("not found", { status: 404, headers: NO_STORE });
     }
     obj = streamed;
@@ -277,7 +314,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ key: str
     const first = await reader.read();
     head = first.done ? new Uint8Array(0) : first.value!;
   } catch (e) {
-    releaseSlot?.();
+    releaseHeldSlot();
     return fail(e);
   }
 

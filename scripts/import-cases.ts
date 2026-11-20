@@ -19,6 +19,7 @@ import { getStorage, newStorageKey } from "../lib/storage";
 import { storeContentType, extensionForContentType } from "../lib/media-type";
 import { fetchPublicBuffer } from "../lib/store";
 import { resolveLocalImagesDir, safeCaseFilename } from "./import-case-local";
+import { isSafeCaseImage } from "./import-case-image";
 
 // Largest case image worth storing; also the streaming read cap below.
 const MAX_CASE_BYTES = 25 * 1024 * 1024;
@@ -182,6 +183,16 @@ async function downloadImage(caseId: number, srcPath: string): Promise<string | 
     }
   }
   if (!buf || buf.length > MAX_CASE_BYTES) return null;
+  // Bytes, not just the path, are untrusted here (pass 65): the upstream repo
+  // is third-party, and a Template image is served to every signed-in account
+  // and rendered in every visitor's Explore grid. Require a real raster whose
+  // decoded size is bounded, exactly as the provider-image path does. SVG/HTML
+  // would otherwise be hosted under the app's origin, and a decompression bomb
+  // would be cached client-side for a year.
+  if (!(await isSafeCaseImage(buf))) {
+    console.warn(`[import] skipping case ${caseId}: ${filename} is not a safe raster image`);
+    return null;
+  }
   // Key extension AND recorded type follow the bytes, not the assumption that
   // GitHub serves JPEG. This hardcoded `newStorageKey("jpg")` + "image/jpeg" for
   // whatever arrived, which is one of the ways an object ends up whose

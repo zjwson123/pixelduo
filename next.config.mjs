@@ -5,6 +5,16 @@ const nextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
   output: "standalone",
+  // The two token pages must not be reached through Next's internal
+  // `/:path+/` → `/:path+` 308 (pass 65). That redirect route is resolved
+  // AFTER the headers() rules and its handler returns `resHeaders: null`, so
+  // the no-store rule below — whose regex already accepts a trailing slash —
+  // was silently discarded for `/reset-password/?token=…`, leaving a
+  // heuristically-cacheable 308 whose Location carries a live single-use
+  // token. With this flag the page itself answers at the slash URL (the
+  // filesystem matcher strips one trailing slash before lookup) and the
+  // headers() rule applies. Pinned in e2e/security.spec.ts.
+  skipTrailingSlashRedirect: true,
   // Keep the working tree's non-runtime material out of .next/standalone.
   //
   // `next build` copies part of the tree into the standalone output, and on this

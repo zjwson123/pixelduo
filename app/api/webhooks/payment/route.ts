@@ -513,6 +513,26 @@ export async function POST(req: Request) {
                   "disputeReinstatements" = array_append("disputeReinstatements", ${marker})
               WHERE id = ${order.id} AND NOT (${marker} = ANY("disputeReinstatements"))
             `);
+            // Un-revoking stays a MANUAL decision (it cannot distinguish the
+            // REVOKE rows this dispute caused from an earlier refund's, and a
+            // re-grant must not override a newer plan), but a silent no-op is
+            // not acceptable: if the order was already promoted to `refunded`,
+            // the customer's credits and paid tier are gone while the merchant
+            // has the money back, every retry is deduped, and no admin screen
+            // reads PaymentEvent. The Paddle reversal below got this operator
+            // alert in pass 34; the Stripe reinstatement half did not (pass 65).
+            const state = await tx.order.findUnique({ where: { id: order.id }, select: { status: true } });
+            if (state?.status === "refunded") {
+              const msg =
+                "dispute-reinstated: funds returned to the merchant on an order whose credits/tier were already revoked — the customer holds nothing for money the merchant kept; a manual re-grant is the remedy";
+              console.error(`[webhook] ${msg}`, { orderId: order.id, eventId: event.eventId });
+              captureError(new Error(msg), {
+                scope: "payment",
+                orderId: order.id,
+                eventId: event.eventId,
+                providerOrderId: event.providerOrderId,
+              });
+            }
           }
           // Paddle's per-delivery deltas (positive approvals, negative
           // reversals) keep the marker-guarded accumulation below.

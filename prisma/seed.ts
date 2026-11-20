@@ -1,18 +1,9 @@
 import fs from "fs";
 import path from "path";
 import { PrismaClient } from "@prisma/client";
+import { copyTemplateAssets } from "../scripts/copy-template-assets";
 
 const prisma = new PrismaClient();
-
-// Copy prototype assets into public/templates so the seed can reference them.
-function copyAssets() {
-  const src = path.join(process.cwd(), "designs", "pixelduo", "assets");
-  const dst = path.join(process.cwd(), "public", "templates");
-  fs.mkdirSync(dst, { recursive: true });
-  for (const f of fs.readdirSync(src)) {
-    fs.copyFileSync(path.join(src, f), path.join(dst, f));
-  }
-}
 
 interface SeedTemplate {
   id: string;
@@ -158,7 +149,7 @@ for (const [cat, cfg] of Object.entries(CAT_BASES)) {
 }
 
 async function main() {
-  copyAssets();
+  copyTemplateAssets();
   // Seeding is an UPSERT by default (pass 62). It used to delete every Template
   // row first, so running the documented `npm run db:seed` against a database
   // that also holds imported cases (scripts/import-cases.ts — up to 529 rows

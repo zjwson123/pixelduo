@@ -130,6 +130,42 @@ describe("pass 51 — HEAD never opens a storage stream", () => {
     expect(getFileStreamLimiter().active).toBe(0);
   });
 
+  // Pass 65: the metadata half of the route had no concurrency cap. HEAD and
+  // the Range size lookup ran BEFORE the slot was acquired, so 300 concurrent
+  // metadata requests from one account queued 300 HeadObjects on the shared S3
+  // agent (192 sockets) — the same pool-pinning outage the body cap prevents.
+  it("HEAD and Range metadata calls are bounded by the stream cap", async () => {
+    _resetFileStreamLimiterForTests();
+    calls.streams = 0;
+    calls.sizes = 0;
+    const limiter = getFileStreamLimiter();
+    const releases: Array<() => void> = [];
+    // Fill the PROCESS ceiling across several owners; a single filler owner is
+    // capped at 64 by the fair-share rules and would leave room for the victim.
+    for (let owner = 0; limiter.active < 128 && owner < 32; owner += 1) {
+      for (let i = 0; i < 64 && limiter.active < 128; i += 1) {
+        const acquired = limiter.tryAcquire(`filler-${owner}`);
+        if (!acquired) break;
+        releases.push(acquired);
+      }
+    }
+    expect(limiter.active).toBe(128);
+    try {
+      const head = await GET(...filesRequest("img/abc.png", { method: "HEAD" }));
+      expect(head.status).toBe(429);
+      const ranged = await GET(
+        ...filesRequest("img/abc.png", { headers: { range: "bytes=0-99" } }),
+      );
+      expect(ranged.status).toBe(429);
+      // Neither refusal reached the storage driver.
+      expect(calls.sizes).toBe(0);
+      expect(calls.streams).toBe(0);
+    } finally {
+      releases.forEach((release) => release());
+    }
+    expect(limiter.active).toBe(0);
+  });
+
   it("admin preview HEAD answers metadata without a stream", async () => {
     _resetFileStreamLimiterForTests();
     calls.streams = 0;

@@ -969,9 +969,15 @@ export async function completeJob(jobId: string, images: JobImage[], worker: str
     // than optional on purpose: an omitted argument silently restoring this race
     // is the shape this file's pass-25/31/34/36 comments keep warning about, and
     // the type checker now names every call site instead.
+    // The delivery INSTANT is a database stamp, like every other terminal
+    // timestamp (`failJob` below, `paidAt`, `createdAt`, the moderation budget
+    // this row is read by). A worker whose clock lags Postgres used to write
+    // `finishedAt < createdAt` for the same delivered job — the one money-adjacent
+    // stamp the one-clock rule had missed (pass 65).
+    const finishedAt = await dbNow(tx);
     const claim = await tx.job.updateMany({
       where: { id: jobId, status: job.status, worker },
-      data: { status: "done", images: JSON.stringify(images.map((i) => i.url)), error: null, finishedAt: new Date() },
+      data: { status: "done", images: JSON.stringify(images.map((i) => i.url)), error: null, finishedAt },
     });
     if (claim.count !== 1) throw new Error("job-not-runnable");
     for (const img of images) {
