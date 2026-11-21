@@ -203,8 +203,23 @@ export function addBillingMonth(base: Date): Date {
 // transaction with the same expiresAt and the same (millisecond) createdAt, and
 // on a full tie the ordering was left to the planner — two statements could
 // then lock the same pair in opposite orders and deadlock.
+//
+// ROLLOVER before SUBSCRIPTION when the expiry TIES (pass 66). The two grants
+// minted by a renewal share expiresAt and createdAt, so the old tiebreak was
+// `id` — an opaque cuid whose order depends on generation, not on meaning. It
+// decided WHICH LOT got spent: drawing the SUBSCRIPTION quota first left the
+// carryover untouched to expire (spentNet = full quota, unused = 0, no next
+// carryover), while drawing the carryover first preserved quota and paid 30%
+// of it next cycle. Same customer behaviour, different money, chosen by a
+// random id. The carryover is the lot that cannot be carried again, so it is
+// spent first — the standard non-renewable-first rule, and the direction that
+// matches PRODUCT_OUTLINE's "use 1500 of 2000, 150 lands next month". The rank
+// sits AFTER expiresAt, so an earlier deadline still wins; `id` remains as the
+// final total-order tiebreak.
 const GRANT_LOCK_ORDER = Prisma.sql`ORDER BY CASE WHEN source IN ('SIGNUP_BONUS', 'CHECKIN') THEN 0 ELSE 1 END,
-               "expiresAt" ASC NULLS LAST, "createdAt" ASC, "id" ASC`;
+               "expiresAt" ASC NULLS LAST,
+               CASE WHEN source = 'ROLLOVER' THEN 0 WHEN source = 'SUBSCRIPTION' THEN 1 ELSE 2 END,
+               "createdAt" ASC, "id" ASC`;
 export { GRANT_LOCK_ORDER };
 
 // Credits granted, pre-authed and refunded inside one billing cycle, used to
@@ -525,7 +540,39 @@ async function writeOffExcessTx(
   // transaction's own earlier writes.
   const fresh = await tx.creditGrant.findUnique({ where: { id: grantId }, select: { remaining: true } });
   const current = fresh?.remaining ?? held;
-  if (target >= current) return;
+  // A NEGATIVE `amount` is pre-CHECK corruption, and the CHECK is NOT VALID for
+  // rows that predate it: no value of `remaining` satisfies
+  // `0 <= remaining <= amount`, so EVERY write to such a row aborts the
+  // transaction. The callers pass `cap = row.amount`, which made the
+  // write-off's own update (target = -5) the thing that failed — the account
+  // could not spend, be clawed back, or receive a failed-job refund, and
+  // scripts/repair-credit-invariant.ts computed the same impossible target and
+  // aborted its whole run (pass 66). Repair the amount to 0 in the same write:
+  // a grant that granted a negative number of credits grants none.
+  const repairAmount = cap < 0;
+  const safeTarget = Math.max(0, Math.min(target, Math.max(0, cap)));
+  if (repairAmount && current < 0) {
+    // A negative HOLDING as well as a negative amount cannot be repaired here
+    // without either silently minting credits (0 is above −3, and the row is
+    // the sum the balance must equal) or writing a value the CHECK rejects.
+    // This state is what scripts/repair-credit-invariant.ts is for; it zeroes
+    // both sides and recomputes the balance through the ledger.
+    throw new Error(
+      `negative-grant-row: grant ${grantId} holds ${current} credits against a grant of ${cap} — run scripts/repair-credit-invariant.ts --fix`,
+    );
+  }
+  if (repairAmount && current === 0) {
+    // Zero holding, negative amount: no credit moves, only the impossible
+    // ceiling. No ledger row is needed because the balance is unchanged.
+    await tx.creditGrant.update({ where: { id: grantId }, data: { amount: 0, remaining: 0 } });
+    return;
+  }
+  if (safeTarget >= current) {
+    if (repairAmount) {
+      await tx.creditGrant.update({ where: { id: grantId }, data: { amount: 0, remaining: current } });
+    }
+    return;
+  }
   // The balance comes down by exactly as much as the row does, or
   // credits == SUM(remaining) breaks in the other direction. Reading the column
   // (instead of assuming it equals the rows' sum) keeps the ledger arithmetic
@@ -544,7 +591,13 @@ async function writeOffExcessTx(
   // self-healing retry.
   const user = await tx.user.findUnique({ where: { id: userId }, select: { credits: true } });
   if (!user) throw new Error("user-not-found");
-  await tx.creditGrant.update({ where: { id: grantId }, data: { remaining: target } });
+  await tx.creditGrant.update({
+    where: { id: grantId },
+    // `amount` is repaired in the same statement when it was negative: writing
+    // only `remaining` would leave the row violating the CHECK, i.e. it would
+    // fail again on the next touch.
+    data: repairAmount ? { remaining: safeTarget, amount: 0 } : { remaining: safeTarget },
+  });
   // The clamp's sign must come from the write-off, not from a negative
   // balance (pass 63). `Math.max(target - current, -user.credits)` with
   // credits < 0 produced a POSITIVE delta: writeOffExcessTx would then MINT
@@ -556,7 +609,7 @@ async function writeOffExcessTx(
   // balance the delta is 0, addCreditsTx's own balance check then refuses the
   // transaction, and the drift is left to scripts/repair-credit-invariant.ts
   // rather than papered over with new credits.
-  const delta = Math.max(target - current, -Math.max(0, user.credits));
+  const delta = Math.max(safeTarget - current, -Math.max(0, user.credits));
   await addCreditsTx(
     tx,
     userId,
@@ -567,7 +620,7 @@ async function writeOffExcessTx(
     `credit invariant repair on touch: grant ${grantId} held ${current} credits for a grant of ${cap}, and a row above its own amount cannot be written any more (CHECK) — the unbacked excess was written off (${reason})`,
   );
   console.warn(
-    `[ledger] wrote off ${current - target} unbacked credit(s) from grant ${grantId} (held ${current} of ${cap}) for user ${userId} — ${reason}`,
+    `[ledger] wrote off ${current - safeTarget} unbacked credit(s) from grant ${grantId} (held ${current} of ${cap}${repairAmount ? ", negative amount repaired to 0" : ""}) for user ${userId} — ${reason}`,
   );
 }
 

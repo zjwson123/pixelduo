@@ -24,7 +24,7 @@
 
 ## 您的权利（GDPR / PIPL）
 
-- 访问与导出：`POST /api/account/export` 可导出您的全部数据（含登录状态下提交的留言）
+- 访问与导出：`POST /api/account/export` 可导出您的全部数据（含登录状态下提交的留言）。单张表超过 5000 行时响应会返回 `truncated: true` 和 `truncatedTables` 指明被截断的表，其余部分可联系 support@pixelduo.ai 由运营导出
 - 删除：`POST /api/account/delete`（确认后删除账户及相关数据，留言随账号一并删除）
 - 更正、撤回同意、投诉：联系 support@pixelduo.ai（上线前设置邮箱）
 

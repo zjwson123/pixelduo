@@ -39,6 +39,15 @@ export function isPermanentProviderError(msg: string): boolean {
     // sibling was not, so a gateway answering with a >40MB b64_json quietly
     // bought the same generation three times and still delivered nothing.
     /image-too-large/i.test(msg) ||
+    // A 2xx whose BODY cannot be used (pass 66). The create call succeeded and
+    // the provider billed it; retrying re-POSTs /images/generations (or creates
+    // a second video task whose id is then lost) and pays again for the same
+    // unusable answer. The status was already checked before the body was read,
+    // so these messages can only come from a 2xx with a broken payload: HTML or
+    // truncated JSON, `{"data":[]}`, or fewer images than requested. All are
+    // properties of the RESPONSE, exactly like the size refusals above.
+    /returned no b64_json|returned no images|returned \d+ of \d+ images/i.test(msg) ||
+    /unexpected token|unexpected end of json|is not valid json|json\.parse/i.test(msg) ||
     /fetch failed|blocked-internal|blocked-port|invalid-url|download-too-large|too-many-redirects|download failed/i.test(
       msg,
     )

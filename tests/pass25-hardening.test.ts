@@ -424,9 +424,12 @@ describe("pass 25 — storage calls carry a deadline", () => {
       _resetStorageForTests();
 
       const started = Date.now();
-      const out = await getStorage().get("probe.png");
+      // Since pass 66 a timeout REJECTS instead of answering null: null is the
+      // "object does not exist" answer, and the worker treats it as a
+      // permanently missing reference (failing the job and deleting the user's
+      // upload). A black-hole bucket is a fault, and the caller must see one.
+      await expect(getStorage().get("probe.png")).rejects.toThrow();
       const elapsed = Date.now() - started;
-      expect(out).toBeNull();
       // Pre-fix this promise never settled: the assertion below was unreachable
       // and the test died on its own timeout.
       expect(elapsed).toBeLessThan(8_000);

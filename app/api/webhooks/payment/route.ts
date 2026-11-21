@@ -537,16 +537,32 @@ export async function POST(req: Request) {
           // Paddle's per-delivery deltas (positive approvals, negative
           // reversals) keep the marker-guarded accumulation below.
           if (event.refundAmountUsd !== undefined) {
+            const positive = (event.refundAmountUsd ?? 0) >= 0;
             const marker =
               event.refundAdjustmentId === undefined
                 ? null
-                : `${event.refundAdjustmentId}:${event.refundAmountUsd < 0 ? "reversed" : "approved"}`;
+                : `${event.refundAdjustmentId}:${positive ? "approved" : "reversed"}`;
             if (marker) {
+              // A REVERSAL is terminal for this adjustment id, whichever
+              // delivery order arrives (pass 66). Paddle re-sends an approval
+              // under a NEW notification id when the first delivery was not
+              // acked, and a reversal can be processed before that retry: the
+              // direction-suffixed markers deduped duplicates but treated
+              // `approved` and `reversed` as independent, so the late approval
+              // added +X to an accumulator the reversal had already taken -X
+              // from — money the merchant kept counted as returned, and a later
+              // genuine partial then reached the full basis and revoked a
+              // customer who still held the goods. Suppressing the approval
+              // when its reversal marker exists makes the net for one
+              // adjustment at most zero.
+              const reversalMarker = `${event.refundAdjustmentId}:reversed`;
               await tx.$queryRaw(Prisma.sql`
                 UPDATE "Order"
                 SET "refundedAmountUsd" = GREATEST("refundedAmountUsd" + ${event.refundAmountUsd}, 0),
                     "refundedAdjustments" = array_append("refundedAdjustments", ${marker})
-                WHERE id = ${order.id} AND NOT (${marker} = ANY("refundedAdjustments"))
+                WHERE id = ${order.id}
+                  AND NOT (${marker} = ANY("refundedAdjustments"))
+                  AND (${positive} = false OR NOT (${reversalMarker} = ANY("refundedAdjustments")))
               `);
             } else if (event.refundAmountUsd < 0) {
               await tx.$queryRaw(Prisma.sql`

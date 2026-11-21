@@ -283,7 +283,16 @@ export const POLL_INTERVAL_MS = 10_000;
 // over — recoverStuckJobs' 10-minute polling cutoff is the outer bound), which
 // is well inside the 30-minute video budget and far cheaper than an object
 // nobody can reclaim.
-export const POLL_LEASE_MS = 6 * 60_000;
+//
+// 9 minutes, and the number is a SUM, not a guess (pass 66). Phase 2's longest
+// stretch between two extendPollLease calls is `saveRemoteVideo` — poll (30s)
+// then a 120s provider download followed by a 300s S3 PutObject, both inside
+// one call the worker cannot extend around. 6 minutes (360s) was shorter than
+// that 450s worst case, so a peer could claim a LIVE phase-2 job while the
+// original was still uploading: the duplicate download and ffmpeg work the
+// lease exists to prevent. 540s covers the sum with margin and stays under
+// recoverStuckJobs' 10-minute polling cutoff.
+export const POLL_LEASE_MS = 9 * 60_000;
 
 export async function claimNextJob(worker: string) {
   // The DATABASE's clock, not this process's. Every nextAttemptAt this
@@ -622,6 +631,10 @@ export async function failJob(
       // The retry branch above deliberately keeps the checkpoint so the next
       // attempt can resume instead of re-billing the whole batch.
       reclaim.push(...checkpointKeys(job.images));
+      // Superseded keys whose DeleteObject failed while the job was running
+      // (pass 66). Nothing else names them once the checkpoint moved on, so a
+      // terminal failure is the last chance to take them out.
+      reclaim.push(...staleArtifactKeys((job as { staleArtifacts?: unknown }).staleArtifacts));
     }
     return true;
   });
@@ -675,7 +688,7 @@ export const JOB_ABANDONED = "job-abandoned";
 // Deliberately conservative — a checkpoint entry this attempt wrote for a RETRY
 // keeps its object (the next attempt resumes from it), and a key already deleted
 // by failJob's terminal reclaim is simply deleted again.
-export async function reclaimStoredArtifact(jobId: string, key: string): Promise<void> {
+export async function reclaimStoredArtifact(jobId: string, key: string): Promise<boolean> {
   // Both reads below MUST fail closed (pass 41). They answer "does anything
   // still name this key?", and the delete is only safe on a definite NO. The
   // reads used to swallow errors into null/0 — negative answers — so a
@@ -688,7 +701,7 @@ export async function reclaimStoredArtifact(jobId: string, key: string): Promise
   try {
     job = await prisma.job.findUnique({ where: { id: jobId }, select: { images: true } });
   } catch {
-    return;
+    return false;
   }
   if (job) {
     // Two shapes live in this column: checkpoint objects ({ key }) while the job
@@ -697,12 +710,12 @@ export async function reclaimStoredArtifact(jobId: string, key: string): Promise
       const parsed = JSON.parse(job.images ?? "[]") as unknown;
       if (Array.isArray(parsed)) {
         for (const item of parsed) {
-          if (typeof item === "string" && item === key) return;
+          if (typeof item === "string" && item === key) return true;
           if (
             typeof item === "object" && item !== null &&
             (item as { key?: unknown }).key === key
           ) {
-            return;
+            return true;
           }
         }
       }
@@ -715,10 +728,50 @@ export async function reclaimStoredArtifact(jobId: string, key: string): Promise
   try {
     owned = await prisma.image.count({ where: { jobId, url: key } });
   } catch {
-    return;
+    return false;
   }
-  if (owned > 0) return;
-  await getStorage().delete(key).catch(() => undefined);
+  if (owned > 0) return true;
+  try {
+    await getStorage().delete(key);
+    return true;
+  } catch (e) {
+    // The delete faulted. The key is now named by NOTHING — the checkpoint was
+    // overwritten with the superseding key before this call (pass 37's order),
+    // and no Image row points at it — so failing silently orphaned the object
+    // (up to 100 MB) beyond every erasure path. Record it durably before
+    // answering; terminal failure and account erasure both read this column.
+    await recordStaleArtifact(jobId, key).catch((err) => {
+      console.error(
+        `[queue] failed to record stale artifact ${key} for job ${jobId}: ${redactSensitive(
+          err instanceof Error ? err.message : String(err),
+        )}`,
+      );
+      captureError(err, { jobId, staleArtifact: key });
+    });
+    return false;
+  }
+}
+
+/**
+ * Append a superseded key whose deletion failed to Job.staleArtifacts, once.
+ * Raw SQL for an atomic append: read-then-write from two workers can lose one
+ * key, and this is the record that makes an orphan reclaimable. No worker
+ * fence: the caller has already proved the key is named by nothing, and a row
+ * that a peer now holds can still need this fact recorded for erasure.
+ */
+async function recordStaleArtifact(jobId: string, key: string): Promise<void> {
+  await prisma.$executeRaw(Prisma.sql`
+    UPDATE "Job"
+    SET "staleArtifacts" = COALESCE("staleArtifacts", '[]'::jsonb) || to_jsonb(${key}::text)
+    WHERE id = ${jobId}
+      AND NOT (COALESCE("staleArtifacts", '[]'::jsonb) @> to_jsonb(${key}::text))
+  `);
+}
+
+/** String entries of Job.staleArtifacts, tolerant of legacy/NULL shapes. */
+export function staleArtifactKeys(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((k): k is string => typeof k === "string");
 }
 
 // Statuses a job can still be collecting output in.

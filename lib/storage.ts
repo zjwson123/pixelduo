@@ -16,6 +16,26 @@ import {
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { outboundTimeoutMs } from "./runtime-env";
 
+// The SDK's "no such key" shapes, and nothing else: a 404 from GetObject is a
+// missing object whether it is spelled NoSuchKey, NotFound or only a status
+// code (older gateways). Anything without a definite 404 — 403, 5xx, an aborted
+// socket, a clock-skewed response — must propagate to the caller as a fault.
+function isNotFoundError(e: unknown): boolean {
+  if (!e || typeof e !== "object") return false;
+  const err = e as {
+    name?: unknown;
+    Code?: unknown;
+    code?: unknown;
+    $metadata?: { httpStatusCode?: unknown };
+  };
+  const name = typeof err.name === "string" ? err.name : "";
+  const code = typeof err.Code === "string" ? err.Code : typeof err.code === "string" ? err.code : "";
+  if (name === "NoSuchKey" || name === "NotFound" || code === "NoSuchKey" || code === "NotFound") {
+    return true;
+  }
+  return err.$metadata?.httpStatusCode === 404;
+}
+
 export interface StorageStream {
   stream: ReadableStream<Uint8Array>;
   /** Bytes this stream will yield (the range's length when one was asked for). */
@@ -81,8 +101,16 @@ class LocalStorage implements StorageDriver {
     // event loop for every concurrent request in the process.
     try {
       return await fsp.readFile(this.p(key));
-    } catch {
-      return null;
+    } catch (e) {
+      // ONLY a genuinely absent object answers null (pass 66). Swallowing every
+      // error made a transient read fault indistinguishable from "the file is
+      // gone", and the worker treats null as proof: it fails the job as
+      // `ref-image-missing` — a PERMANENT classification — and the terminal
+      // branch then deletes the user's uploaded reference. One EACCES/ENOSPC/
+      // EIO therefore destroyed a paid edit's input and refunded it as if the
+      // customer had never uploaded anything.
+      if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return null;
+      throw e;
     }
   }
 
@@ -248,8 +276,16 @@ class S3Storage implements StorageDriver {
         { abortSignal: AbortSignal.timeout(S3Storage.BODY_DEADLINE_MS) },
       );
       return Buffer.from(await r.Body!.transformToByteArray());
-    } catch {
-      return null;
+    } catch (e) {
+      // Null means the object does not exist, and only that (pass 66). A 503,
+      // a timeout or a throttled request used to answer the same null, and the
+      // worker's ref-image path reads null as a permanently missing input: it
+      // fails the job without retry and its terminal branch deletes the
+      // customer's upload. Re-throwing keeps a transient fault transient (the
+      // worker retries) and stops erasure/cleanup paths from acting on a
+      // negative answer they never received.
+      if (isNotFoundError(e)) return null;
+      throw e;
     }
   }
 

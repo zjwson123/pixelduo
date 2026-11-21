@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { assertAdminActorTx, requireAdmin, requireAdminSession } from "@/lib/admin";
+import { ADMIN_TX_OPTIONS, assertAdminActorTx, requireAdmin, requireAdminSession } from "@/lib/admin";
 import { ok, fail, enforceUserRateLimit, refuseNul, errorResponse } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { getStorage } from "@/lib/storage";
@@ -152,10 +152,14 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
     // actor who was no longer authorized. The blob is already gone by then;
     // the row is what carries the operator's name, and it now rolls back so a
     // still-authorized operator can re-run the takedown.
+    // Same wait as the role/credits routes (pass 66): the re-proof blocks on a
+    // User row that an in-flight erasure of the ACTOR may hold for up to 60s.
+    // Prisma's 5s default turned that documented wait into P2028 — a masked 500
+    // and an incident — after the blob had already been deleted.
     const gone = await prisma.$transaction(async (tx) => {
       await assertAdminActorTx(tx, actor);
       return tx.image.deleteMany({ where: { id: image.id } });
-    });
+    }, ADMIN_TX_OPTIONS);
     if (gone.count === 0) return fail(new Error("image-not-found"));
     return ok({ deleted: true });
   } catch (e) {

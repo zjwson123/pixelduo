@@ -61,7 +61,13 @@ function modelverseSource(): { key: string; baseUrl: string } | null {
   const key = gw?.api_keys?.find((k) => k.length > 0);
   if (!key) return null;
   const raw = gw?.base_url?.trim();
-  if (!raw) return { key, baseUrl: MODELVERSE_DEFAULT_BASE };
+  // A gateway key with NO endpoint used to fall back to the vendor's host, i.e.
+  // the relay's credential was sent to ModelVerse itself — a credential
+  // disclosure to the wrong party (and a request the vendor rejects). Fail
+  // closed instead (pass 66): only an env-supplied vendor key may go to the
+  // vendor's default host, which is the rule the comment above states for the
+  // env case and the pass-37 pairing work established.
+  if (!raw) return null;
   try {
     const url = new URL(raw);
     if (url.protocol !== "https:" && url.protocol !== "http:") return null;
@@ -109,7 +115,16 @@ function arkSource(): { key: string; baseUrl: string } | null {
   const gw = loadCcProxyConfig()?.gateways?.ark;
   const key = gw?.api_keys?.find((k) => k.length > 0);
   if (!key) return null;
-  return { key, baseUrl: gw?.base_url && gw.base_url.includes("images") ? gw.base_url : ARK_DEFAULT_BASE };
+  const raw = gw?.base_url?.trim();
+  // A gateway key may only travel to the gateway's own image endpoint. The old
+  // fallback sent it to Ark's host when the gateway's base_url was absent or
+  // was the ark gateway's usual CHAT URL — the relay's credential disclosed to
+  // the vendor, and a generation payload aimed at a host that never issued that
+  // key (pass 66). Fail closed: an operator using a relay must configure an
+  // image-capable base_url, and an operator using the vendor sets
+  // ARK_IMAGE_API_KEY.
+  if (!raw || !raw.includes("images")) return null;
+  return { key, baseUrl: raw };
 }
 
 export function getArkKey(): string | undefined {
@@ -142,7 +157,10 @@ function arkVideoSource(): { key: string; tasksUrl: string } | null {
   const gw = loadCcProxyConfig()?.gateways?.ark;
   const key = gw?.api_keys?.find((k) => k.length > 0);
   if (!key) return null;
-  if (!gw?.base_url) return { key, tasksUrl: ARK_TASKS_DEFAULT };
+  // No endpoint on a gateway-supplied key: fail closed, not "borrow the
+  // vendor's host" (pass 66) — the key belongs to the relay, and Ark never
+  // issued it.
+  if (!gw?.base_url) return null;
   try {
     return { key, tasksUrl: `${new URL(gw.base_url).origin}${ARK_TASKS_PATH}` };
   } catch {
@@ -166,9 +184,10 @@ function aliyunSource(): { key: string; base: string } | null {
   const gw = loadCcProxyConfig()?.gateways?.aliyun;
   const key = gw?.api_keys?.find((k) => k.length > 0);
   if (!key) return null;
-  const base = gw?.base_url
-    ? gw.base_url.replace(/\/compatible-mode\/v1$/, "").replace(/\/v1$/, "")
-    : DASHSCOPE_DEFAULT_BASE;
+  // Same rule: a relay key with no base_url must not travel to DashScope's own
+  // host (pass 66).
+  if (!gw?.base_url) return null;
+  const base = gw.base_url.replace(/\/compatible-mode\/v1$/, "").replace(/\/v1$/, "");
   return { key, base };
 }
 

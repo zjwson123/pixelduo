@@ -2,6 +2,7 @@ import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import { ApiError, enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, requireVerifiedUser, requireVerifiedUserSession, zodMessage, tooLarge } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
+import { ADMIN_TX_OPTIONS } from "@/lib/admin-guard";
 import { passwordReauthRefusal } from "@/lib/auth";
 import { captureError } from "@/lib/observability";
 import { createApiKey, pruneRevokedApiKeys } from "@/lib/apikey";
@@ -166,7 +167,13 @@ export async function POST(req: Request) {
         throw new Error("too-many-keys: revoke one before creating another");
       }
       return createApiKey(userId, body.name ?? "default", fresh.sessionVersion, tx);
-    });
+      // ADMIN_TX_OPTIONS is a LOCK WAIT budget, not an admin concern (pass 66):
+      // the FOR KEY SHARE above is documented to wait for an in-flight erasure
+      // of this same account (up to 60s). With Prisma's 5s default the wait it
+      // counts on cannot complete — the mint died with P2028, masked as a 500
+      // and a captured incident, instead of the intended "wait, then no row →
+      // 401".
+    }, ADMIN_TX_OPTIONS);
     // Minting is the one write this account makes repeatedly, so it is also the
     // natural place to retire the history revocation leaves behind (pass 52) —
     // revoked rows used to accumulate without any bound and the list endpoint

@@ -139,7 +139,11 @@ describe("pass 54 — the OAuth farming cap uses next-auth's decoded dispatch", 
         "credentials",
       ]);
       const res = await authEndpoint(req, ctx);
-      expect(res.status).toBe(200);
+      // GET on the credentials callback is refused as 405 since pass 66 (it
+      // used to fall through to next-auth's 500 fallback). What this test
+      // pins is unchanged: the OAuth farming bucket was NOT charged — the
+      // fourth request in the loop would be 429 if it had been.
+      expect(res.status).toBe(405);
     }
   }, 30_000);
 });

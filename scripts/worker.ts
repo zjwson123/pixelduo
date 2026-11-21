@@ -3,7 +3,7 @@ import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import { generateImages, laneCountFor, createVideoTask, pollVideoTask, saveRemoteVideo, mockImageProviderEnabled, type ProviderImage } from "../lib/providers";
 import { modelCost, videoCost } from "../lib/cost";
-import { analyzeAllImagesSequentially, moderationRequested, MODERATION_REFUSAL_MESSAGE } from "../lib/safety";
+import { analyzeAllImagesSequentially, moderationRequested, MODERATION_REFUSAL_MESSAGE, SAFETY_UNAVAILABLE_MESSAGE } from "../lib/safety";
 import { getVisionConfig } from "../lib/keys";
 import { getStorage, newStorageKey } from "../lib/storage";
 import { concatInputsWithinBudget, concatVideos } from "../lib/video-concat";
@@ -125,7 +125,11 @@ export async function processImageJob(job: {
     let imageBase64List: string[] | undefined;
     if (job.refImageKey) {
       const refBuf = await getStorage().get(job.refImageKey);
-      if (!refBuf) {
+      // `length === 0` is "the reference is unusable", not "there is none":
+      // a zero-byte object is truthy, so an undecodable upload used to reach
+      // generateImages with imageBase64 = "" and fall through to plain
+      // text-to-image at the edit price (pass 66).
+      if (!refBuf || refBuf.length === 0) {
         throw new Error("ref-image-missing: the reference image for this job is no longer in storage");
       }
       imageBase64 = refBuf.toString("base64");
@@ -277,8 +281,7 @@ export async function processImageJob(job: {
       // makes the outage loud and immediate for the operator instead of a
       // silent content-safety hole. Deployments that do not want an audit must
       // say so explicitly — unset IMAGE_MODERATION / IMAGE_NSFW_ENDPOINT.
-      const msg =
-        "safety-audit-unavailable: moderation could not run, so the output was not delivered (check IMAGE_MODERATION / IMAGE_NSFW_ENDPOINT and the vision gateway)";
+      const msg = SAFETY_UNAVAILABLE_MESSAGE;
       const transitioned = await failJob(job.id, msg, { terminal: true, worker: workerId });
       await discardRefusedOutput(job.id, rows.map((r) => r.url), transitioned);
       console.error(`[worker ${workerId}] job ${job.id}: ${msg}`);
@@ -396,7 +399,7 @@ export async function processVideoJob(job: {
       let imageBase64: string | undefined;
       if (job.refImageKey) {
         const refBuf = await getStorage().get(job.refImageKey);
-        if (!refBuf) {
+        if (!refBuf || refBuf.length === 0) {
           throw new Error("ref-image-missing: the reference image for this job is no longer in storage");
         }
         imageBase64 = refBuf.toString("base64");

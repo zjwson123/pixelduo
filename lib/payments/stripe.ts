@@ -175,6 +175,10 @@ export class StripeProvider implements PaymentProvider {
       // fullRefund; a DISPUTE reports only the disputed amount, which can be
       // less than the charge (pass 39).
       let refundAmountUsd: number | undefined;
+      // The per-delivery dedupe key for refund deltas: Stripe's Refund object
+      // id. A refund that is later reported failed/canceled must apply its
+      // negative delta exactly once (pass 66).
+      let refundAdjustmentId: string | undefined;
       // The two ABSOLUTE measurements Stripe sends (pass 41). A partial refund
       // and a partial dispute are reported through different objects with
       // different semantics, and tracking only one of them let a $5 goodwill
@@ -231,6 +235,34 @@ export class StripeProvider implements PaymentProvider {
           typeof obj.amount_refunded === "number" && typeof obj.amount === "number"
             ? obj.amount_refunded >= obj.amount
             : true;
+      }
+      // A refund that was reported and then FAILED or was canceled (pass 66).
+      // Stripe's `charge.refunded` arrives when a refund is ORDERED; a refund
+      // that later fails (a bounced claim, an expired card destination, a
+      // refund canceled from the dashboard) is delivered as `refund.failed` /
+      // `refund.updated` / `charge.refund.updated` with status failed/canceled,
+      // and Stripe's own amount_refunded goes back down. Nothing here listened:
+      // the type fell to IGNORED_WEBHOOK, the route ACKed it, and the order kept
+      // the refund counted — an order promoted to `refunded` stayed refunded
+      // with the credits and tier revoked for money the merchant kept, and an
+      // un-promoted partial stayed inflated, so a later genuine partial could
+      // reach the full basis and revoke for money never returned. The negative
+      // delta (keyed by the Refund id, so a re-delivery applies once) reuses
+      // the same accumulation the Paddle reversal uses, and the route's
+      // existing negative-delta alert asks the operator for a re-grant when the
+      // order was already promoted.
+      const refundStatus = (event.data.object as { status?: string }).status;
+      if (
+        (event.type === "refund.failed" ||
+          event.type === "refund.updated" ||
+          event.type === "charge.refund.updated") &&
+        typeof obj.amount === "number" &&
+        (refundStatus === "failed" || refundStatus === "canceled")
+      ) {
+        type = "refunded";
+        refundAmountUsd = -obj.amount / 100;
+        refundAdjustmentId = typeof obj.id === "string" ? obj.id : undefined;
+        fullRefund = false;
       }
       // A dispute (chargeback) reverses the money like a refund and must
       // revoke the granted credits, or pay-then-chargeback converts packs
@@ -322,6 +354,7 @@ export class StripeProvider implements PaymentProvider {
         orderId,
         fullRefund,
         refundAmountUsd,
+        refundAdjustmentId,
         refundCumulativeUsd,
         disputedAmountUsd,
         disputeId,

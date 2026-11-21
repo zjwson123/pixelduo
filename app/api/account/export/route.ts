@@ -10,8 +10,13 @@ import { redactJobError } from "@/lib/queue";
 // user (or an auditor reading docs/compliance/privacy.md's "可导出您的全部数据")
 // to tell a complete export from a truncated one. One row past the cap is
 // fetched so `truncated` is exact rather than "the last page might be short",
-// and the oldest rows are kept (createdAt asc) — a client that needs the rest
-// can page through the API or ask the operator.
+// and the oldest rows are kept (createdAt asc). A single boolean still could
+// not say WHICH table was cut, and most of these tables have no paginated read
+// (/api/ledger stops at 100 with no cursor, /api/gallery at 60), so the
+// remainder was unreachable AND the user could not tell an exactly-5000-row
+// table from a truncated one (pass 66). `truncatedTables` names them; the
+// operator is the documented route to the remainder for the tables that cannot
+// page.
 const EXPORT_ROW_LIMIT = 5000;
 
 export async function POST(req: Request) {
@@ -246,7 +251,13 @@ export async function POST(req: Request) {
     // views, so it applies the same read-time mask (see redactJobError).
     const safeJobs = jobs.map((j) => ({ ...j, error: redactJobError(j.error) }));
     const tables = { ledger, images, jobs: safeJobs, orders, grants, apiKeys, feedback, checkins, reminders };
-    const truncated = Object.values(tables).some((rows) => rows.length > EXPORT_ROW_LIMIT);
+    // Which tables were cut, not just whether anything was (pass 66): a user
+    // with 5000 ledger rows and 12 images needs to know the ledger is the
+    // incomplete one, and an auditor needs the same fact to judge the export.
+    const truncatedTables = Object.entries(tables)
+      .filter(([, rows]) => rows.length > EXPORT_ROW_LIMIT)
+      .map(([name]) => name);
+    const truncated = truncatedTables.length > 0;
     const data = Object.fromEntries(
       Object.entries(tables).map(([name, rows]) => [
         name,
@@ -256,6 +267,7 @@ export async function POST(req: Request) {
     return ok({
       exportedAt: new Date().toISOString(),
       truncated,
+      truncatedTables,
       rowLimit: EXPORT_ROW_LIMIT,
       data: { user, ...data },
     });

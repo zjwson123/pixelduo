@@ -5,6 +5,23 @@
 # trust — it does NOT serve plain http. For an http-only local smoke test set
 # CADDY_DOMAIN=":80", or add "auto_https off" to the site block.
 {$CADDY_DOMAIN} {
+	# A doubled or leading slash, or a backslash, makes Next answer its own
+	# 308 from `resolve-routes` BEFORE headers(), redirects, rewrites and the
+	# proxy run — and that response's Location (and Refresh) carry the query
+	# string, which on /reset-password and /verify-email is a live single-use
+	# account-recovery token. Its handler returns `resHeaders: null`, so no
+	# no-store rule can reach it (pass 66). `skipTrailingSlashRedirect` covers
+	# the single trailing slash only; this class is unreachable from the app,
+	# so the edge refuses the shape.
+	#
+	# An EXPRESSION on {http.request.uri.path}, not a path_regexp: Caddy's path
+	# matcher runs on the CLEANED path, where repeated slashes have already
+	# been collapsed — a regexp there can never see `//` (probed: both `//`
+	# and a path_regexp returned 502 for a doubled path). The expression
+	# matcher reads the raw URI and is the only one that sees the shape the
+	# browser actually sent.
+	@repeatedSlashes expression {http.request.uri.path}.contains("//") || {http.request.uri.path}.contains("\\")
+	respond @repeatedSlashes 400
 	encode gzip
 	reverse_proxy web:3000
 }

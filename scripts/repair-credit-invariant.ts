@@ -81,6 +81,12 @@ async function main() {
 
   const userIds = [...new Set([...bad.map((b) => b.userId), ...drifted.map((d) => d.userId)])];
   for (const userId of userIds) {
+    // One account's failure must not leave every later account unrepaired
+    // (pass 66): the loop had no catch, so the very row class this script
+    // exists for — a negative `amount`, which no value of `remaining` can
+    // satisfy — aborted the process and the operator had to start over, on
+    // exactly the database that was already broken. Report and continue.
+    try {
     await prisma.$transaction(async (tx) => {
       // Lock this account's grants in the CANONICAL order — the same
       // GRANT_LOCK_ORDER every money path uses (spendCreditsTx,
@@ -121,11 +127,23 @@ async function main() {
       }
       let clamped = 0;
       for (const r of rows) {
-        const next = Math.max(0, Math.min(r.remaining, r.amount));
-        if (next === r.remaining) continue;
-        await tx.creditGrant.update({ where: { id: r.id }, data: { remaining: next } });
+        // A negative `amount` cannot satisfy the CHECK for ANY `remaining`
+        // (`0 <= remaining <= amount`), and the old `max(0, min(...))` computed
+        // 0, which the constraint rejects — the repair of the very row class it
+        // targets aborted. A grant that granted a negative number of credits
+        // grants none: repair the amount with the holding (pass 66).
+        const amount = Math.max(0, r.amount);
+        const next = Math.max(0, Math.min(r.remaining, amount));
+        if (amount === r.amount && next === r.remaining) continue;
+        await tx.creditGrant.update({
+          where: { id: r.id },
+          data: amount === r.amount ? { remaining: next } : { amount, remaining: next },
+        });
         clamped += Math.abs(r.remaining - next);
-        console.log(`  fixed grant ${r.id}: remaining ${r.remaining} → ${next}`);
+        console.log(
+          `  fixed grant ${r.id}: remaining ${r.remaining} → ${next}` +
+            (amount === r.amount ? "" : `, amount ${r.amount} → ${amount}`),
+        );
       }
       const after = await tx.creditGrant.aggregate({ where: { userId }, _sum: { remaining: true } });
       const sum = after._sum.remaining ?? 0;
@@ -155,10 +173,15 @@ async function main() {
       });
       console.log(`  fixed balance ${user.email}: ${user.credits} → ${sum} (delta ${delta})`);
     });
+    } catch (e) {
+      console.error(
+        `  FAILED ${userId}: ${e instanceof Error ? e.message : String(e)} — continuing with the next account`,
+      );
+    }
   }
 
   const left = await prisma.$queryRaw<Array<{ n: bigint }>>(
-    Prisma.sql`SELECT COUNT(*)::bigint AS n FROM "CreditGrant" WHERE remaining < 0 OR remaining > amount`,
+    Prisma.sql`SELECT COUNT(*)::bigint AS n FROM "CreditGrant" WHERE remaining < 0 OR remaining > amount OR amount < 0`,
   );
   console.log(`\ndone — ${left[0].n} out-of-range row(s) left`);
   console.log(

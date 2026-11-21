@@ -190,6 +190,13 @@ model Job {
   prompt         String
   costCredits    Int
   images         String // JSON array of image/video urls (local paths)
+  // Storage keys an attempt superseded whose DeleteObject FAILED. A retried
+  // video delivery writes the new key to `images` first (pass 37's ordering),
+  // then retires the previous object; if that delete faults, nothing named the
+  // old up-to-100 MB object any more — not /api/files (no Image row), not
+  // failJob's reclaim, not the erasure walk (which reads images). This column
+  // is the durable witness: terminal failure and account erasure reclaim it.
+  staleArtifacts Json?
   error          String?
   worker         String?
   attempts       Int      @default(0)

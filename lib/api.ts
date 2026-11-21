@@ -169,6 +169,7 @@ function expectedStatus(msg: string): number | null {
     msg.startsWith("not-a-video-model:") ||
     msg.startsWith("video-timeout:") ||
     msg.startsWith("image-flagged:") ||
+    msg.startsWith("empty-image:") ||
     msg.startsWith("cannot-") ||
     msg === "2fa-code-required" ||
     msg === "2fa-not-enabled" ||
@@ -277,7 +278,14 @@ export function fail(error: unknown) {
     // Do not leak internal error details to API clients.
     return errorResponse({ ok: false, error: "internal-error" }, { status: 500 });
   }
-  return errorResponse({ ok: false, error: msg }, { status });
+  // A plain-Error 429 still owes the caller the backoff hint every ApiError 429
+  // and the IP limiter send (pass 66): `queue-full:` is thrown by the inflight
+  // guard as a bare Error, so the one refusal whose wait is *caused by other
+  // jobs finishing* was the only 429 without a Retry-After. 10s is the poll
+  // interval the client already uses for job status; a longer hint would be a
+  // guess nothing in the queue can honor.
+  const headers = status === 429 ? { "Retry-After": "10" } : undefined;
+  return errorResponse({ ok: false, error: msg }, { status, headers });
 }
 
 // Route-level limit keyed by IP + scope. Returns 429 response when exceeded.
@@ -411,7 +419,17 @@ export async function readBodyCapped(
     return { raw };
   }
   const reader = req.body.getReader();
-  const chunks: Uint8Array[] = [];
+  // ONE growable accumulator, not one retained entry per HTTP chunk (pass 66).
+  // The cap below counted BYTES, but the heap cost was O(number of chunks): a
+  // 4 MB body delivered as 4 million one-byte chunks (chunked transfer, no
+  // content-length to pre-check) kept 4M Uint8Array objects — each with its own
+  // object header and backing store — alive until Buffer.concat, i.e. hundreds
+  // of megabytes for a body the guard had approved. /api/edit and /api/video
+  // are authenticated; the payment webhook's 256 KiB is not, so a handful of
+  // concurrent requests against the same helper could end the web container
+  // before any signature check. Growth is geometric and never exceeds
+  // maxBytes, and each read is copied in once instead of being retained.
+  let buf = Buffer.allocUnsafe(Math.max(1, Math.min(maxBytes, 64 * 1024)));
   let total = 0;
   for (;;) {
     let chunk: ReadableStreamReadResult<Uint8Array>;
@@ -423,15 +441,23 @@ export async function readBodyCapped(
     const { done, value } = chunk;
     if (done) break;
     if (!value) continue;
-    total += value.byteLength;
-    if (total > maxBytes) {
+    const size = value.byteLength;
+    if (total + size > maxBytes) {
       // Cancel so the client upload is cut off instead of drained.
       await reader.cancel().catch(() => {});
       return { tooLarge: true };
     }
-    chunks.push(value);
+    if (total + size > buf.length) {
+      let capacity = buf.length;
+      while (capacity < total + size) capacity = Math.min(maxBytes, capacity * 2);
+      const grown = Buffer.allocUnsafe(capacity);
+      buf.copy(grown, 0, 0, total);
+      buf = grown;
+    }
+    buf.set(value, total);
+    total += size;
   }
-  const raw = Buffer.concat(chunks).toString("utf8");
+  const raw = buf.subarray(0, total).toString("utf8");
   refuseNul(raw);
   return { raw };
 }

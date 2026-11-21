@@ -1,7 +1,7 @@
 import NextAuth from "next-auth";
 import { NextRequest } from "next/server";
 import { authOptions } from "@/lib/auth";
-import { ApiError, fail, enforceRateLimit, readBodyCapped, tooLarge, refuseNul } from "@/lib/api";
+import { ApiError, errorResponse, fail, enforceRateLimit, readBodyCapped, tooLarge, refuseNul } from "@/lib/api";
 import { envLimit } from "@/lib/rate-limit";
 import { authCallbackCookieName, authCallbackUrlAcceptable, secureAuthCookies } from "@/lib/auth-cookies";
 import { siteBase } from "@/lib/site";
@@ -83,6 +83,22 @@ function isOAuthCallback(nextauth: string[] | undefined, pathname: string): bool
   }
   const m = /^\/api\/auth\/callback\/([^/]+)(?:\/.*)?$/.exec(pathname);
   return m !== null && m[1] !== "credentials";
+}
+
+// next-auth's credentials callback implements POST only; every other method
+// falls to its `default` arm and answers `{status: 500, body: "Error: Callback
+// for provider type credentials not supported"}` (pass 66). That is an
+// anonymous, <img>-reachable 5xx reachable by a bare GET — no cookie, no CSRF
+// token — so a page on any site could mint access-log/APM error rates for this
+// deployment, and it breaks the app's own rule that malformed auth input is a
+// 4xx (passes 38/50/64). Decoded segments first, for the same reason
+// isOAuthCallback reads them: `%63allback/credentials` is the same route.
+function isCredentialsCallback(nextauth: string[] | undefined, pathname: string): boolean {
+  if (nextauth && nextauth.length > 0) {
+    return nextauth[0] === "callback" && typeof nextauth[1] === "string" && nextauth[1].startsWith("credentials");
+  }
+  const m = /^\/api\/auth\/callback\/([^/]+)(?:\/.*)?$/.exec(pathname);
+  return m !== null && m[1].startsWith("credentials");
 }
 
 // `context.params` is a Promise in Next 15+ and the tests pass one too; accept a
@@ -207,6 +223,16 @@ async function limited(req: NextRequest, ctx: Parameters<typeof handler>[1]) {
     for (const segment of nextauth ?? []) refuseNul(segment);
   } catch (e) {
     return fail(e);
+  }
+  // The credentials callback is POST-only; any other method is next-auth's
+  // 500 fallback, so refuse it here as a 4xx with Allow (see
+  // isCredentialsCallback). 405, not 400: the path is valid and the method is
+  // the thing that is not.
+  if (req.method !== "POST" && isCredentialsCallback(nextauth, new URL(req.url).pathname)) {
+    return errorResponse(
+      { ok: false, error: "method-not-allowed: the credentials callback is POST-only" },
+      { status: 405, headers: { Allow: "POST" } },
+    );
   }
   // Before delegation, because assertConfig would turn an unparsable value
   // into a 500 (see authCallbackUrlRefusal).

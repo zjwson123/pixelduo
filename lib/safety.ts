@@ -63,7 +63,15 @@ const BLOCKED: Array<{ re: RegExp; reason: string }> = [
   },
   // Traditional spellings are the same words (pass 51): `裸體` and `成人內容`
   // render identically to the blocked simplified forms and were not matched.
-  { re: /(色情|裸露|裸体|裸體|成人内容|成人內容|裸照|性暗示)/, reason: "adult-content" },
+  // Explicit Chinese spellings, not only the formal nouns (pass 66). These are
+  // the words a speaker reaches for first — 做爱, 性交, 强奸, 性侵, 成人视频 —
+  // and every one of them returned ok while the noun 色情 was blocked. The
+  // video lane has no output audit, so the pre-filter is the only gate there;
+  // a list that knows only the formal nouns stops only formal prompts.
+  {
+    re: /(色情|裸露|裸体|裸體|成人内容|成人內容|裸照|性暗示|做爱|做愛|性交|性行为|性行為|口交|肛交|卖淫|賣淫|嫖娼|迷奸|迷姦|轮奸|輪姦|强奸|強姦|性侵|猥亵|猥褻|成人视频|成人視頻|黄片|黃片|毛片|情色)/,
+    reason: "adult-content",
+  },
   {
     re: new RegExp(
       `\\b(?:gore|gory|${spacedWord("blood")}[\\s._*-]*bath(?:s|es)?|mutilat\\w*|torture|dismember)\\w*\\b`,
@@ -86,7 +94,14 @@ const BLOCKED: Array<{ re: RegExp; reason: string }> = [
     ),
     reason: "child-safety",
   },
-  { re: /((儿童|兒童).*(色情|性)|未成年.*色情)/, reason: "child-safety" },
+  // `儿童做爱` / `未成年性爱` / `幼女性交` walked past the previous rule: it
+  // paired a child noun only with the formal nouns 色情/性, and the 未成年 arm
+  // required 色情 immediately after. A bounded gap admits the ordinary
+  // spellings without turning a bare 性 in unrelated words into a match.
+  {
+    re: /(儿童|兒童|幼女|幼童|未成年|小学生|小學生)[\s\S]{0,8}(色情|性交|性爱|性愛|做爱|做愛|强奸|強姦|性侵|猥亵|猥褻|裸|性)|恋童|戀童|童交|幼交/,
+    reason: "child-safety",
+  },
   {
     re: new RegExp(
       `\\b(?:${spacedWord("bomb")}(?:s|ing|ed|er|ers|ings|ard(?:s|ed|ing|ment|ments)?)?|` +
@@ -221,10 +236,25 @@ const CONFUSABLES: Record<string, string> = {
   υ: "u", χ: "x", ω: "w", ϲ: "c", ϳ: "j", η: "n", μ: "u",
   // Leetspeak spellings of the same words.
   "0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t",
+  // Latin SMALL CAPITALS (pass 66). NFKC does not fold these and they have no
+  // lowercase mapping, so `ᴄʜɪʟᴅ ᴘᴏʀɴ` reached the rules as a run of
+  // non-ASCII letters that no `\bchild…porn\b` could match — while rendering to
+  // any reader, and to the provider, as the blocked phrase. The video lane has
+  // no output audit, so this table is its only gate. The base letters come from
+  // the IPA block (U+1D00–U+1D2B) and Latin Extended-D/E; characters that are
+  // not in the map pass through untouched, so widening the selected range only
+  // adds candidates.
+  ᴀ: "a", ʙ: "b", ᴄ: "c", ᴅ: "d", ᴇ: "e", ꜰ: "f", ɢ: "g", ʜ: "h",
+  ɪ: "i", ᴊ: "j", ᴋ: "k", ʟ: "l", ᴍ: "m", ɴ: "n", ᴏ: "o", ᴘ: "p",
+  ǫ: "q", ʀ: "r", ꜱ: "s", ᴛ: "t", ᴜ: "u", ᴠ: "v", ᴡ: "w", ʏ: "y",
+  ᴢ: "z", ꞯ: "q",
 };
 
 function foldHomoglyphs(text: string): string {
-  return text.replace(/[\u0370-\u03FF\u0400-\u04FF0-9]/g, (c) => CONFUSABLES[c] ?? c);
+  return text.replace(
+    /[\u0250-\u02AF\u0370-\u03FF\u0400-\u04FF\u1D00-\u1D2B\uA72A-\uA7FF0-9]/g,
+    (c) => CONFUSABLES[c] ?? c,
+  );
 }
 
 export function checkPrompt(prompt: string): SafetyResult {
@@ -298,6 +328,19 @@ export const MODERATION_REFUSAL_WINDOW_MS = 24 * 3600_000;
 /** The DB marker failJob stores, and the message built from it (one spelling). */
 export const MODERATION_REFUSAL_ERROR_PREFIX = "image-flagged:";
 export const MODERATION_REFUSAL_MESSAGE = `${MODERATION_REFUSAL_ERROR_PREFIX} moderation rejected the generated image`;
+/**
+ * The OTHER terminal refusal that follows a billed generation (pass 66): the
+ * audit was configured but could not run, so the worker refuses delivery and
+ * refunds in full. It is the same economics as a flagged output — provider
+ * money spent, caller's credits returned — and it was invisible to the budget
+ * below, which matched only `image-flagged:`. An attacker who could make the
+ * detector fail (flood it, trip its rate limit, or point IMAGE_NSFW_ENDPOINT at
+ * a flapping gateway) therefore got the refunded-provider-spend loop this
+ * budget exists to close: repeatable at the route's 20/min with nothing
+ * counted. Both prefixes are counted now.
+ */
+export const SAFETY_UNAVAILABLE_ERROR_PREFIX = "safety-audit-unavailable:";
+export const SAFETY_UNAVAILABLE_MESSAGE = `${SAFETY_UNAVAILABLE_ERROR_PREFIX} moderation could not run, so the output was not delivered (check IMAGE_MODERATION / IMAGE_NSFW_ENDPOINT and the vision gateway)`;
 
 export interface ModerationRefusalBudget {
   ok: boolean;
@@ -332,8 +375,15 @@ export async function moderationRefusalBudget(userId: string): Promise<Moderatio
     where: {
       userId,
       status: "failed",
-      error: { startsWith: MODERATION_REFUSAL_ERROR_PREFIX },
       finishedAt: { gte: cutoff },
+      // Both terminal, post-provider, fully-refunded refusals count (pass 66):
+      // a flagged output and an audit that could not run are the same
+      // provider-spend loop from the caller's side, and counting only the first
+      // let a floodable detector be the bypass.
+      OR: [
+        { error: { startsWith: MODERATION_REFUSAL_ERROR_PREFIX } },
+        { error: { startsWith: SAFETY_UNAVAILABLE_ERROR_PREFIX } },
+      ],
     },
     orderBy: { finishedAt: "asc" },
     take: MODERATION_REFUSAL_LIMIT,

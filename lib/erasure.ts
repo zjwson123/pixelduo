@@ -1,7 +1,7 @@
 import type { Prisma } from "@prisma/client";
 import { prisma, withDeadlockRetry } from "./prisma";
 import { ApiError } from "./api";
-import { checkpointKeys } from "./queue";
+import { checkpointKeys, staleArtifactKeys } from "./queue";
 import { deleteObjectsBounded } from "./storage";
 
 // Everything an account's own rows still name in object storage.
@@ -21,7 +21,7 @@ export async function collectUserArtifactKeys(
     client.image.findMany({ where: { userId }, select: { url: true } }),
     client.job.findMany({
       where: { userId },
-      select: { refImageKey: true, images: true, sourceVideoKey: true },
+      select: { refImageKey: true, images: true, sourceVideoKey: true, staleArtifacts: true },
     }),
   ]);
   const keys = new Set<string>();
@@ -30,6 +30,11 @@ export async function collectUserArtifactKeys(
     if (j.refImageKey) keys.add(j.refImageKey);
     if (j.sourceVideoKey) keys.add(j.sourceVideoKey);
     for (const k of checkpointKeys(j.images)) keys.add(k);
+    // Superseded objects whose delete failed mid-job (pass 66). Without this
+    // they were named only by this column, which no erasure path read — so an
+    // account deletion answered "all your files are gone" with up to 100 MB
+    // per retried video still in the bucket.
+    for (const k of staleArtifactKeys(j.staleArtifacts)) keys.add(k);
   }
   return [...keys];
 }

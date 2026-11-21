@@ -14,6 +14,15 @@ export async function saveBase64Image(base64: string, ext = "png"): Promise<stri
   // comfortably above any real image, below memory-exhaustion territory.
   if (base64.length > 40 * 1024 * 1024) throw new Error("image-too-large");
   const buf = Buffer.from(base64, "base64");
+  // A base64 string that decodes to NOTHING is not an image (pass 66). The
+  // edit route's zod guard only checks the string's LENGTH, so `"!".repeat(100)`
+  // — which Buffer.from stops decoding at the first invalid byte — stored a
+  // zero-byte object; the worker's `if (!refBuf)` is false for an empty Buffer,
+  // imageBase64 became "", and generateImages' `if (input.imageBase64)` fell
+  // through to plain text-to-image. The caller paid the edit price for a
+  // generation, and the job "succeeded". Refuse at the one place every
+  // base64-to-object path goes through.
+  if (buf.length === 0) throw new Error("empty-image: the supplied image decoded to zero bytes");
   // Same rule as saveRemoteImage: the bytes decide what this object is, the
   // caller's expectation is only the fallback for a format we do not sniff.
   const sniffed = sniffContentType(buf);
@@ -43,19 +52,35 @@ export async function readBodyCapped(res: Response, maxBytes: number): Promise<B
     return buf;
   }
   const reader = res.body.getReader();
-  const chunks: Buffer[] = [];
+  // One growable buffer, not one Buffer per chunk (pass 66). The byte cap
+  // bounded the payload but not the object count: a provider answering a poll
+  // or an artifact download with one-byte chunks made the worker retain one
+  // Buffer per byte (the 1 MiB poll cap is ~1M objects, the 100 MB video cap is
+  // far worse) and die of heap exhaustion before the cap could fire. A hostile
+  // or compromised gateway controls the chunking, so this is its cheapest way
+  // to OOM the worker. Growth is geometric, bounded by maxBytes, and each chunk
+  // is copied in once.
+  let buf = Buffer.allocUnsafe(Math.max(1, Math.min(maxBytes, 64 * 1024)));
   let size = 0;
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
-    size += value.byteLength;
-    if (size > maxBytes) {
+    const n = value.byteLength;
+    if (size + n > maxBytes) {
       await reader.cancel().catch(() => undefined);
       throw new Error("download-too-large");
     }
-    chunks.push(Buffer.from(value));
+    if (size + n > buf.length) {
+      let capacity = buf.length;
+      while (capacity < size + n) capacity = Math.min(maxBytes, capacity * 2);
+      const grown = Buffer.allocUnsafe(capacity);
+      buf.copy(grown, 0, 0, size);
+      buf = grown;
+    }
+    buf.set(value, size);
+    size += n;
   }
-  return Buffer.concat(chunks);
+  return buf.subarray(0, size);
 }
 
 // Parse a JSON response body with the same streaming cap — for outbound calls

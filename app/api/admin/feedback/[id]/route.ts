@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { enforceUserRateLimit, fail, ok, parseJsonBody, readBodyCapped, refuseNul, zodMessage, tooLarge } from "@/lib/api";
-import { assertAdminActorTx, requireAdminSession } from "@/lib/admin";
+import { ADMIN_TX_OPTIONS, assertAdminActorTx, requireAdminSession } from "@/lib/admin";
 import { prisma } from "@/lib/prisma";
 
 const schema = z.object({ status: z.enum(["new", "done"]) });
@@ -28,6 +28,11 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     // `handledBy` is an operator id on a row the erasure scrub reaches only
     // while the actor is still being erased — a queued PATCH landing after that
     // scrub left the id behind.
+    // ADMIN_TX_OPTIONS, not Prisma's defaults (pass 66): this transaction takes
+    // the same User FOR KEY SHARE re-proof as the role/credits routes, so a
+    // queued PATCH arriving while the actor's own erasure holds the row for its
+    // storage sweep must outlive that sweep instead of dying with P2028 (which
+    // fail() masks as a 500 plus a captured incident).
     const res = await prisma.$transaction(async (tx) => {
       const updated = await tx.feedback.updateMany({
         where: { id },
@@ -39,7 +44,7 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
       });
       if (updated.count > 0) await assertAdminActorTx(tx, actor);
       return updated;
-    });
+    }, ADMIN_TX_OPTIONS);
     if (res.count === 0) return fail(new Error("item-not-found"));
     return ok({ updated: true });
   } catch (e) {
