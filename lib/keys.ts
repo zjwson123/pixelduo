@@ -116,15 +116,26 @@ function arkSource(): { key: string; baseUrl: string } | null {
   const key = gw?.api_keys?.find((k) => k.length > 0);
   if (!key) return null;
   const raw = gw?.base_url?.trim();
-  // A gateway key may only travel to the gateway's own image endpoint. The old
-  // fallback sent it to Ark's host when the gateway's base_url was absent or
-  // was the ark gateway's usual CHAT URL — the relay's credential disclosed to
-  // the vendor, and a generation payload aimed at a host that never issued that
-  // key (pass 66). Fail closed: an operator using a relay must configure an
-  // image-capable base_url, and an operator using the vendor sets
-  // ARK_IMAGE_API_KEY.
-  if (!raw || !raw.includes("images")) return null;
-  return { key, baseUrl: raw };
+  if (!raw) return null;
+  // A gateway key may only travel to an endpoint of the party that ISSUED it.
+  // The old fallback sent a RELAY's key to Ark's host whenever the base was
+  // absent or was the ark gateway's usual CHAT URL — a credential disclosed to
+  // the wrong party, and a generation payload aimed at a host that never issued
+  // it (pass 66). But the same shape also describes the normal vendor-only
+  // setup: the ark gateway's base_url is Ark's own `…/api/coding/v1`, and its
+  // key is a real Ark key. So the host decides, not the path shape: a base on
+  // the vendor's own domain may borrow the vendor's image endpoint (the key
+  // belongs there), anything else must name an image endpoint itself.
+  if (raw.includes("images")) return { key, baseUrl: raw };
+  try {
+    const host = new URL(raw).hostname.toLowerCase();
+    if (host === "ark.cn-beijing.volces.com" || host.endsWith(".volces.com")) {
+      return { key, baseUrl: ARK_DEFAULT_BASE };
+    }
+  } catch {
+    return null;
+  }
+  return null;
 }
 
 export function getArkKey(): string | undefined {

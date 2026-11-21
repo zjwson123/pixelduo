@@ -53,7 +53,7 @@ const { readBodyCapped } = await import("../lib/api");
 const { readBodyCapped: readProviderBody, saveBase64Image } = await import("../lib/store");
 const { checkPrompt } = await import("../lib/safety");
 const { isPermanentProviderError } = await import("../lib/worker-errors");
-const { getModelVerseConfig, getArkKey, getAliyunKey, _resetKeysCacheForTests } = await import("../lib/keys");
+const { getModelVerseConfig, getArkKey, getArkBaseUrl, getAliyunKey, _resetKeysCacheForTests } = await import("../lib/keys");
 const { getStorage, newStorageKey, _resetStorageForTests } = await import("../lib/storage");
 const { reclaimStoredArtifact, POLL_LEASE_MS } = await import("../lib/queue");
 const { collectUserArtifactKeys } = await import("../lib/erasure");
@@ -266,8 +266,16 @@ describe("pass 66 — gateway keys fail closed without an image endpoint", () =>
         aliyun: { api_keys: ["relay-ali"], base_url: "https://relay.example/compatible-mode/v1" },
       },
     });
-    expect(getArkKey()).toBeUndefined(); // a chat URL is not an image endpoint
+    expect(getArkKey()).toBeUndefined(); // a relay's chat URL is not an image endpoint
     expect(getAliyunKey()).toBe("relay-ali");
+    // A key issued BY the vendor may still use the vendor's image endpoint even
+    // though the gateway's usual base_url is the vendor's CHAT URL — failing
+    // this closed would disable the normal Ark setup.
+    writeConfig({
+      gateways: { ark: { api_keys: ["vendor-ark"], base_url: "https://ark.cn-beijing.volces.com/api/coding/v1" } },
+    });
+    expect(getArkKey()).toBe("vendor-ark");
+    expect(getArkBaseUrl()).toBe("https://ark.cn-beijing.volces.com/api/v3/images/generations");
   });
 });
 
