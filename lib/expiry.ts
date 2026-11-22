@@ -66,10 +66,19 @@ async function sweepBatchOnce(userId: string): Promise<SweepBatch> {
     // The rows are already locked FOR UPDATE by the statement above, so
     // splitting costs nothing.
     for (const part of idChunks(grants.map((g) => g.id))) {
-      await tx.creditGrant.updateMany({
-        where: { id: { in: part }, remaining: { gt: 0 } },
-        data: { remaining: 0 },
-      });
+      // Raw, not updateMany, for one reason (pass 67): a pre-CHECK row with a
+      // NEGATIVE `amount` (the class the CHECK is NOT VALID for and
+      // scripts/repair-credit-invariant.ts reports) makes `remaining: 0`
+      // violate `0 <= remaining <= amount`, so the whole batch — including every
+      // healthy expired grant in it — rolled back and this account was never
+      // swept again. The CASE repairs the impossible ceiling in the same write,
+      // exactly as writeOffExcessTx does on the spend path.
+      await tx.$executeRaw(Prisma.sql`
+        UPDATE "CreditGrant"
+        SET "remaining" = 0,
+            "amount" = CASE WHEN "amount" < 0 THEN 0 ELSE "amount" END
+        WHERE id IN (${Prisma.join(part)}) AND "remaining" > 0
+      `);
     }
     await addCreditsTx(tx, userId, "EXPIRE", -sum, "none", null, `expired credits (${grants.length} grant(s))`);
     return { sum, count: grants.length };

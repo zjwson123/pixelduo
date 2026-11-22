@@ -29,12 +29,14 @@
 | 变量 | 要求 | 原因 |
 | --- | --- | --- |
 | `NEXTAUTH_SECRET` | ≥32 位且非占位符 | 泄露即可离线爆破并伪造任意账号（含管理员）的会话 |
-| `NEXTAUTH_URL` | **https://** | next-auth 仅依此判断是否给会话 Cookie 加 `Secure`；http 时 Cookie 明文可被截获，且邮件链接指向错误域名 |
+| `NEXTAUTH_URL` | **https:// 且为裸 origin** | next-auth 仅依此判断是否给会话 Cookie 加 `Secure`；http 时 Cookie 明文可被截获，且邮件链接指向错误域名。Pass 67 起它不能携带用户名/密码、路径、查询串或片段：`https://user:secret@host` 这类从 DATABASE_URL/SMTP_URL 复制来的写法会把凭据发到 sitemap/robots/og 标签和每封邮件里，带路径的值还会让 next-auth 拼出错误的回调地址 |
 | `SMTP_URL` | 必填（或 `MAIL_DEV_MODE=1`） | 缺省时邮件走 stdout，密码重置链接（等于账号接管凭据）会写进容器日志 |
 | `EMAIL_VERIFY_AUTO` | 生产禁用 | 自动验证注册并发放注册奖励 = 无限量带额度的已验证账号 |
-| `PAYMENT_PROVIDER` + 对应密钥 | 必须能构造出 provider | `getPaymentProvider()` 现在也在启动时解析（`assertPaymentProviderUsable()`）：拼错的值、生产下的 `mock`、缺少 `STRIPE_WEBHOOK_SECRET` / Paddle 密钥都会让进程拒绝启动。此前它只在第一次 checkout 或 webhook 时才被调用，于是容器"健康"、每笔支付 500、**每个回调 500**——上游重试数天后停用该回调地址，结果是钱收了、积分没给 |
+| `PAYMENT_PROVIDER` + 对应密钥 | 必须能构造出 provider | `getPaymentProvider()` 现在也在启动时解析（`lib/payments/index.ts` 的 `resolvePaymentProviderName()` 在该路径上）：拼错的值、生产下的 `mock`（除非同时声明 `PAYMENT_ALLOW_MOCK=1`）、缺少 `STRIPE_WEBHOOK_SECRET` / Paddle 密钥都会让进程拒绝启动。此前它只在第一次 checkout 或 webhook 时才被调用，于是容器"健康"、每笔支付 500、**每个回调 500**——上游重试数天后停用该回调地址，结果是钱收了、积分没给 |
 
 标记为测试部署（`PAYMENT_ALLOW_MOCK=1` **且** `PAYMENT_PROVIDER` 为空或 `mock`，CI 与 `ci-local.sh` 使用）时，后三项自动豁免。Pass 51 起这个标记必须与 mock provider 同时成立：此前只要残留一个 `PAYMENT_ALLOW_MOCK=1`，即使 `PAYMENT_PROVIDER=stripe|paddle` 正在收真钱，公开的 CI 签名密钥、http 的 `NEXTAUTH_URL`、缺失的 `SMTP_URL` 与 `EMAIL_VERIFY_AUTO=1` 也全部被放行。
+
+**内部测试栈（pass 67 文档修正）。** 两个生产 compose 文件现在都转发 `PAYMENT_ALLOW_MOCK`（默认空），所以私有/内网部署可以显式设置 `PAYMENT_PROVIDER=mock` + `PAYMENT_ALLOW_MOCK=1` 启动一套不接支付渠道的栈——这正是该成对开关的用途，公开域名上的内部测试栈也用它。代价必须写清楚：mock 支付下 `/api/checkout` 会给**任何完成邮箱验证的人**发积分（额度随后会消耗在真实 provider key 上），`EMAIL_VERIFY_AUTO` / `MOCK_IMAGE_PROVIDER` 也随之被豁免。因此公网可达时，启动日志会打印一行 `[config] PAYMENT_ALLOW_MOCK is set on a public host …` 告警；看到它就说明这台部署的注册是敞开的。另外请始终使用自己生成的 `NEXTAUTH_SECRET`（公开的 CI 密钥在非回环主机上仍会被拒绝启动）。真实支付部署不要设置这个变量：`PAYMENT_PROVIDER=stripe|paddle` 本身就会关闭豁免。
 
 ### 会被静默忽略的配置（启动时告警）
 

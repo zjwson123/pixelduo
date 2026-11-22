@@ -186,6 +186,12 @@ export class StripeProvider implements PaymentProvider {
       // $49.99 payment while the accumulator stood at $44.99 and no revoke ever
       // fired. Both feed the order row; the route adds them when deciding.
       let refundCumulativeUsd: number | undefined;
+      // The refund ids the cumulative total above is made of (pass 67). The
+      // route uses them to recognise a STALE snapshot: a retried
+      // `charge.refunded` whose refund later FAILED (its `refund.failed` already
+      // subtracted the amount) must not put the money back into the accumulator
+      // and revoke the customer's credits.
+      let refundIds: string[] | undefined;
       let disputedAmountUsd: number | undefined;
       // The dispute's id travels with the counted amount so the route can check
       // it against the reinstatement markers: Stripe does not guarantee event
@@ -231,6 +237,15 @@ export class StripeProvider implements PaymentProvider {
         // order as an absolute total (not a delta) so a later dispute of the
         // unrefunded remainder can be added to it.
         if (typeof obj.amount_refunded === "number") refundCumulativeUsd = obj.amount_refunded / 100;
+        // The charge carries the refunds it includes; their ids are what let
+        // the route tell a current snapshot from a stale one (pass 67). Absent
+        // on relay-shaped payloads, which keeps the old behaviour.
+        const refundList = (obj as { refunds?: { data?: Array<{ id?: unknown }> } }).refunds?.data;
+        if (Array.isArray(refundList)) {
+          refundIds = refundList
+            .map((r) => (typeof r?.id === "string" ? r.id : null))
+            .filter((id): id is string => id !== null);
+        }
         fullRefund =
           typeof obj.amount_refunded === "number" && typeof obj.amount === "number"
             ? obj.amount_refunded >= obj.amount
@@ -356,6 +371,7 @@ export class StripeProvider implements PaymentProvider {
         refundAmountUsd,
         refundAdjustmentId,
         refundCumulativeUsd,
+        refundIds,
         disputedAmountUsd,
         disputeId,
         reinstatedAmountUsd,

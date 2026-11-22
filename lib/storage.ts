@@ -36,6 +36,15 @@ function isNotFoundError(e: unknown): boolean {
   return err.$metadata?.httpStatusCode === 404;
 }
 
+// The local driver's "this key names no object" shapes, and nothing else. A
+// missing path is ENOENT; a path whose parent is a regular file is ENOTDIR —
+// both mean no object can exist there. EACCES/ENOSPC/EIO are faults and must
+// reach the caller (pass 67), the same rule isNotFoundError applies to S3.
+function isLocalNotFound(e: unknown): boolean {
+  const code = (e as NodeJS.ErrnoException | undefined)?.code;
+  return code === "ENOENT" || code === "ENOTDIR";
+}
+
 export interface StorageStream {
   stream: ReadableStream<Uint8Array>;
   /** Bytes this stream will yield (the range's length when one was asked for). */
@@ -109,7 +118,7 @@ class LocalStorage implements StorageDriver {
       // branch then deletes the user's uploaded reference. One EACCES/ENOSPC/
       // EIO therefore destroyed a paid edit's input and refunded it as if the
       // customer had never uploaded anything.
-      if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return null;
+      if (isLocalNotFound(e)) return null;
       throw e;
     }
   }
@@ -122,7 +131,7 @@ class LocalStorage implements StorageDriver {
       // failure the erasure path must see (pass 39) — swallowing EACCES/ENOSPC
       // made "the account and its files are gone" a claim the code could not
       // evidence.
-      if ((e as NodeJS.ErrnoException)?.code !== "ENOENT") throw e;
+      if (!isLocalNotFound(e)) throw e;
     }
   }
 
@@ -140,8 +149,13 @@ class LocalStorage implements StorageDriver {
         length: range ? range.end - range.start + 1 : stat.size,
         total: stat.size,
       };
-    } catch {
-      return null;
+    } catch (e) {
+      // Same rule as get() above (pass 67): only a definite absence answers
+      // null. `/api/files` maps null to 404, so a transient EACCES/EIO reported
+      // itself to the browser as "this file does not exist" — for a live,
+      // delivered object, on the route every image and video flows through.
+      if (isLocalNotFound(e)) return null;
+      throw e;
     }
   }
 
@@ -149,8 +163,12 @@ class LocalStorage implements StorageDriver {
     try {
       const stat = await fsp.stat(this.p(key));
       return stat.isFile() ? stat.size : null;
-    } catch {
-      return null;
+    } catch (e) {
+      // A fault here reached the worker's extend path as "the source video is
+      // missing", which degrades a paid extension to a segment-only delivery
+      // (pass 67). Null means absent; everything else must be retried.
+      if (isLocalNotFound(e)) return null;
+      throw e;
     }
   }
 
@@ -310,8 +328,13 @@ class S3Storage implements StorageDriver {
         length: r.ContentLength,
         total: Number.isFinite(total) ? total : undefined,
       };
-    } catch {
-      return null;
+    } catch (e) {
+      // Only a definite 404 means the object is gone (pass 67). A 5xx/throttle/
+      // socket fault used to answer null, which /api/files rendered as 404 for
+      // a live video on every Range request and the worker read as a missing
+      // extend source.
+      if (isNotFoundError(e)) return null;
+      throw e;
     }
   }
 
@@ -321,8 +344,9 @@ class S3Storage implements StorageDriver {
       // a body that then has to be cancelled.
       const r = await this.client.send(new HeadObjectCommand({ Bucket: this.bucket, Key: key }));
       return typeof r.ContentLength === "number" ? r.ContentLength : null;
-    } catch {
-      return null;
+    } catch (e) {
+      if (isNotFoundError(e)) return null;
+      throw e;
     }
   }
 

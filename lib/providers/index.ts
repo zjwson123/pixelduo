@@ -120,7 +120,13 @@ export function refImageDataUrl(imageBase64: string): string {
 const TASK_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
 function boundedTaskId(raw: unknown, label: string): string {
   const id = typeof raw === "string" ? raw : "";
-  if (!TASK_ID_RE.test(id)) {
+  // `.` and `..` satisfy the charset above, and encodeURIComponent leaves them
+  // alone — so `${tasksUrl}/..` normalizes to the PARENT path and the poll GET
+  // still carries the provider credential. A hostile or compromised gateway
+  // could retarget the credentialed call to an ancestor endpoint on its own
+  // origin (not SSRF into our network — the origin cannot change, hence P4).
+  // A real task id (`cgt-…`, a UUID) never contains a dot pair or is a lone dot.
+  if (!TASK_ID_RE.test(id) || id === "." || id.includes("..")) {
     throw new Error(`${label} returned an unusable task id`);
   }
   return id;
@@ -431,6 +437,14 @@ export async function generateImages(input: {
   imageBase64List?: string[]; // for multi-image reference (wan2.7-image-pro)
   watermark?: boolean; // free plans keep provider/baked marks, paid get clean files
   onImage?: ImageProgress; // checkpoint after each persisted image
+  // Called for each object a FAILED "both" batch already stored (pass 67). The
+  // two lanes cannot checkpoint (they would race on the caller's array), so this
+  // layer only has a best-effort delete — and when the bucket's DeleteObject is
+  // faulting (often the same outage that failed the lane) the key was recorded
+  // NOWHERE: no checkpoint, no Image row, no staleArtifacts, no erasure path.
+  // The caller knows the job id, so it reclaims with the durable witness this
+  // layer cannot write.
+  onOrphan?: (key: string) => Promise<void>;
 }): Promise<ProviderImage[]> {
   // Mock mode for tests / demos
   if (mockImageProviderEnabled()) {
@@ -485,7 +499,16 @@ export async function generateImages(input: {
       generateWithSeedream(input.prompt, input.count, undefined, input.watermark ?? true, collect),
     ]);
     if (gpt.status === "rejected" || seed.status === "rejected") {
-      await Promise.all(storedKeys.map((key) => getStorage().delete(key).catch(() => undefined)));
+      // Delete — or, when the caller can record them, reclaim with a durable
+      // witness (pass 67). The bare delete's failure was swallowed, so a bucket
+      // fault orphaned up to 2N objects beyond every reclaim and erasure path.
+      await Promise.all(
+        storedKeys.map((key) =>
+          input.onOrphan
+            ? input.onOrphan(key).catch(() => undefined)
+            : getStorage().delete(key).catch(() => undefined),
+        ),
+      );
       throw gpt.status === "rejected" ? gpt.reason : (seed as PromiseRejectedResult).reason;
     }
     return [...gpt.value, ...seed.value];

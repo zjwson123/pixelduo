@@ -39,6 +39,16 @@ export interface PaymentWebhookEvent {
   // from refundAmountUsd because Paddle's adjustment totals are per-delivery
   // deltas and the two providers must not share a semantic.
   refundCumulativeUsd?: number;
+  // For "refunded": the ids of the refunds the CUMULATIVE total above includes
+  // (Stripe's charge.refunds.data ids). A `charge.refunded` delivery is a
+  // snapshot, and Stripe's at-least-once retries can deliver an OLD snapshot
+  // after the refund in it FAILED — `refund.failed` had already taken the money
+  // back out of the accumulator, and the stale snapshot's GREATEST() put it
+  // back, promoting the order and revoking credits for money the merchant kept
+  // (pass 67). Every id here is compared against the order's `:reversed`
+  // markers: a payload whose refunds are ALL already reversed is stale and
+  // applies nothing. Undefined when the payload does not carry the list.
+  refundIds?: string[];
   // For "refunded": the amount of a chargeback/dispute, also cumulative per
   // charge (Stripe's charge.dispute.created). It lives in its own order column
   // because a dispute is not a refund: Stripe reports refunds cumulatively and

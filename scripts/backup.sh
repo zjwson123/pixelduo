@@ -22,6 +22,18 @@ CONTAINER="${1:-}"
 # into ./backups and printed success. PGDATABASE stays as the last fallback for
 # an existing runbook; an explicit second argument still wins.
 DB="${2:-${POSTGRES_DB:-${PGDATABASE:-pixelduo}}}"
+# The name becomes a FILENAME GLOB in the rotation below (`"$BACKUP_DIR"/"$DB"-*.sql.gz`),
+# so a value carrying `*`, `?`, `[`, a slash or whitespace would make the rotation
+# match — and delete — snapshots of OTHER databases, or write outside
+# BACKUP_DIR (pass 67). Postgres does allow such names when quoted; a backup
+# directory that cannot name the dump unambiguously is not one this script
+# should rotate, so refuse instead of guessing.
+case "$DB" in
+  ''|*[!A-Za-z0-9_-]*)
+    echo "database name '$DB' is not a plain identifier (letters, digits, '_' and '-' only) — the backup filename and its rotation cannot treat it safely" >&2
+    exit 1
+    ;;
+esac
 DB_USER="${DB_USER:-${POSTGRES_USER:-pixelduo}}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 BACKUP_DIR="${BACKUP_DIR:-backups}"

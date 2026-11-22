@@ -1342,8 +1342,15 @@ export async function revokeOrderCreditsTx(
   const seen = new Set<string>();
   let revoked = 0;
   for (;;) {
-    const grants = await tx.$queryRaw<Array<{ id: string; remaining: number }>>(
-      Prisma.sql`SELECT id, remaining FROM "CreditGrant"
+    // `amount` is selected so a pre-CHECK row with a NEGATIVE amount is repaired
+    // in the same update (pass 67). That CHECK forbids `0 <= remaining <=
+    // amount`, so writing `remaining: 0` to such a row threw SQLSTATE 23514 and
+    // rolled back this whole webhook transaction: money refunded at the
+    // provider, credits kept, tier kept, and every retry reproduced it.
+    // writeOffExcessTx already repairs this shape on the spend path; the revoke
+    // and the expiry sweep were the two writers that never called it.
+    const grants = await tx.$queryRaw<Array<{ id: string; remaining: number; amount: number }>>(
+      Prisma.sql`SELECT id, remaining, amount FROM "CreditGrant"
         WHERE ("refId" = ${order.id} AND "refType" = 'order')
            OR "cycleOrderId" = ${order.id}
         ${GRANT_LOCK_ORDER}
@@ -1354,7 +1361,10 @@ export async function revokeOrderCreditsTx(
     for (const g of fresh) {
       seen.add(g.id);
       if (g.remaining <= 0) continue;
-      await tx.creditGrant.update({ where: { id: g.id }, data: { remaining: 0 } });
+      await tx.creditGrant.update({
+        where: { id: g.id },
+        data: g.amount < 0 ? { remaining: 0, amount: 0 } : { remaining: 0 },
+      });
       revoked += g.remaining;
     }
   }
@@ -1372,8 +1382,8 @@ export async function revokeOrderCreditsTx(
     LIMIT 1
   `);
   if (subscription.length > 0) {
-    const rollovers = await tx.$queryRaw<Array<{ id: string; remaining: number }>>(
-      Prisma.sql`SELECT id, remaining FROM "CreditGrant"
+    const rollovers = await tx.$queryRaw<Array<{ id: string; remaining: number; amount: number }>>(
+      Prisma.sql`SELECT id, remaining, amount FROM "CreditGrant"
         WHERE "userId" = ${order.userId} AND "source" = 'ROLLOVER'
           AND "cycleOrderId" IS NULL
           AND "expiresAt" = ${subscription[0].expiresAt}
@@ -1384,7 +1394,10 @@ export async function revokeOrderCreditsTx(
       if (seen.has(g.id)) continue;
       seen.add(g.id);
       if (g.remaining <= 0) continue;
-      await tx.creditGrant.update({ where: { id: g.id }, data: { remaining: 0 } });
+      await tx.creditGrant.update({
+        where: { id: g.id },
+        data: g.amount < 0 ? { remaining: 0, amount: 0 } : { remaining: 0 },
+      });
       revoked += g.remaining;
     }
   }
@@ -1591,6 +1604,30 @@ export async function adminClawbackTx(
     if (ea !== eb) return ea - eb;
     return a.createdAt.getTime() - b.createdAt.getTime();
   });
+  // A legacy-drifted account can hold FEWER credits in its balance column than
+  // its grant rows add up to (the CHECK is NOT VALID for pre-existing rows). The
+  // take below succeeds against the grants and then the ledger debit throws from
+  // addCreditsTx, rolling back the whole clawback — so exactly the accounts the
+  // repair script reports were the ones fraud recovery could never touch (pass
+  // 67). When the REQUEST is covered by the grants but not by the BALANCE, take
+  // only what the balance backs (the rule revokeOrderCreditsTx applies to the
+  // same state). A request larger than the grants still fails the ordinary way
+  // below: "you asked for more than this account has" is the honest answer.
+  //
+  // The read is a snapshot for the reason revokeOrderCreditsTx documents; a
+  // concurrent commit that lowers the balance past the clamp makes addCreditsTx
+  // refuse and the operator retries.
+  const holder = await tx.user.findUnique({ where: { id: userId }, select: { credits: true } });
+  if (!holder) throw new Error("user-not-found");
+  const grantTotal = rows.reduce((sum, r) => sum + Math.max(0, r.remaining), 0);
+  const spendable = Math.max(0, holder.credits);
+  if (amount > spendable && amount <= grantTotal) {
+    console.warn(
+      `[ledger] admin clawback for user ${userId} clamped from ${amount} to ${spendable}: the account balance is below the credits its grants still hold — a legacy invariant drift (run scripts/repair-credit-invariant.ts)`,
+    );
+    amount = spendable;
+    if (amount <= 0) throw new Error("insufficient-credits");
+  }
   let needed = amount;
   // Which order's credits the clawback took, so the ledger row can say it
   // (pass 36). Before this, every clawback wrote ONE anonymous row — refType

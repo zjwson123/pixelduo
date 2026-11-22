@@ -228,6 +228,39 @@ export function assertProductionConfig(env: NodeJS.ProcessEnv = process.env): vo
       "NEXTAUTH_URL must be a usable https:// URL (scheme + host) in production — next-auth issues a non-Secure, unprefixed session cookie (and mails http:// links) when it is not, and links built from a hostless value point nowhere. An http:// URL is accepted only for a test deployment on a loopback/private host",
     );
   }
+  // A bare ORIGIN, not a URL carrying credentials or a path (pass 67). The
+  // parse above accepts any well-formed https URL, and the copy-paste shapes
+  // operators use for DATABASE_URL/SMTP_URL include userinfo: a
+  // `https://user:secret@host` value would be published verbatim in
+  // sitemap.xml, robots.txt, the og: tags and every mail link (lib/site.ts now
+  // strips it defensively, but next-auth itself builds callback URLs from this
+  // value). A path/query/fragment is invalid for the same reason: next-auth
+  // appends `/api/auth/...` to it.
+  if (
+    authUrl.username !== "" ||
+    authUrl.password !== "" ||
+    authUrl.search !== "" ||
+    authUrl.hash !== "" ||
+    (authUrl.pathname !== "" && authUrl.pathname !== "/")
+  ) {
+    throw new Error(
+      "NEXTAUTH_URL must be a bare origin (scheme://host[:port]) — it cannot carry credentials, a path, a query or a fragment: next-auth appends its callback paths to this value, and every absolute link the app emits (sitemap, og: tags, auth mail) is built from it",
+    );
+  }
+  // A mock payment deployment is a FREE-CREDIT faucet to anyone who can reach
+  // it: /api/checkout fulfils the order inline, with no provider call, so every
+  // verified account can mint credits that are then spent against real
+  // provider keys. Both production compose files forward the explicit pair for
+  // a private/internal stack (pass 66 deploy), and the owner's own deployment
+  // uses it — so this is a WARNING, not a refusal (pass 67). It is loud because
+  // the pair is the only thing distinguishing it from a misconfigured paid
+  // deployment, and the one previous silent case (a leftover flag) was a
+  // published-secret hole.
+  if (testDeployment && !isLocalOrPrivateHostname(authUrl.hostname)) {
+    console.warn(
+      "[config] PAYMENT_ALLOW_MOCK is set on a public host — checkout fulfils orders without payment, so any verified account can mint credits (which are spent against real provider keys). Intended for a private/internal stack only; use a real PAYMENT_PROVIDER to take payments.",
+    );
+  }
 
   if (!testDeployment) {
     // Without SMTP_URL the mailer falls back to a stdout logger, so password

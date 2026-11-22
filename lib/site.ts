@@ -22,6 +22,20 @@
 //     is the single place both paths read, so they cannot disagree.
 export function siteBase(): string {
   const raw = process.env.NEXTAUTH_URL?.trim();
-  // Trailing slashes would produce "https://host//sitemap.xml".
-  return (raw ? raw : "http://localhost:3000").replace(/\/+$/, "");
+  if (!raw) return "http://localhost:3000";
+  // An ORIGIN, not the raw string (pass 67). NEXTAUTH_URL is documented as the
+  // deployment's origin, but nothing stopped an operator pasting the shape they
+  // use for DATABASE_URL/SMTP_URL — `https://user:secret@host` — and every
+  // ABSOLUTE producer here published it verbatim: sitemap.xml, robots.txt's
+  // Sitemap line, the og: tags, and every link in every mail. `new URL().origin`
+  // drops userinfo, path, query and fragment, which are all invalid for this
+  // value anyway (next-auth builds callback URLs by appending to it). A value
+  // that does not parse keeps the old trailing-slash trim; the production boot
+  // gate refuses it separately.
+  try {
+    return new URL(raw).origin;
+  } catch {
+    // Trailing slashes would produce "https://host//sitemap.xml".
+    return raw.replace(/\/+$/, "");
+  }
 }

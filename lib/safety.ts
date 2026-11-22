@@ -56,7 +56,26 @@ const BLOCKED: Array<{ re: RegExp; reason: string }> = [
         `${spacedWord("nude")}(?:s|ly|ness)?|nudity|${spacedWord("nudity")}|` +
         `nudist|${spacedWord("nudist")}|nudism|${spacedWord("nudism")}|` +
         `naked(?:ness)?|${spacedWord("naked")}(?:ness)?|` +
-        `porn\\w*|${spacedWord("porn")}\\w*|erotic\\w*|nsfw|explicit\\w*)\\b`,
+        `porn\\w*|${spacedWord("porn")}\\w*|erotic\\w*|nsfw|explicit\\w*|` +
+        // Sexual violence and non-consensual-intimate-imagery verbs (pass 67).
+        // 强奸/性侵 were blocked while the English "rape"/"rapist"/"gang rape"
+        // were not, and "nudify"/"undress" — the two verbs such requests are
+        // actually written with — reached the provider untouched. `rap(?:e|…)`
+        // rather than `rape\w*`: the stem `\w*` form would swallow "rapeseed",
+        // an ordinary prompt. The suffix list is the spellings a reader takes
+        // as the blocked word (rapes/raped/raping/rapist/rapers), and each one
+        // ends before a non-word character so "grape"/"drape"/"scrape" (no
+        // boundary before `rape`) stay allowed.
+        //
+        // `undress` has a benign culinary/medical sense ("an undressed
+        // salad", "undressing a wound"). That collateral is accepted: in an
+        // IMAGE prompt the word is overwhelmingly the NCI sense, and the video
+        // lane (where this list is the only gate) has no output audit to catch
+        // what gets through. `bikini`/`lingerie` are NOT blocked for the
+        // opposite reason — they are ordinary fashion subjects and the image
+        // lane's audit is the control.
+        `rap(?:e|es|ed|er|ers|ing|ings|ist|ists)|${spacedWord("raping")}|${spacedWord("rape")}|` +
+        `nudif\\w*|${spacedWord("nudify")}|undress(?:es|ed|ing)?|${spacedWord("undress")})\\b`,
       "i",
     ),
     reason: "adult-content",
@@ -90,6 +109,28 @@ const BLOCKED: Array<{ re: RegExp; reason: string }> = [
       `\\b(?:${spacedWord("child")}[\\s._*-]*(?:ren)?[\\s._*-]*` +
         `(?:abuse|${spacedWord("abuse")}|porn\\w*|${spacedWord("porn")}\\w*|sexual)|` +
         `minor.*sexual|${spacedWord("underage")}(?:d)?)\\b`,
+      "i",
+    ),
+    reason: "child-safety",
+  },
+  // The CSAM vocabulary itself (pass 67). The list knew 儿童色情 and 恋童 but
+  // not a single English counterpart: `csam`, `pedo`, `pedophile`,
+  // `paedophilia`, `lolicon`, `shotacon`, `molest a child` and `child molester`
+  // all returned ok — probed. The video lane has no output audit, so this list
+  // is its only gate, and these are the words such a request is written with.
+  //
+  // Deliberately NOT added: bare `cp` (in both of the product's languages it is
+  // ordinary — 磕CP, "control panel"), `preteen`/`teen` alone, and suggestive
+  // clothing words (`bikini`, `lingerie`, `topless`): those are ordinary
+  // fashion prompts, and the image lane's output audit is the control for
+  // them. The boundary is explicit sexual content and the CSAM vocabulary,
+  // not suggestiveness.
+  {
+    re: new RegExp(
+      `\\b(?:csam|${spacedWord("csam")}|` +
+        `(?:pedo|paedo)(?:phile|philes|philia|philic)?|` +
+        `(?:lolicon|shotacon)s?|` +
+        `molest(?:s|ed|er|ers|ing|ation)?|${spacedWord("molest")})\\b`,
       "i",
     ),
     reason: "child-safety",

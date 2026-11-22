@@ -170,6 +170,11 @@ export async function processImageJob(job: {
             imageBase64List,
             watermark: isFree,
             onImage: persistProgress,
+            // A failed "both" batch's already-stored objects (pass 67). This
+            // layer cannot write a durable record; the worker can — and
+            // reclaimStoredArtifact also does the delete, recording the key in
+            // Job.staleArtifacts when that delete faults.
+            onOrphan: (key) => reclaimStoredArtifact(job.id, key).then(() => undefined),
           })
         : [];
     // Checkpointing models (gpt/seedream/wan/mock/edit) already appended their

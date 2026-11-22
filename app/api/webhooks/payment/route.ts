@@ -432,11 +432,40 @@ export async function POST(req: Request) {
           // number on its own reached the price — the accumulator stood at
           // $44.99 and no revoke ever fired.
           if (event.refundCumulativeUsd !== undefined) {
-            await tx.$queryRaw(Prisma.sql`
-              UPDATE "Order"
-              SET "refundedAmountUsd" = GREATEST("refundedAmountUsd", ${event.refundCumulativeUsd})
-              WHERE id = ${order.id}
-            `);
+            // A retried `charge.refunded` can carry a STALE snapshot: the refund
+            // it counted later failed, and `refund.failed` already took that
+            // amount back out of the accumulator (pass 66). Applying the
+            // snapshot's GREATEST() put the money back in and promoted the order
+            // — credits and paid tier revoked for money the merchant kept, and
+            // only a normal refund receipt was mailed to the operator (pass 67).
+            // Every refund id the payload names is checked against this order's
+            // `:reversed` markers; when they are ALL reversed, the snapshot
+            // describes money that came back and applies nothing. A payload
+            // without the list (a relay-shaped delivery) keeps the old write.
+            const reversedRefunds = new Set(
+              (order.refundedAdjustments ?? [])
+                .filter((m) => m.endsWith(":reversed"))
+                .map((m) => m.slice(0, -":reversed".length)),
+            );
+            const payloadRefunds = event.refundIds ?? [];
+            const staleSnapshot =
+              payloadRefunds.length > 0 && payloadRefunds.every((id) => reversedRefunds.has(id));
+            if (staleSnapshot) {
+              // The provider's `fullRefund` flag describes the same stale
+              // snapshot — drop it with the write. The promotion block below
+              // still measures the REAL accumulator (lowered by the reversal),
+              // so a genuine later full return is not hidden.
+              fullRefund = false;
+              console.warn(
+                `[webhook] ignoring a stale charge.refunded snapshot for order ${order.id}: every refund it names (${payloadRefunds.join(", ")}) was recorded as reversed`,
+              );
+            } else {
+              await tx.$queryRaw(Prisma.sql`
+                UPDATE "Order"
+                SET "refundedAmountUsd" = GREATEST("refundedAmountUsd", ${event.refundCumulativeUsd})
+                WHERE id = ${order.id}
+              `);
+            }
           }
           if (event.disputedAmountUsd !== undefined) {
             // A dispute's `amount` is THAT dispute's own amount, not a running
