@@ -22,7 +22,11 @@ x-appenv: &appenv
   NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?set NEXTAUTH_SECRET}
   NEXTAUTH_URL: ${NEXTAUTH_URL:?set NEXTAUTH_URL, e.g. https://pixelduo.ai}
   HOSTNAME: 0.0.0.0
-  PAYMENT_PROVIDER: ${PAYMENT_PROVIDER:?set PAYMENT_PROVIDER (stripe|paddle)}
+  PAYMENT_PROVIDER: ${PAYMENT_PROVIDER:?set PAYMENT_PROVIDER (stripe|paddle, or mock together with PAYMENT_ALLOW_MOCK=1 for an internal test stack)}
+  # Same explicit pair as docker-compose.prod.yml (pass 66 deploy): a mock
+  # provider is allowed in production only when this flag is also 1, and a real
+  # provider turns the exemption off.
+  PAYMENT_ALLOW_MOCK: ${PAYMENT_ALLOW_MOCK:-}
   STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
   STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
   PADDLE_API_KEY: ${PADDLE_API_KEY:-}

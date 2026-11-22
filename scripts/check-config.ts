@@ -96,17 +96,12 @@ const NOT_FORWARDED: Record<string, { files: string[]; reason: string }> = {
     reason:
       "host-only input to scripts/setup-mail.ts — the script writes SMTP_URL; no process inside a container reads it",
   },
-  // PAYMENT_ALLOW_MOCK is the one escape hatch that really is local-only: the
-  // default compose sets it to 1 for the mock flow, and neither prod file
-  // forwards it at all (a deployment that sets it in its own .env is opt-ing in
-  // through compose interpolation, not through an anchor line here). The other
-  // three — EMAIL_VERIFY_AUTO, TRUST_X_REAL_IP, MAIL_DEV_MODE — DO carry anchors
-  // in both prod files, so an exemption for them would only un-protect those
-  // anchors; check 2b fails on exactly that.
-  PAYMENT_ALLOW_MOCK: {
-    files: ["docker-compose.prod.yml", "docker-compose.single.yml"],
-    reason: "a boot-assertion escape hatch for the local/test stack only",
-  },
+  // PAYMENT_ALLOW_MOCK deliberately has no entry now (pass 66 deploy): all three
+  // compose files forward it, so a real deployment can run WITHOUT a payment
+  // provider by setting the explicit pair PAYMENT_ALLOW_MOCK=1 +
+  // PAYMENT_PROVIDER=mock. The boot gate refuses every other combination, and a
+  // real provider turns the exemption off, so this is an opt-in test stack, not
+  // a way to weaken a paid deployment.
   // NEXTAUTH_URL deliberately has no entry: all three files forward it (as an
   // env var and as a build arg), so any exemption here would be dead weight that
   // silences the one check that matters most on this variable.

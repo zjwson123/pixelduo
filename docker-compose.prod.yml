@@ -34,7 +34,13 @@ x-appenv: &appenv
   FEEDBACK_WEBHOOK_URL: ${FEEDBACK_WEBHOOK_URL:-}
   FEEDBACK_WEBHOOK_KIND: ${FEEDBACK_WEBHOOK_KIND:-feishu}
   EMAIL_VERIFY_AUTO: "0"
-  PAYMENT_PROVIDER: ${PAYMENT_PROVIDER:?set PAYMENT_PROVIDER (stripe or paddle — mock is forbidden in production)}
+  PAYMENT_PROVIDER: ${PAYMENT_PROVIDER:?set PAYMENT_PROVIDER (stripe or paddle; mock only with PAYMENT_ALLOW_MOCK=1)}
+  # The explicit test-only hatch, forwarded so a private/internal deployment can
+  # run without a payment provider (pass 66 deploy). The boot gate requires the
+  # PAIR: PAYMENT_ALLOW_MOCK=1 AND PAYMENT_PROVIDER=mock. A real provider
+  # disables the exemption automatically, and the empty default leaves a paid
+  # deployment exactly as before.
+  PAYMENT_ALLOW_MOCK: ${PAYMENT_ALLOW_MOCK:-}
   STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
   STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
   PADDLE_API_KEY: ${PADDLE_API_KEY:-}
