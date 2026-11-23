@@ -1,4 +1,4 @@
-import { ok, fail, enforceRateLimit, readBodyCapped, tooLarge } from "@/lib/api";
+import { ok, fail, enforceRateLimit, readBodyCapped, parseJsonBody, tooLarge } from "@/lib/api";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { envLimit, rateLimit } from "@/lib/rate-limit";
@@ -79,6 +79,21 @@ export async function POST(req: Request) {
     const bodyRaw = await readBodyCapped(req, WEBHOOK_MAX_BYTES, { allowNonJson: true });
     if ("tooLarge" in bodyRaw) return tooLarge();
     const raw = bodyRaw.raw;
+    // The deep text guard every other JSON route gets from parseJsonBody (pass
+    // 68). This route could not use that helper for its VALUE — the raw bytes
+    // are what the provider's HMAC covers, so they must reach the verifier
+    // untouched — but the body still has to pass the same character check:
+    // `readBodyCapped` refuses a literal U+0000 in the byte stream and cannot
+    // see an ESCAPED one, so `{"eventId":"a\u0000b"}` became a real NUL after
+    // the verifier's JSON.parse and reached `paymentEvent.findUnique` as
+    // SQLSTATE 22021 — an UNEXPECTED error, masked as a 500 with a captured
+    // incident, from an endpoint that needs no credential (the mock verifier
+    // accepts unsigned bodies on a mock deployment). The lone-surrogate and
+    // non-string shapes below are the same class passes 25/30/38 closed for the
+    // other JSON routes. Parsing a copy only to validate it costs one bounded
+    // pass over ≤256 KiB; a non-JSON body (no provider sends one) is the 400
+    // `invalid-json` every other route answers.
+    parseJsonBody(raw);
     // The signature's timestamp window is judged on the DATABASE's clock — the
     // one every other money decision uses (pass 26). On the app clock, a host
     // skewed by more than the window rejected EVERY genuine delivery as an

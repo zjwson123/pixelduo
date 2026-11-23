@@ -146,14 +146,17 @@ describe("plan entitlement expires where the watermark is decided", () => {
   });
 
   it("reads the tier from planRenewsAt, not from the plan name", () => {
-    expect(isFreeTier(null)).toBe(true);
-    expect(isFreeTier({ plan: "free", planRenewsAt: null })).toBe(true);
+    // The decision clock is required (pass 68): the worker always hands it the
+    // database's now, so these pure cases pin the same instant.
+    const now = new Date();
+    expect(isFreeTier(null, now)).toBe(true);
+    expect(isFreeTier({ plan: "free", planRenewsAt: null }, now)).toBe(true);
     // Lapsed cycle, sweep not run yet: the entitlement ended with the cycle.
-    expect(isFreeTier({ plan: "pro", planRenewsAt: new Date(Date.now() - 1_000) })).toBe(true);
+    expect(isFreeTier({ plan: "pro", planRenewsAt: new Date(now.getTime() - 1_000) }, now)).toBe(true);
     // A paid plan with no cycle end proves nothing, so it is not trusted.
-    expect(isFreeTier({ plan: "pro", planRenewsAt: null })).toBe(true);
+    expect(isFreeTier({ plan: "pro", planRenewsAt: null }, now)).toBe(true);
     // In cycle: unchanged.
-    expect(isFreeTier({ plan: "pro", planRenewsAt: new Date(Date.now() + 86_400_000) })).toBe(false);
+    expect(isFreeTier({ plan: "pro", planRenewsAt: new Date(now.getTime() + 86_400_000) }, now)).toBe(false);
   });
 
   it("bakes the badge into a lapsed plan's deliverable and delivers clean bytes in cycle", async () => {

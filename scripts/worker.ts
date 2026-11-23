@@ -44,9 +44,13 @@ export function isFreeTier(
   // (dbNow): the worker is its own process, often on its own host, while the
   // values compared here — planRenewsAt, and the grant deadlines it mirrors — are
   // written and read on Postgres's timeline. On the app's clock a skew watermarks
-  // a paying customer's output, or leaves a lapsed plan unmarked. Optional so
-  // pure callers (tests) need no database.
-  now: Date = new Date(),
+  // a paying customer's output, or leaves a lapsed plan unmarked.
+  //
+  // REQUIRED, like checkinDateKey's instant (pass 68): the old `= new Date()`
+  // default was the last app-clock entitlement decision in the codebase, and a
+  // future caller that dropped the argument would silently reintroduce the skew
+  // this decision exists to keep out. The type checker names every caller.
+  now: Date,
 ): boolean {
   if (!user || user.plan === "free") return true;
   return !user.planRenewsAt || user.planRenewsAt.getTime() <= now.getTime();

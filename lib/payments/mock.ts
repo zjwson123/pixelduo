@@ -53,9 +53,34 @@ export class MockProvider implements PaymentProvider {
         raw?: unknown;
       };
       if (!body.eventId) return IGNORED_WEBHOOK;
+      // The ids the route hands to Prisma must be strings of sane length, not
+      // merely truthy (pass 68). This verifier accepts an UNSIGNED body, so on
+      // a mock deployment every value here is attacker-chosen:
+      // `{"eventId":{}}` or `{"orderId":123}` reached `paymentEvent.findUnique`
+      // / `order.findUnique` as a Prisma type error — an unexpected error,
+      // masked as a 500 plus a captured incident, from an endpoint that needs
+      // no credential. The route now refuses NUL/ill-formed text first
+      // (parseJsonBody); this closes the type and length halves. The bounds are
+      // generous for real ids (a cuid is 25 chars) and stop an arbitrary string
+      // from bloating PaymentEvent, the order's marker arrays or a rate-limit
+      // key. A malformed identity is refused outright (null → 400), not
+      // silently ignored: the caller sent something no provider would.
+      const idString = (v: unknown, max: number): string | undefined =>
+        typeof v === "string" && v.length >= 1 && v.length <= max ? v : undefined;
+      const eventId = idString(body.eventId, 200);
+      if (!eventId) return null;
+      for (const [name, max] of [
+        ["orderId", 64],
+        ["providerOrderId", 200],
+        ["refundAdjustmentId", 200],
+        ["disputeId", 200],
+        ["reinstatedDisputeId", 200],
+      ] as const) {
+        if (body[name] !== undefined && !idString(body[name], max)) return null;
+      }
       return {
         provider: this.name,
-        eventId: body.eventId,
+        eventId,
         type: body.status === "refunded" ? "refunded" : "paid",
         orderId: body.orderId,
         providerOrderId: typeof body.providerOrderId === "string" ? body.providerOrderId : undefined,

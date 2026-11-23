@@ -367,8 +367,23 @@ export const authOptions: NextAuthOptions = {
           if (typeof sv !== "number") {
             throw new Error("authorize returned a user without sessionVersion — refusing to mint a session");
           }
+          // The same rule for the second-factor claim (pass 68). `?? false`
+          // read a MISSING totpPending as "a full session", so a future
+          // credentials path that stopped stamping it would hand any
+          // 2FA-enabled account a session that skipped TOTP — the guard layer
+          // would see `totpPending: false` because that is what the default
+          // invented. It is the twin of the `?? 0` the sv check above removed
+          // in pass 31, on the more dangerous field: sv protects revocation,
+          // this protects the second factor. All three authorize branches stamp
+          // a boolean today; if one ever stops, fail at mint time.
+          const pending = (user as AuthUser).totpPending;
+          if (typeof pending !== "boolean") {
+            throw new Error(
+              "authorize returned a user without totpPending — refusing to mint a session that may skip the second factor",
+            );
+          }
           token.sv = sv;
-          token.totpPending = (user as AuthUser).totpPending ?? false;
+          token.totpPending = pending;
         }
         return token;
       }
@@ -397,9 +412,20 @@ export const authOptions: NextAuthOptions = {
       const id =
         typeof token.uid === "string" ? token.uid : typeof token.sub === "string" ? token.sub : null;
       const sv = typeof token.sv === "number" ? token.sv : null;
+      // The second-factor claim is part of what a live session must be able to
+      // prove (pass 68). A token carrying an id and a matching sv but no
+      // boolean totpPending is one no current version mints — every branch of
+      // authorize has stamped it since TOTP shipped, and the mint path above
+      // now refuses to omit it — so the only remaining source is a token minted
+      // by an older build and kept alive by this route's free re-dating. The
+      // guards' `totpPending ?? false` reads the absent claim as "full
+      // session", which is the permissive direction on a second-factor gate;
+      // stripping the identity here retires the credential instead (the browser
+      // re-logs in, and a 2FA account then owes its code).
+      const pendingKnown = typeof token.totpPending === "boolean";
       if (id) {
         const db = await prisma.user.findUnique({ where: { id }, select: { sessionVersion: true } });
-        if (!db || db.sessionVersion !== sv) {
+        if (!db || db.sessionVersion !== sv || !pendingKnown) {
           delete token.uid;
           delete token.sv;
           delete token.totpPending;
