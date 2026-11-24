@@ -31,7 +31,16 @@ export async function sessionUser(): Promise<{ id: string; sv: number; totpPendi
   // a deploy) stayed valid, and any future credential-minting path that forgot
   // to stamp `sv` would be silently accepted instead of failing closed.
   if (typeof su.sv !== "number") throw new ApiError(401, "unauthorized");
-  return { id: su.id, sv: su.sv, totpPending: su.totpPending ?? false };
+  // The second-factor claim is required for the same reason (pass 69), and it
+  // is the last permissive default in the guard layer after pass 68 removed the
+  // pair that produced such a token. The JWT read path already strips the
+  // identity of a token that cannot prove this boolean, so this is unreachable
+  // today — which is exactly why `?? false` must go: it is the permissive
+  // direction on a second-factor gate, and a future change to the strip (or a
+  // new guard that reads a session some other way) would silently mint the
+  // "full session" that skips TOTP. Fail closed here instead.
+  if (typeof su.totpPending !== "boolean") throw new ApiError(401, "unauthorized");
+  return { id: su.id, sv: su.sv, totpPending: su.totpPending };
 }
 
 // Partial (2FA-pending) session, still checked against the DB sessionVersion.

@@ -162,7 +162,7 @@ describe("pass 22 — /api/files charges the account, not the shared egress", ()
     const user = await prisma.user.create({
       data: { email, passwordHash: "x", name: "Files" },
     });
-    getServerSession.mockResolvedValue({ user: { id: user.id, sv: user.sessionVersion } });
+    getServerSession.mockResolvedValue({ user: { id: user.id, sv: user.sessionVersion, totpPending: false } });
 
     // The neighbour: the source address's anonymous bucket is gone.
     await spend(`files:ip:${ip}`);
@@ -185,7 +185,7 @@ describe("pass 22 — /api/files charges the account, not the shared egress", ()
     const email = `p22-files-account-${stamp}@test.dev`;
     madeEmails.push(email);
     const user = await prisma.user.create({ data: { email, passwordHash: "x", name: "Account budget" } });
-    getServerSession.mockResolvedValue({ user: { id: user.id, sv: user.sessionVersion } });
+    getServerSession.mockResolvedValue({ user: { id: user.id, sv: user.sessionVersion, totpPending: false } });
 
     await spend(`u:files:${user.id}`);
     const res = await getFile(reqFrom(ip), { params: Promise.resolve({ key: ["nope.png"] }) });
@@ -212,7 +212,7 @@ describe("pass 22 — /api/files charges the account, not the shared egress", ()
     madeEmails.push(email);
     const user = await prisma.user.create({ data: { email, passwordHash: "x", name: "Revoked" } });
     // A token minted before a password reset: same id, stale sessionVersion.
-    getServerSession.mockResolvedValue({ user: { id: user.id, sv: user.sessionVersion + 1 } });
+    getServerSession.mockResolvedValue({ user: { id: user.id, sv: user.sessionVersion + 1, totpPending: false } });
 
     const res = await getFile(reqFrom(ip), { params: Promise.resolve({ key: ["nope.png"] }) });
     expect(res.status).toBe(401);

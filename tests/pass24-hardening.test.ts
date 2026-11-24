@@ -90,7 +90,7 @@ describe("pass 24 — erasure reaches the clip an extend job names", () => {
     });
     expect(await storage.size(key)).not.toBeNull();
 
-    getServerSession.mockResolvedValue({ user: { id: user.id, sv: user.sessionVersion } });
+    getServerSession.mockResolvedValue({ user: { id: user.id, sv: user.sessionVersion, totpPending: false } });
     const res = await deleteAccount(
       new Request("http://localhost:3100/api/account/delete", {
         method: "POST",

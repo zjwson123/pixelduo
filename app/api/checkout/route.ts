@@ -4,7 +4,7 @@ import { getPlan, getPack } from "@/lib/catalog";
 import { prisma } from "@/lib/prisma";
 import { dbNow, fulfillOrder } from "@/lib/ledger";
 import { randomUUID } from "crypto";
-import { getPaymentProvider } from "@/lib/payments";
+import { getPaymentProvider, checkoutDestinationUrl } from "@/lib/payments";
 import { siteBase } from "@/lib/site";
 
 const schema = z.object({
@@ -131,6 +131,20 @@ export async function POST(req: Request) {
       cancelUrl: process.env.PAYMENT_CANCEL_URL || `${base}/studio`,
       metadata: { orderId: order.id, kind: body.kind, userId },
     });
+    // The hosted-checkout link becomes a browser NAVIGATION (the workbench
+    // assigns it to window.location), so a provider response is not enough to
+    // trust with it: only an absolute http(s) URL is a destination this app
+    // hands a buyer's browser (see checkoutDestinationUrl). A provider that
+    // answers anything else is a real fault — fail() reports it as an incident
+    // rather than sending the script to the client.
+    const checkoutUrl = checkoutDestinationUrl(session.checkoutUrl);
+    if (!checkoutUrl) {
+      return fail(
+        new Error(
+          "checkout-provider-returned-an-unusable-url: the payment provider answered a checkout link this app will not send a browser to",
+        ),
+      );
+    }
     // Predicate-guarded like every other Order write: the row is the one the
     // refund path resolves through (findFirst on providerOrderId), and this
     // update used to be unconditional. The session is created before the buyer
@@ -146,7 +160,7 @@ export async function POST(req: Request) {
       orderId: order.id,
       status: "pending",
       mock: false,
-      checkoutUrl: session.checkoutUrl,
+      checkoutUrl,
     });
   } catch (e) {
     if (e instanceof z.ZodError) return fail(zodMessage(e));

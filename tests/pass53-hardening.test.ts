@@ -198,7 +198,7 @@ describe("gallery delete keeps the row when the object cannot be removed", () =>
 
   it("deletes the object before the row", async () => {
     const userId = await makeUser("gallery-ok");
-    getServerSession.mockResolvedValue({ user: { id: userId, sv: 0 } });
+    getServerSession.mockResolvedValue({ user: { id: userId, sv: 0, totpPending: false } });
     const key = `img/${tag}-ok.png`;
     const imageId = await makeImage(userId, key);
 
@@ -213,7 +213,7 @@ describe("gallery delete keeps the row when the object cannot be removed", () =>
 
   it("keeps the row when the storage delete fails, so erasure can still find it", async () => {
     const userId = await makeUser("gallery-fail");
-    getServerSession.mockResolvedValue({ user: { id: userId, sv: 0 } });
+    getServerSession.mockResolvedValue({ user: { id: userId, sv: 0, totpPending: false } });
     const key = `img/${tag}-fail.png`;
     const imageId = await makeImage(userId, key);
 

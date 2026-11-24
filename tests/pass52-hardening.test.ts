@@ -288,7 +288,7 @@ describe("the key list never clips an active key", () => {
         })),
       ],
     });
-    getServerSession.mockResolvedValue({ user: { id: userId, sv: 0 } });
+    getServerSession.mockResolvedValue({ user: { id: userId, sv: 0, totpPending: false } });
   });
 
   afterAll(async () => {

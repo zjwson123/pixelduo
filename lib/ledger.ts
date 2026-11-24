@@ -661,9 +661,29 @@ export async function spendCreditsTx(
         r.amount,
         "repaired while spending from it",
       );
-      r.remaining = r.amount;
+      // Take what the repair LEFT, not the pre-repair snapshot (pass 69). The
+      // repair also zeroes a NEGATIVE `amount` — pre-CHECK corruption, which the
+      // CHECK (NOT VALID) does not police for existing rows but does police on
+      // every write. Assigning the snapshot's `amount` back made `take` below
+      // NEGATIVE, and `decrement: -5` wrote remaining = 5 against amount = 0:
+      // over the repaired ceiling, so 23514 aborted this whole transaction. The
+      // repair rolled back with it, so every later spend repeated the identical
+      // abort — the account could not generate, be refunded or be clawed back,
+      // and /api/me kept advertising a balance nothing could spend. (The
+      // clawback loop is saved by its own `remaining <= 0` guard; this one had
+      // none.) The row is locked FOR UPDATE, so the re-read sees this
+      // transaction's own repair.
+      const repaired = await tx.creditGrant.findUnique({
+        where: { id: r.id },
+        select: { remaining: true },
+      });
+      r.remaining = repaired?.remaining ?? 0;
     }
     const take = Math.min(r.remaining, needed);
+    // A repair can leave nothing in this lot — the negative-amount case writes
+    // off the whole holding, because none of it was ever granted. There is no
+    // credit to take and nothing to record as this job's funding.
+    if (take <= 0) continue;
     await tx.creditGrant.update({
       where: { id: r.id },
       data: { remaining: { decrement: take } },

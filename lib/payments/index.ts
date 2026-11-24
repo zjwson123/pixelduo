@@ -65,6 +65,28 @@ export function getPaymentProvider(): PaymentProvider {
   return cached;
 }
 
+// The one provider-supplied value that becomes a browser NAVIGATION.
+//
+// /api/checkout hands the hosted-checkout link to the buyer's browser, and
+// components/workbench.tsx assigns it to `window.location`. A `javascript:` (or
+// `data:`) URL there runs in THIS origin — CSP's script-src 'unsafe-inline'
+// permits it — with the buyer's session: a compromised or misconfigured
+// provider response would escalate from "can redirect a payment" to "can act as
+// the signed-in user". Every other provider-controlled value in this codebase is
+// treated as untrusted (SSRF-pinned downloads, bounded error text), and the
+// checkout link is the same rule at the last hop. Only an absolute http(s) URL
+// is a destination a browser may be sent to; parsing the protocol (rather than a
+// string prefix) is what rejects the `JaVaScRiPt:` spellings and whitespace
+// padding a prefix test misses.
+export function checkoutDestinationUrl(raw: string): string | null {
+  try {
+    const url = new URL(raw);
+    return url.protocol === "https:" || url.protocol === "http:" ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
 // Every provider whose webhook signature can still be verified by this
 // deployment, selected provider first. A provider switch is a config change who
 // only takes effect on the CURRENT provider: orders created before it keep

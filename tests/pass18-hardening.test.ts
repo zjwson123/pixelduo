@@ -271,7 +271,7 @@ describe("api key listing budget (pass 18)", () => {
       where: { id: user.id },
       select: { sessionVersion: true },
     });
-    getServerSession.mockResolvedValue({ user: { id: user.id, sv: row?.sessionVersion ?? 0 } });
+    getServerSession.mockResolvedValue({ user: { id: user.id, sv: row?.sessionVersion ?? 0, totpPending: false } });
     const key = `rl:u:apikey-list:${user.id}`;
     redisKeys.push(key);
     await redis.del(key);
