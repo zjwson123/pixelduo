@@ -9,7 +9,7 @@ import { captureError } from "@/lib/observability";
 import { ADMIN_GUARD_LOCK, assertAnotherAdminRemains } from "@/lib/admin";
 import {
   verifyTotp,
-  useBackupCode,
+  verifyBackupCode,
   twoFactorLockStatus,
   recordTwoFactorFailure,
   clearTwoFactorFailures,
@@ -88,11 +88,18 @@ export async function POST(req: Request) {
     if (user.totpEnabled && user.totpSecret) {
       if (!body.token && !body.backupCode) return fail(new Error("2fa-code-required"));
       // The TOTP branch claims the code (a code observed inside its ±1 step
-      // window must not also be able to erase the account); backup codes are
-      // already single-use in the database.
+      // window must not also be able to erase the account). The backup-code
+      // branch only VERIFIES it (pass 70): erasure is the one operation whose
+      // failure path must leave the account exactly as it was, and the storage
+      // sweep can refuse with a retryable 503 after this point. Consuming the
+      // code first burned a single-use recovery code on an erasure that did not
+      // happen — repeated bucket faults exhausted the set and locked the owner
+      // out of their own erasure. The success path deletes the BackupCode rows
+      // with the account, so the code is still single-use in effect; a failed
+      // attempt can be retried, which is the documented contract.
       const ok2 = body.token
         ? verifyTotp(user.totpSecret, body.token) && (await claimTotpCode(userId, body.token))
-        : await useBackupCode(userId, body.backupCode!);
+        : await verifyBackupCode(userId, body.backupCode!);
       if (!ok2) {
         await recordTwoFactorFailure(userId);
         return fail(new Error("invalid-code"));

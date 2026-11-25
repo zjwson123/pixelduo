@@ -17,7 +17,12 @@ const schema = z
     token: z.string().min(6).max(20).optional(),
     backupCode: z.string().min(8).max(40).optional(),
   })
-  .refine((v) => Boolean(v.token || v.backupCode), { message: "invalid-input" });
+  // A sentence, not a code: zodMessage now carries a refinement's own message
+  // into the client's 400 (pass 70), so this reads "request body must include …"
+  // instead of "request body invalid-input".
+  .refine((v) => Boolean(v.token || v.backupCode), {
+    message: "must include a token or a backup code",
+  });
 
 // Second login step: validate TOTP / backup code against the partial session,
 // then issue a short-lived single-use ticket that authorize() accepts to

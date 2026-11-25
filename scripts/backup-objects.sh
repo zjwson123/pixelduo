@@ -28,6 +28,15 @@ TARGET_ACCESS="${BACKUP_TARGET_ACCESS_KEY_ID:-}"
 TARGET_SECRET="${BACKUP_TARGET_SECRET_ACCESS_KEY:-}"
 TARGET_BUCKET="${BACKUP_TARGET_BUCKET:-}"
 
+# Never print userinfo: an endpoint may be http://key:secret@host:9000, and the
+# failure line below reaches terminal scrollback and scheduler mail (pass 70).
+endpoint_for_display() {
+  case "$1" in
+    *://*@*) printf '%s' "${1%%://*}://…@${1#*@}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
 # An off-site target is all-or-nothing, and the bucket must be a real bucket
 # name. `mc mirror tgt//$STAMP` with an empty bucket creates a bucket NAMED
 # AFTER THE TIMESTAMP on the remote store, and the stamp rotation below would
@@ -174,7 +183,7 @@ docker run --rm \
     # Never silent: a wrong endpoint used to be swallowed by the redirection and
     # surface only as an empty-snapshot failure (pass 56).
     if ! setup_src; then
-      echo "[backup-objects] FAILED: BACKUP_S3_ENDPOINT needs a scheme (http://host:port) — got ${SRC_ENDPOINT}" >&2
+      echo "[backup-objects] FAILED: BACKUP_S3_ENDPOINT needs a scheme (http://host:port) — got $(endpoint_for_display "$SRC_ENDPOINT")" >&2
       exit 1
     fi
     STAMP=$(date +%Y%m%d-%H%M%S)

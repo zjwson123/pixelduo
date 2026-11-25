@@ -16,12 +16,18 @@ export type MediaKind = "image/png" | "image/jpeg" | "image/webp" | "video/mp4" 
 
 /** Content type from the leading bytes, or null when nothing matches. */
 export function sniffContentType(buf: Uint8Array): MediaKind | null {
-  // Video: MP4 — the `ftyp` box starts at byte 4 (ISOBMFF), so the payload can
-  // be fMP4 or a QuickTime-style header and still be recognised.
+  // Video: MP4 — a top-level `ftyp` box starts at byte 4 (ISOBMFF). ANY major
+  // brand is accepted (pass 70): the check used to require exactly `isom`, so a
+  // legitimate `mp42`, `avc1`, `M4V `, `iso5` or `dash` file — every one of
+  // which a provider or an ffmpeg build can produce — sniffed as null and was
+  // stored under the caller's declared type. In the image lane that meant video
+  // bytes stored (and presigned) as `image/png`; in the video lane it defeated
+  // the delivery check in saveRemoteVideo, which must recognise the container.
+  // The brand is a 4CC code, not a format guarantee: the box structure is what
+  // this identifies, and a parser that needs the code reads it from the box.
   if (
     buf.length >= 12 &&
-    buf[4] === 0x66 && buf[5] === 0x74 && buf[6] === 0x79 && buf[7] === 0x70 &&
-    buf[8] === 0x69 && buf[9] === 0x73 && buf[10] === 0x6f && buf[11] === 0x6d
+    buf[4] === 0x66 && buf[5] === 0x74 && buf[6] === 0x79 && buf[7] === 0x70
   ) {
     return "video/mp4";
   }

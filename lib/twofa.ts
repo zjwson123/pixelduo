@@ -65,6 +65,22 @@ export async function useBackupCode(userId: string, raw: string): Promise<boolea
   return res.count === 1;
 }
 
+// Read-only verification, for an operation whose own failure path must leave
+// the account untouched (pass 70 — account erasure). A backup code is a scarce
+// single-use recovery artifact; spending it before a storage sweep that then
+// answers a retryable 503 locks the owner out of their own erasure after a few
+// bucket blips. Erasure deletes the whole BackupCode set on success, so
+// verifying without marking is sufficient: the code cannot be replayed against
+// an account that no longer exists, and a failed erasure is retryable by
+// design. Every other consumer still uses useBackupCode (single-use).
+export async function verifyBackupCode(userId: string, raw: string): Promise<boolean> {
+  const row = await prisma.backupCode.findFirst({
+    where: { userId, codeHash: hashBackupCode(raw), usedAt: null },
+    select: { id: true },
+  });
+  return Boolean(row);
+}
+
 export async function replaceBackupCodes(userId: string, codes: string[]): Promise<void> {
   await prisma.$transaction([
     prisma.backupCode.deleteMany({ where: { userId } }),

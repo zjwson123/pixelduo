@@ -166,6 +166,37 @@ describe("pass 51 — HEAD never opens a storage stream", () => {
     expect(limiter.active).toBe(0);
   });
 
+  // Pass 70: the admin HEAD branch was the one storage metadata call left
+  // outside the cap after pass 65 fixed /api/files. A HeadObject still occupies
+  // an S3 socket; without a slot, 120 concurrent HEADs (the limiter bounds
+  // requests, not concurrency) pin the shared pool alongside two accounts' 128
+  // streams and every tenant's media stalls.
+  it("admin preview HEAD metadata is bounded by the stream cap", async () => {
+    _resetFileStreamLimiterForTests();
+    calls.streams = 0;
+    calls.sizes = 0;
+    const limiter = getFileStreamLimiter();
+    const releases: Array<() => void> = [];
+    for (let owner = 0; limiter.active < 128 && owner < 32; owner += 1) {
+      for (let i = 0; i < 64 && limiter.active < 128; i += 1) {
+        const acquired = limiter.tryAcquire(`filler-${owner}`);
+        if (!acquired) break;
+        releases.push(acquired);
+      }
+    }
+    expect(limiter.active).toBe(128);
+    try {
+      const res = await adminGET(...previewRequest({ method: "HEAD" }));
+      expect(res.status).toBe(429);
+      // Refused BEFORE the metadata call: no HeadObject on the shared pool.
+      expect(calls.sizes).toBe(0);
+      expect(calls.streams).toBe(0);
+    } finally {
+      releases.forEach((release) => release());
+    }
+    expect(limiter.active).toBe(0);
+  });
+
   it("admin preview HEAD answers metadata without a stream", async () => {
     _resetFileStreamLimiterForTests();
     calls.streams = 0;

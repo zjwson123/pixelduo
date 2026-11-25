@@ -115,6 +115,16 @@ export async function POST(req: Request) {
       return fail(new Error("invalid-password"));
     }
     await refundPasswordReauth(user.email, req);
+    // A mint already doomed by the active-key cap must not spend the second
+    // factor (pass 70): the transaction's cap check runs AFTER the code was
+    // verified and claimed, so a user at 10 keys with a lost authenticator
+    // burned a single-use backup code and received a 409 — no key, and one less
+    // recovery code. The check is repeated under the transaction's lock below;
+    // this is the cheap precondition, not the invariant.
+    const activeBefore = await prisma.apiKey.count({ where: { userId, revokedAt: null } });
+    if (activeBefore >= MAX_ACTIVE_KEYS) {
+      return fail(new Error("too-many-keys: revoke one before creating another"));
+    }
     if (user.totpEnabled && user.totpSecret) {
       // normalizeBackupCode(undefined) would throw a TypeError → masked 500.
       if (!body.token && !body.backupCode) return fail(new Error("2fa-code-required"));

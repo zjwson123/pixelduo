@@ -20,6 +20,16 @@ test("admin console: non-admin hidden, promoted user can adjust credits", async 
   await page.goto("/admin");
   await page.waitForURL("**/studio");
 
+  // Pass 70: the role route's production surface through HTTP, not just a DB
+  // write. A regular user cannot mint operator rights for anyone (including
+  // themselves).
+  const me = (await (await page.request.get("/api/me")).json()) as { user: { id: string } };
+  const userId = me.user.id;
+  const denied = await page.request.post(`/api/admin/users/${userId}/role`, {
+    data: { role: "admin" },
+  });
+  expect(denied.status()).toBe(403);
+
   // Promote via DB, then the Admin entry appears and the console works.
   await prisma.user.update({ where: { email }, data: { role: "admin" } });
   await page.goto("/studio");
@@ -42,4 +52,48 @@ test("admin console: non-admin hidden, promoted user can adjust credits", async 
   });
   await row.locator("button", { hasText: "Adjust" }).click();
   await expect(row.locator("td").nth(2)).toHaveText("130");
+
+  // Pass 70: the role route's refusals and its success path, end to end.
+  const suffix = Date.now();
+  const unverified = await prisma.user.create({
+    data: { email: `unverified-${suffix}@test.dev`, passwordHash: "x".repeat(60) },
+  });
+  const verified = await prisma.user.create({
+    data: {
+      email: `promote-${suffix}@test.dev`,
+      passwordHash: "x".repeat(60),
+      emailVerified: new Date(),
+    },
+  });
+  try {
+    // Registration mints an account for any address before verification; an
+    // unverified one must not receive operator rights.
+    const unverifiedRes = await page.request.post(`/api/admin/users/${unverified.id}/role`, {
+      data: { role: "admin" },
+    });
+    expect(unverifiedRes.status()).toBe(400);
+    expect(((await unverifiedRes.json()) as { error: string }).error).toContain("cannot-promote-unverified");
+
+    // The caller may not drop their own operator rights (the only in-app way
+    // back would need host access).
+    const selfDemote = await page.request.post(`/api/admin/users/${userId}/role`, {
+      data: { role: "user" },
+    });
+    expect(selfDemote.status()).toBe(400);
+    expect(((await selfDemote.json()) as { error: string }).error).toContain("cannot-demote-self");
+
+    // A verified account can be promoted and demoted through the route.
+    const promoted = await page.request.post(`/api/admin/users/${verified.id}/role`, {
+      data: { role: "admin" },
+    });
+    expect(promoted.status()).toBe(200);
+    expect(((await promoted.json()) as { user: { role: string } }).user.role).toBe("admin");
+    const demoted = await page.request.post(`/api/admin/users/${verified.id}/role`, {
+      data: { role: "user" },
+    });
+    expect(demoted.status()).toBe(200);
+    expect(((await demoted.json()) as { user: { role: string } }).user.role).toBe("user");
+  } finally {
+    await prisma.user.deleteMany({ where: { id: { in: [unverified.id, verified.id] } } });
+  }
 });

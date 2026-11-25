@@ -109,7 +109,12 @@ export async function GET(req: Request, { params }: { params: Promise<{ key: str
   try {
     uid = await requireUserId();
   } catch (e) {
-    if (!(e instanceof ApiError)) throw e;
+    // An unexpected fault (a database blip on the sessionVersion read) used to
+    // be rethrown from here — outside every try below — and became Next's bare
+    // 500 with one handled:false incident per request, the exact shape this
+    // file's own comments say fail() exists to remove (pass 70). fail() maps it
+    // to the masked JSON 500 with no-store and reports it once.
+    if (!(e instanceof ApiError)) return fail(e);
     sessionError = e;
   }
 
@@ -310,6 +315,24 @@ export async function GET(req: Request, { params }: { params: Promise<{ key: str
       return new NextResponse("not found", { status: 404, headers: NO_STORE });
     }
     obj = streamed;
+    // The 206's Content-Length is computed from the requested range, so the
+    // backend MUST honour it (pass 70). An S3-compatible gateway or proxy that
+    // answers 200 with the whole object (a documented misconfiguration — some
+    // ignore Range) reported `length` = the full size here; serving that body
+    // under the range's length desynchronizes the HTTP connection (keep-alive
+    // framing) or truncates under HTTP/2. A shorter object than the range
+    // (a file replaced between size() and the read) is the same defect in the
+    // other direction. Refuse rather than emit a malformed response.
+    if (range) {
+      const expected = range.end - range.start + 1;
+      if (obj.length !== undefined && obj.length !== expected) {
+        await obj.stream.cancel().catch(() => undefined);
+        releaseHeldSlot();
+        return fail(
+          new ApiError(502, "storage-range-mismatch: the storage backend did not return the requested byte range"),
+        );
+      }
+    }
     reader = obj.stream.getReader();
     const first = await reader.read();
     head = first.done ? new Uint8Array(0) : first.value!;

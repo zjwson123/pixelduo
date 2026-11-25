@@ -6,7 +6,7 @@ import { modelCost, videoCost } from "../lib/cost";
 import { analyzeAllImagesSequentially, moderationRequested, MODERATION_REFUSAL_MESSAGE, SAFETY_UNAVAILABLE_MESSAGE } from "../lib/safety";
 import { getVisionConfig } from "../lib/keys";
 import { getStorage, newStorageKey } from "../lib/storage";
-import { concatInputsWithinBudget, concatVideos } from "../lib/video-concat";
+import { cleanStaleConcatDirs, concatInputsWithinBudget, concatVideos } from "../lib/video-concat";
 import { initObservability, captureError, redactSensitive } from "../lib/observability";
 import { bakeWatermark } from "../lib/watermark";
 import { storeContentType } from "../lib/media-type";
@@ -674,6 +674,27 @@ async function main() {
   } catch (e) {
     console.error(`[fatal] ${e instanceof Error ? e.message : String(e)}`);
     process.exit(1);
+  }
+  // The storage driver, same fail-closed rule as the gates above (pass 70):
+  // getStorage() throws on an unknown STORAGE_DRIVER or a missing S3 bucket,
+  // but only when the FIRST job tries to save something — i.e. after the
+  // provider call was billed. A typo'd driver then bought every job three paid
+  // attempts (the error looked transient), refunded it, and repeated for the
+  // next one, while the queue stayed "healthy". Refusing at boot turns a
+  // configuration mistake into a container that does not come up.
+  try {
+    getStorage();
+  } catch (e) {
+    console.error(`[fatal] ${e instanceof Error ? e.message : String(e)}`);
+    process.exit(1);
+  }
+  // Reap concat temp dirs a SIGKILL/OOM left behind (see cleanStaleConcatDirs).
+  // Best-effort: a failure here must not stop the worker.
+  try {
+    const removed = await cleanStaleConcatDirs();
+    if (removed > 0) console.log(`[worker] cleaned ${removed} stale concat temp dir(s)`);
+  } catch {
+    // Not fatal — the sweep is housekeeping.
   }
   // The database session timezone, same fail-closed rule as the two gates above
   // (see lib/prisma.ts's pin): every deadline, lease and timestamp comparison in

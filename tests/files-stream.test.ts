@@ -28,6 +28,11 @@ const source = { pulls: 0 };
 
 const rangeCalls: Array<{ start: number; end: number } | undefined> = [];
 const TOTAL = 50 * 64 * 1024;
+// A driver that IGNORES the Range header (some S3-compatible gateways/proxies
+// do) answers the whole object with the full ContentLength. The route must
+// refuse that instead of emitting a 206 whose declared length is the range's
+// (pass 70).
+const driver = { honoursRange: true };
 
 vi.mock("@/lib/storage", () => ({
   getStorage: () => ({
@@ -35,7 +40,9 @@ vi.mock("@/lib/storage", () => ({
     getStream: async (_key: string, range?: { start: number; end: number }) => {
       rangeCalls.push(range);
       return {
-        length: CHUNKS * CHUNK_BYTES,
+        length:
+          range && driver.honoursRange ? range.end - range.start + 1 : CHUNKS * CHUNK_BYTES,
+        total: TOTAL,
       stream: new ReadableStream<Uint8Array>({
         pull(controller) {
           if (source.pulls >= CHUNKS) {
@@ -173,6 +180,27 @@ describe("/api/files honours Range requests", () => {
     const res = await GET(req, ctx);
     expect(res.status).toBe(206);
     expect(res.headers.get("Content-Type")).toBe("image/png");
+  });
+
+  it("refuses a 206 whose backend returned the whole object instead of the range", async () => {
+    // A gateway that ignores Range answers 200 with the full object and a full
+    // ContentLength. Serving that body under the range's Content-Length
+    // desynchronizes the connection (keep-alive framing / HTTP/2 stream error),
+    // so the route fails closed before reading a byte.
+    driver.honoursRange = false;
+    source.pulls = 0;
+    try {
+      const [req, ctx] = request("img/clip.mp4");
+      req.headers.set("range", "bytes=100-199");
+      const res = await GET(req, ctx);
+      expect(res.status).toBe(502);
+      expect(await res.json()).toMatchObject({ ok: false, error: expect.stringContaining("storage-range-mismatch") });
+      // Only the readable stream's own single-chunk prefetch: the route never
+      // acquired a reader, so nothing was consumed from the body.
+      expect(source.pulls).toBeLessThanOrEqual(1);
+    } finally {
+      driver.honoursRange = true;
+    }
   });
 
   it("falls back to the key's extension for a mid-file range", async () => {

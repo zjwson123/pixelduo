@@ -32,6 +32,28 @@ test.describe("malformed request paths", () => {
   });
 });
 
+// Pass 70: nothing asserted the configured header block, so deleting
+// object-src/frame-ancestors/HSTS would have shipped green. This runs against
+// the built server (the headers() config is part of the artifact).
+test.describe("security headers", () => {
+  test("the baseline is present on HTML and API responses", async ({ request }) => {
+    for (const path of ["/", "/api/me"]) {
+      const res = await request.get(path, { failOnStatusCode: false });
+      const h = res.headers();
+      const csp = h["content-security-policy"] ?? "";
+      expect(csp, path).toContain("default-src 'self'");
+      expect(csp, path).toContain("object-src 'none'");
+      expect(csp, path).toContain("frame-ancestors 'self'");
+      expect(csp, path).toContain("base-uri 'self'");
+      expect(h["strict-transport-security"], path).toContain("max-age=63072000");
+      expect(h["x-content-type-options"], path).toBe("nosniff");
+      expect(h["x-frame-options"], path).toBe("SAMEORIGIN");
+      expect(h["referrer-policy"], path).toBe("strict-origin-when-cross-origin");
+      expect(h["permissions-policy"], path).toContain("camera=()");
+    }
+  });
+});
+
 // Pass 63: a same-site sibling origin could send a simple text/plain POST that
 // carried the Lax session cookie, spent the victim's account-keyed bucket and
 // only then met readBodyCapped's 415. The refusal must happen in the proxy,

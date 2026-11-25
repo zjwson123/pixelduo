@@ -1,6 +1,16 @@
 import bcrypt from "bcryptjs";
 import { z } from "zod";
-import { enforceRateLimit, fail, ok, parseJsonBody, readBodyCapped, zodMessage, tooLarge } from "@/lib/api";
+import {
+  enforceRateLimit,
+  fail,
+  ok,
+  parseJsonBody,
+  passwordWithinBcrypt,
+  readBodyCapped,
+  zodMessage,
+  tooLarge,
+  MAX_PASSWORD_BYTES,
+} from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { consumeToken, previewToken } from "@/lib/tokens";
 import { clearLoginFailures } from "@/lib/login-guard";
@@ -9,7 +19,16 @@ import { captureError } from "@/lib/observability";
 
 const schema = z.object({
   token: z.string().min(20).max(200),
-  password: z.string().min(8).max(100),
+  // Same bcrypt byte limit as registration (see MAX_PASSWORD_BYTES): a reset is
+  // the other path where a NEW password is chosen, and accepting one the
+  // algorithm cannot store would reintroduce the silent truncation.
+  password: z
+    .string()
+    .min(8)
+    .max(100)
+    .refine(passwordWithinBcrypt, {
+      message: `must be at most ${MAX_PASSWORD_BYTES} bytes (UTF-8) — bcrypt stores only the first ${MAX_PASSWORD_BYTES} bytes`,
+    }),
 });
 
 export async function POST(req: Request) {

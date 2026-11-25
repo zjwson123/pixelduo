@@ -13,6 +13,7 @@
 // Writes the delivered image to SMOKE_OUT (default /tmp/pd-smoke.png) so the
 // watermark/plan policy can be inspected by eye.
 import fs from "fs";
+import { randomBytes } from "node:crypto";
 
 const BASE = process.env.SMOKE_BASE_URL ?? "http://localhost:3000";
 const OUT = process.env.SMOKE_OUT ?? "/tmp/pd-smoke.png";
@@ -67,7 +68,13 @@ function pass(step: string, detail = "") {
 // Timestamps collide within the same second and the second register silently
 // fails, which makes every ownership assertion meaningless (bit once before).
 const email = `smoke-${Date.now()}-${process.hrtime.bigint() % 1000n}@smoke.test`;
-const password = "smoke-password-123";
+// Random per run (pass 70). The script is documented to point at a REAL host
+// (SMOKE_BASE_URL=https://…), and on a test deployment it leaves a verified
+// 30-credit account behind whose password used to be a literal in this public
+// repository: anyone who saw the printed address could sign in and spend. The
+// account still exists after the run; its credential must not be guessable.
+// 32 bytes → 43 URL-safe chars, well inside bcrypt's 72-byte limit.
+const password = randomBytes(32).toString("base64url");
 
 async function main() {
   console.log(`smoke against ${BASE}\n`);

@@ -110,6 +110,45 @@ export function concatInputsWithinBudget(aBytes: number, bBytes: number): boolea
 // whether segment-only delivery is acceptable (it always is: the segment is
 // exactly what the provider billed for, and a broken concat must never take
 // down an otherwise-successful job).
+// Remove temp directories an earlier process could not clean up (pass 70).
+//
+// concatVideos' `finally` cannot run when the process is SIGKILLed, OOM-killed
+// (the concat itself is this file's documented heap peak in a 512 MB worker) or
+// the container is restarted mid-job. Each leftover can hold the two inputs and
+// the output (up to ~256 MB), so repeated kills fill /tmp and then every local
+// write and every ffmpeg run fails. The worker calls this at boot, BEFORE the
+// loop, so a fresh process reaps what the previous one left.
+//
+// Only directories this function could have created are touched (`pdconcat-`
+// prefix under os.tmpdir()), and only ones older than `maxAgeMs`: a concurrent
+// concat in the same container gets a directory younger than an hour, and even
+// the pathological long case is bounded by the 180s ffmpeg timeout. Best-effort
+// per entry — one unreadable directory must not stop the reap.
+export async function cleanStaleConcatDirs(maxAgeMs = 6 * 60 * 60 * 1000): Promise<number> {
+  const root = os.tmpdir();
+  let names: string[];
+  try {
+    names = await fsp.readdir(root);
+  } catch {
+    return 0;
+  }
+  const cutoff = Date.now() - maxAgeMs;
+  let removed = 0;
+  for (const name of names) {
+    if (!name.startsWith("pdconcat-")) continue;
+    const dir = path.join(root, name);
+    try {
+      const st = await fsp.lstat(dir);
+      if (!st.isDirectory() || st.mtimeMs > cutoff) continue;
+      await fsp.rm(dir, { recursive: true, force: true });
+      removed += 1;
+    } catch {
+      // Already gone, or not ours to remove.
+    }
+  }
+  return removed;
+}
+
 export async function concatVideos(a: Buffer, b: Buffer): Promise<Buffer | null> {
   if (!looksLikeIsoBmffMedia(a) || !looksLikeIsoBmffMedia(b)) return null;
   if (!concatInputsWithinBudget(a.length, b.length)) return null;

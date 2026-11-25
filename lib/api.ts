@@ -18,7 +18,34 @@ export function zodMessage(e: z.ZodError): Error {
   if (issue.code === "too_small") return new Error(`invalid-input: ${field} must be at least ${issue.minimum}`);
   if (issue.code === "too_big") return new Error(`invalid-input: ${field} must be at most ${issue.maximum}`);
   if (issue.code === "invalid_type") return new Error(`invalid-input: ${field} must be ${issue.expected}`);
+  // A `.refine`/`.superRefine` carries the author's own sentence, which is the
+  // only thing that can explain a rule `.max`/`.min` cannot express (pass 70's
+  // bcrypt byte limit). Everything else keeps the generic wording.
+  if (issue.code === "custom" && issue.message) {
+    return new Error(`invalid-input: ${field} ${issue.message}`);
+  }
   return new Error(`invalid-input: ${field} is invalid`);
+}
+
+// bcrypt hashes at most the first 72 BYTES of a password (the algorithm's
+// historic limit, and bcryptjs implements it: the remainder is silently
+// ignored). The registration and reset schemas accepted up to 100 CHARACTERS,
+// so the product promised protection it never stored: an account created with a
+// 100-character password authenticated with the same 72-byte prefix 28
+// characters shorter (probed end-to-end in pass 70, and nine-pass-70's
+// regression test pins the bcrypt half). The cap belongs on the WRITE paths —
+// register and reset, where a new password is chosen — measured in UTF-8 bytes,
+// not UTF-16 units: 24 CJK characters are already 72 bytes.
+//
+// The re-auth paths (login, 2FA setup/confirm/disable, key minting, account
+// deletion, verify-email) deliberately keep accepting longer values: accounts
+// created before this cap may hold one, and they must still be able to sign in
+// and change it. Those comparisons are unaffected by the cap — they hash the
+// stored value's prefix either way.
+export const MAX_PASSWORD_BYTES = 72;
+
+export function passwordWithinBcrypt(value: string): boolean {
+  return Buffer.byteLength(value, "utf8") <= MAX_PASSWORD_BYTES;
 }
 
 export async function sessionUser(): Promise<{ id: string; sv: number; totpPending: boolean }> {
@@ -275,10 +302,12 @@ export function fail(error: unknown) {
     }
     return errorResponse({ ok: false, error: error.message }, { status: error.status, headers });
   }
-  // A malformed JSON body is a client error, not an incident.
-  if (error instanceof SyntaxError) {
-    return errorResponse({ ok: false, error: "invalid-json" }, { status: 400 });
-  }
+  // No SyntaxError special case (pass 70). It used to answer 400 invalid-json
+  // for ANY SyntaxError, so a route's JSON.parse of a corrupted DB column
+  // became a permanent, silent client error. Request-body parse failures are
+  // now an ApiError(400) thrown by parseJsonBody (and the next-auth delegate
+  // maps its own body parse), so a SyntaxError reaching here is an unexpected
+  // fault and takes the capture path below.
   const msg = error instanceof Error ? error.message : "internal-error";
   // Expected business errors are not incidents; capture only unexpected 500s.
   const status = expectedStatus(msg);
@@ -507,7 +536,19 @@ function clientAbort(e: unknown): unknown {
 // that is how the live probe hit SQLSTATE 22021 on /api/feedback. The walk runs
 // after parsing, so no encoding of the character survives it.
 export function parseJsonBody(raw: string): unknown {
-  const value: unknown = JSON.parse(raw);
+  // The parse failure is classified HERE, as the client error it is (pass 70).
+  // It used to escape as a bare SyntaxError and fail() treated EVERY
+  // SyntaxError as "invalid-json" — including a route's own JSON.parse of a
+  // corrupted database column (Job.images), which then answered a permanent
+  // 400 to the owner, reported no incident, and told the user their request
+  // was malformed when the stored row was. An ApiError is exact: only this
+  // call site can produce it.
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new ApiError(400, "invalid-json");
+  }
   refuseNulDeep(value, 0);
   return value;
 }
@@ -529,7 +570,13 @@ function refuseNulDeep(value: unknown, depth: number): void {
     return;
   }
   if (value && typeof value === "object") {
-    for (const item of Object.values(value as Record<string, unknown>)) {
+    // Keys too (pass 70). The value walk left `{"a\u0000b":1}` as the one
+    // encoding of a NUL that survived the guard: no current schema passes an
+    // unknown key to Prisma (zod strips them), but a future z.record/.catchall
+    // would, and the failure it would produce is the 22021-masked-500 shape
+    // this guard exists to prevent.
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      refuseNulDeep(key, depth + 1);
       refuseNulDeep(item, depth + 1);
     }
   }

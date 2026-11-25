@@ -47,6 +47,13 @@ export function isPermanentProviderError(msg: string): boolean {
     // truncated JSON, `{"data":[]}`, or fewer images than requested. All are
     // properties of the RESPONSE, exactly like the size refusals above.
     /returned no b64_json|returned no images|returned \d+ of \d+ images/i.test(msg) ||
+    // Two 2xx-response refusals added in pass 70 that sat just outside the list.
+    // `empty-image` is lib/store's decode guard: a body whose base64 decodes to
+    // zero bytes is a broken payload, and retrying re-calls the BILLED endpoint
+    // for the same nothing. `not-a-video` is saveRemoteVideo's container check:
+    // a 200 HTML/JSON error page from a CDN or relay cannot become a playable
+    // clip on a retry either. Both are properties of the response.
+    /empty-image|not-a-video/i.test(msg) ||
     /unexpected token|unexpected end of json|is not valid json|json\.parse/i.test(msg) ||
     /fetch failed|blocked-internal|blocked-port|invalid-url|download-too-large|too-many-redirects|download failed/i.test(
       msg,

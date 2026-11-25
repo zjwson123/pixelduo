@@ -19,13 +19,23 @@ const handler = NextAuth(authOptions);
 // 300/min per IP turned the difference into an anonymous incident faucet —
 // the class pass 25 and pass 30 closed for NULs and lone surrogates, one
 // layer up from where those guards run (they never see a body next-auth
-// parses itself). fail() classifies SyntaxError as the client error it is,
-// maps ApiError (the abort/NUL refusals) to their status, and still reports
+// parses itself). This wrapper classifies ITS SyntaxError as the client error
+// it is (the classification moved here in pass 70 — fail() no longer assumes
+// every SyntaxError came from a request body), maps ApiError (the abort/NUL
+// refusals) to their status, and still reports
 // genuine faults.
 async function delegate(req: NextRequest, ctx: Parameters<typeof handler>[1]) {
   try {
     return await handler(req, ctx);
   } catch (e) {
+    // next-auth's own body parse (getBody → req.json()) is the one JSON.parse
+    // outside parseJsonBody, so its SyntaxError is still the client error pass
+    // 38 classified — but the classification now lives here, where the source
+    // is known, instead of in fail() for every SyntaxError in the app (pass
+    // 70; a route parsing a corrupted DB column must not answer invalid-json).
+    if (e instanceof SyntaxError) {
+      return errorResponse({ ok: false, error: "invalid-json" }, { status: 400 });
+    }
     return fail(e);
   }
 }

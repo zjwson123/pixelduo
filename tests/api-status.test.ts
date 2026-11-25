@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ApiError, fail, readBodyCapped } from "../lib/api";
+import { ApiError, fail, parseJsonBody, readBodyCapped } from "../lib/api";
 
 // Expected business errors must map to their proper 4xx status instead of a
 // blanket 500, while unexpected errors stay masked as a generic 500.
@@ -39,9 +39,25 @@ describe("fail() error classification", () => {
   });
 
   it("treats a malformed JSON body as a 400", async () => {
-    const { status, body } = await statusOf(new SyntaxError("Unexpected token < in JSON"));
+    // The classification is parseJsonBody's (pass 70): it knows the SyntaxError
+    // came from the request body. fail() no longer guesses from the type.
+    let caught: unknown;
+    try {
+      parseJsonBody("Unexpected token < in JSON");
+    } catch (e) {
+      caught = e;
+    }
+    const { status, body } = await statusOf(caught);
     expect(status).toBe(400);
     expect(body.error).toBe("invalid-json");
+  });
+
+  it("does not classify an unrelated SyntaxError as a client error", async () => {
+    // e.g. a route's JSON.parse of a corrupted Job.images column: answering
+    // 400 invalid-json hid a server-side data fault and reported no incident.
+    const { status, body } = await statusOf(new SyntaxError("Unexpected token in stored row"));
+    expect(status).toBe(500);
+    expect(body.error).toBe("internal-error");
   });
 
   it("maps business rules added in the sixth pass", async () => {
@@ -123,9 +139,11 @@ describe("readBodyCap", () => {
     });
     const r = await readBodyCapped(req, 4 * 1024);
     expect("tooLarge" in r).toBe(true);
-    // The reader must have stopped after the chunks that crossed the cap —
-    // not drained an endless body into memory first.
-    expect(enqueued).toBeLessThan(16);
+    // The reader must have stopped at the first chunk that CROSSES the cap —
+    // not drained an endless body into memory first. 4 KiB cap / 1 KiB chunks
+    // ⇒ exactly 5 (pass 70: "< 16" also passed a 15 KiB cap, which is not the
+    // property).
+    expect(enqueued).toBe(5);
     expect(cancelled).toBe(true);
   });
 

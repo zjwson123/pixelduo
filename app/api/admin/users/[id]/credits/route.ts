@@ -5,7 +5,14 @@ import { prisma } from "@/lib/prisma";
 import { adminGrantTx, adminClawbackTx } from "@/lib/ledger";
 
 const schema = z.object({
-  delta: z.number().int().min(-1000000).max(1000000).refine((v) => v !== 0, { message: "delta-zero" }),
+  // A sentence: zodMessage carries a refinement's message to the client (pass
+  // 70), so the 400 says "delta must not be zero" rather than "delta delta-zero".
+  delta: z
+    .number()
+    .int()
+    .min(-1000000)
+    .max(1000000)
+    .refine((v) => v !== 0, { message: "must not be zero" }),
   note: z.string().min(1).max(200),
 });
 
@@ -57,8 +64,12 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       // the erasure's scrub had already run past.
       await assertAdminActorTx(tx, actor);
     }, ADMIN_TX_OPTIONS);
-    const updated = await prisma.user.findUniqueOrThrow({ where: { id: user.id }, select: { credits: true } });
-    return ok({ credits: updated.credits });
+    // findUnique, not findUniqueOrThrow (pass 70): the write has COMMITTED by
+    // now, so a target erased between the commit and this read is a successful
+    // grant whose account no longer exists — not an incident. P2025 answered a
+    // masked 500 plus a Sentry event for an operation that did what it said.
+    const updated = await prisma.user.findUnique({ where: { id: user.id }, select: { credits: true } });
+    return ok({ credits: updated?.credits ?? null });
   } catch (e) {
     if (e instanceof z.ZodError) return fail(zodMessage(e));
     return fail(e);

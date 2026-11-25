@@ -85,7 +85,7 @@ export default function RegisterPage() {
           <input id="email" type="email" required value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" />
         </div>
         <div className="field">
-          <label htmlFor="password">Password (min 8 chars)</label>
+          <label htmlFor="password">Password (min 8 chars, max 72 bytes)</label>
           <input id="password" type="password" required minLength={8} value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" />
         </div>
         <button type="submit" className="btn btn-dark btn-block" disabled={busy} style={{ marginTop: 6 }}>

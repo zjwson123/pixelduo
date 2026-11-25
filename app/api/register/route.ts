@@ -5,12 +5,32 @@ import { prisma } from "@/lib/prisma";
 import { signupBonus } from "@/lib/ledger";
 import { createToken } from "@/lib/tokens";
 import { sendVerificationEmail, reserveAuthMailSend } from "@/lib/mail";
-import { enforceRateLimit, fail, ok, parseJsonBody, readBodyCapped, zodMessage, tooLarge } from "@/lib/api";
+import {
+  enforceRateLimit,
+  fail,
+  ok,
+  parseJsonBody,
+  passwordWithinBcrypt,
+  readBodyCapped,
+  zodMessage,
+  tooLarge,
+  MAX_PASSWORD_BYTES,
+} from "@/lib/api";
 import { envLimit } from "@/lib/rate-limit";
 
 const schema = z.object({
   email: z.string().email().max(120),
-  password: z.string().min(8).max(100),
+  // .max(100) counts UTF-16 units, but bcrypt stores only the first 72 BYTES —
+  // everything past that was silently discarded, so the account's real password
+  // was a prefix of the one the user chose (see MAX_PASSWORD_BYTES in
+  // lib/api.ts). Refuse at the real boundary instead.
+  password: z
+    .string()
+    .min(8)
+    .max(100)
+    .refine(passwordWithinBcrypt, {
+      message: `must be at most ${MAX_PASSWORD_BYTES} bytes (UTF-8) — bcrypt stores only the first ${MAX_PASSWORD_BYTES} bytes`,
+    }),
   name: z.string().max(60).optional(),
 });
 

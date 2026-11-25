@@ -58,7 +58,7 @@ export default function ResetPasswordPage() {
           <span style={{ fontWeight: 800 }}>PixelDuo</span>
         </div>
         <h1 style={{ marginTop: 18 }}>Choose a new password</h1>
-        <p className="sub">Minimum 8 characters.</p>
+        <p className="sub">Minimum 8 characters, at most 72 bytes (UTF-8).</p>
         {error && <div className="form-error">{error}</div>}
         <div className="field">
           <label htmlFor="password">New password</label>

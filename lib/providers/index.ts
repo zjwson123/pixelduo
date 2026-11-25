@@ -8,7 +8,8 @@ import { saveBase64Image, saveRemoteImage, fetchPublicBuffer, readBodyCapped, ou
 import { getStorage } from "../storage";
 import { getModel, type ModelInfo } from "../model-registry";
 import { upstreamFor } from "../model-upstream";
-import { storeContentType, extensionForContentType } from "../media-type";
+import { storeContentType, extensionForContentType, sniffContentType } from "../media-type";
+import { looksLikeIsoBmffMedia } from "../video-concat";
 import { sliceCodePoints } from "../untrusted-text";
 import type { Quality } from "../cost";
 
@@ -44,6 +45,23 @@ export interface VideoTaskResult {
 // return b64_json payloads (~4-34 MB); anything larger is a hostile or
 // malfunctioning provider and must be cut off mid-stream, not buffered.
 const MAX_PROVIDER_RESPONSE_BYTES = 40 * 1024 * 1024;
+
+// The one place an image lane reads the b64 out of a provider response (pass
+// 70). Truthiness was not enough: `{"b64_json":123}` passed `!b64`, reached
+// Buffer.from(number) as a TypeError, and isPermanentProviderError saw nothing
+// it recognised — so the worker retried the BILLED call to maxAttempts. A
+// non-string or empty value is a broken 2xx response and terminal. The message
+// deliberately keeps the `returned no b64_json` shape the classifier matches.
+export function requireB64(
+  items: Array<Record<string, unknown>> | undefined,
+  label: string,
+): string {
+  const value = items?.[0]?.b64_json;
+  if (typeof value !== "string" || !value) {
+    throw new Error(`${label} returned no b64_json`);
+  }
+  return value;
+}
 
 // Provider-supplied text that ends up in Job.error (read back by
 // /api/jobs/[id] and rendered in the workbench) must be bounded at EVERY
@@ -233,8 +251,7 @@ export async function generateWithGpt(
       [cfg.key],
     );
     const items = (data.data as Array<Record<string, unknown>> | undefined) ?? [];
-    const b64 = items[0]?.b64_json as string | undefined;
-    if (!b64) throw new Error("gpt-image-2 returned no b64_json");
+    const b64 = requireB64(items, "gpt-image-2");
     const img = { key: await saveBase64Image(b64), model: "gpt" };
     out.push(img);
     if (onImage) await onImage(img);
@@ -285,8 +302,7 @@ export async function editWithGpt(
     if (!res.ok) throw new Error(`${res.status}: ${errText(await readTextCapped(res, 64 * 1024))}`);
     const data = await readJsonCapped(res);
     const items = (data.data as Array<Record<string, unknown>> | undefined) ?? [];
-    const b64 = items[0]?.b64_json as string | undefined;
-    if (!b64) throw new Error("gpt-image-2 edit returned no b64_json");
+    const b64 = requireB64(items, "gpt-image-2 edit");
     const img = { key: await saveBase64Image(b64), model: "gpt" };
     // Checkpoint the result like every other image lane. Without this the edit
     // path was the only one that remembered nothing: a transient failure after
@@ -333,8 +349,7 @@ export async function generateWithSeedream(
     }
     const data = await callWithKeys(getArkBaseUrl(), body, keys);
     const items = (data.data as Array<Record<string, unknown>> | undefined) ?? [];
-    const b64 = items[0]?.b64_json as string | undefined;
-    if (!b64) throw new Error("seedream returned no b64_json");
+    const b64 = requireB64(items, "seedream");
     const img = { key: await saveBase64Image(b64), model: "seedream" };
     out.push(img);
     if (onImage) await onImage(img);
@@ -834,12 +849,31 @@ export async function saveRemoteVideo(url: string): Promise<string> {
     return key;
   }
   const buf = await fetchPublicBuffer(url, { timeoutMs: 120_000, maxBytes: 100 * 1024 * 1024 });
+  // The DELIVERED bytes must be a video container (pass 70). The poll only says
+  // "succeeded" and hands back a URL; a CDN's HTML block page, an expired-token
+  // page or a relay's JSON error body answers 200 with bytes, and
+  // storeContentType's fallback used to record the declared video/mp4 anyway.
+  // The worker then completed the job, charged the caller and delivered a file
+  // no player opens — with no retry (the job had "succeeded") and no refund.
+  // The image lane has an output audit and raster-only watermarking to notice;
+  // the video lane has neither. Only ISO-BMFF (`ftyp`) and EBML (WebM/Matroska)
+  // are containers this pipeline can serve and concatenate; anything else is a
+  // broken provider response, and terminal so it is refunded immediately rather
+  // than re-billed to maxAttempts.
+  const sniffed = sniffContentType(buf);
+  // `looksLikeIsoBmffMedia` tolerates the legal openers besides `ftyp` (moov,
+  // mdat, styp…) that some encoders emit, so a real clip is not refunded for a
+  // box-order quirk. Text/HTML/JSON cannot pass: their bytes 4..8 are not a box
+  // type.
+  const isMp4 = sniffed === "video/mp4" || looksLikeIsoBmffMedia(buf);
+  if (!isMp4 && sniffed !== "video/webm") {
+    throw new Error("not-a-video: the provider's video URL did not return an MP4/WebM container");
+  }
+  const type = sniffed === "video/webm" ? "video/webm" : "video/mp4";
   const { getStorage, newStorageKey } = await import("../storage");
   // The bytes decide the type and the extension, not the call site: put() used
   // to hardcode video/mp4, which is what a PRESIGNED url reports to an API
-  // client (and what the external detector sees) — a WebM/MP4 mismatch there is
-  // invisible to /api/files, which sniffs for itself.
-  const type = storeContentType(buf, "video/mp4");
+  // client (and what the external detector sees).
   const key = newStorageKey(extensionForContentType(type));
   await getStorage().put(key, buf, type);
   return key;

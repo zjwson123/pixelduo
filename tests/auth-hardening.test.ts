@@ -218,7 +218,11 @@ describe("partial 2FA session is checked against sessionVersion", () => {
       user: { id: user.id, sv: user.sessionVersion, totpPending: true },
     });
     const current = await POST(req());
-    expect(current.status).not.toBe(401);
+    // The sv gate is no longer the refusal — and specifically the invalid-code
+    // 400 is: `not.toBe(401)` also accepted a 500 or any other broken shape, so
+    // the test stayed green if the route threw (pass 70).
+    expect(current.status).toBe(400);
+    await expect(current.json()).resolves.toMatchObject({ ok: false, error: "invalid-code" });
 
     await prisma.user.delete({ where: { id: user.id } });
   });

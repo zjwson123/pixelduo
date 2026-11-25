@@ -31,6 +31,12 @@ model User {
   grants   CreditGrant[]
   tokens   VerificationToken[]
   feedback Feedback[]
+
+  // Admin console listing (ORDER BY createdAt DESC with skip/take) and the
+  // last-admin count run on every admin mutation under ADMIN_GUARD_LOCK; both
+  // were sequential scans of the whole user table (pass 70).
+  @@index([createdAt])
+  @@index([role])
 }
 
 // Single-use 2FA recovery codes (SHA-256 hashes only).
@@ -367,6 +373,11 @@ model PaymentEvent {
   orderId     String?
   rawJson     String
   processedAt DateTime @default(now())
+
+  // Erasure deletes an account's events through an ORDER subquery while the
+  // 60s transaction holds Order/Job/CreditGrant/User locks; unindexed that was
+  // a full scan of a table that never prunes (pass 70).
+  @@index([orderId])
 }
 
 model Checkin {

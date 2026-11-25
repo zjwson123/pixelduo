@@ -130,6 +130,15 @@ const BLOCKED: Array<{ re: RegExp; reason: string }> = [
       `\\b(?:csam|${spacedWord("csam")}|` +
         `(?:pedo|paedo)(?:phile|philes|philia|philic)?|` +
         `(?:lolicon|shotacon)s?|` +
+        // The archetype words themselves (pass 70). The list knew the -con
+        // nouns but not the words such requests are commonly written with:
+        // `loli` / `shota` / `jailbait` were in NO rule (probed through
+        // checkPrompt), and their Chinese counterparts joined the subject rule
+        // below in this same pass. `\bloli\b` does not match "lolita" or
+        // "lollipop" (no word boundary before t/p), so the fashion prompt is
+        // untouched; `lolicon` was already matched above.
+        `loli(?:s)?|shota(?:s)?|jailbait|` +
+        `child[\\s._*-]*lover(?:s)?|` +
         `molest(?:s|ed|er|ers|ing|ation)?|${spacedWord("molest")})\\b`,
       "i",
     ),
@@ -140,7 +149,25 @@ const BLOCKED: Array<{ re: RegExp; reason: string }> = [
   // required 色情 immediately after. A bounded gap admits the ordinary
   // spellings without turning a bare 性 in unrelated words into a match.
   {
-    re: /(儿童|兒童|幼女|幼童|未成年|小学生|小學生)[\s\S]{0,8}(色情|性交|性爱|性愛|做爱|做愛|强奸|強姦|性侵|猥亵|猥褻|裸|性)|恋童|戀童|童交|幼交/,
+    // The subject list (pass 70) gained the everyday archetypes: `萝莉 裸`
+    // (`loli nude`) and `正太 裸` (`shota nude`) returned ok while `儿童 裸` was
+    // blocked — the exact asymmetry a hostile prompt relies on. 幼儿/中学生/
+    // 女童/小孩/孩童 are the other spellings of "a minor" the list lacked. They
+    // still require a sexual term within eight characters, so an ordinary
+    // `中学生 校服` prompt is untouched; this is the same subject+behaviour rule
+    // the block was built around. 少女/少年 deliberately live in their own rule
+    // below: with this rule's bare 裸/性 singles they would block 裸妆
+    // (bare-faced makeup), 裸色 (nude colour) and 个性/性格 (personality), which
+    // are ordinary beauty and character prompts.
+    re: /(儿童|兒童|幼女|幼童|幼儿|幼兒|未成年|小学生|小學生|中学生|中學生|萝莉|蘿莉|正太|女童|小孩|孩童)[\s\S]{0,8}(色情|性交|性爱|性愛|做爱|做愛|强奸|強姦|性侵|猥亵|猥褻|裸|性)|恋童|戀童|童交|幼交/,
+    reason: "child-safety",
+  },
+  {
+    // Teen spellings with EXPLICIT terms only (see the note above the minors
+    // rule). No bare 性 (个性/性格/属性 are ordinary), and 裸 only when it is
+    // not the make-up/colour/eye/barefoot compound: `少女 裸` and `少女 裸体`
+    // are blocked, `少女 裸妆` is not.
+    re: /(少女|少年)[\s\S]{0,8}(色情|性交|性爱|性愛|做爱|做愛|强奸|強姦|性侵|猥亵|猥褻|裸照|裸体|裸體|裸露|裸(?!妆|色|眼|足))/,
     reason: "child-safety",
   },
   {

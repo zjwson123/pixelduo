@@ -37,6 +37,17 @@ SRC_SECRET="${BACKUP_S3_SECRET_ACCESS_KEY:?set BACKUP_S3_SECRET_ACCESS_KEY}"
 # note in docker-compose.yml. Override MC_IMAGE to bump it deliberately.
 MC_IMAGE="${MC_IMAGE:-minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727}"
 
+# An endpoint may carry credentials in its userinfo (http://key:secret@host:9000)
+# — the same shape lib/site.ts strips from NEXTAUTH_URL. This script's dry-run
+# and failure lines land in terminal scrollback, compose logs and any scheduler
+# mail, so print scheme + host only (pass 70).
+endpoint_for_display() {
+  case "$1" in
+    *://*@*) printf '%s' "${1%%://*}://…@${1#*@}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
 # The target must be a BARE bucket name before anything compares it.
 #
 # The loop below is whole-string equality, but `mc` parses its argument as
@@ -106,7 +117,7 @@ fi
 if [ "${RESTORE_DRILL_CONFIRM:-0}" != "1" ]; then
   echo "DRY RUN (nothing written). This would mirror $SRC_COUNT object(s) from"
   echo "  snapshot: $SNAPSHOT"
-  echo "  into:     $SRC_ENDPOINT/$SCRATCH_BUCKET"
+  echo "  into:     $(endpoint_for_display "$SRC_ENDPOINT")/$SCRATCH_BUCKET"
   echo "with --overwrite --remove, i.e. deleting anything already in that bucket."
   echo "Re-run with RESTORE_DRILL_CONFIRM=1 once the target is right."
   exit 1

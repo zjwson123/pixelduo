@@ -40,7 +40,23 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     // only: an admin re-check is pointless for an object this route will never
     // serve as a body.
     if (req.method === "HEAD") {
+      // Metadata still occupies an S3 socket (HeadObject), and this branch was
+      // the one storage operation left outside the per-owner stream cap after
+      // pass 65 closed it for /api/files (pass 70). 120 concurrent HEADs from a
+      // stolen admin session (the limiter counts requests, not concurrency)
+      // could pin the shared 192-socket pool alongside two ordinary accounts'
+      // 128 slots, stalling every tenant's media and the storage health probe.
+      const acquired = acquireFileStreamSlot(`admin:${adminId}`);
+      if (!acquired) {
+        return errorResponse(
+          { ok: false, error: "too-many-streams" },
+          { status: 429, headers: { "Retry-After": "5" } },
+        );
+      }
+      releaseSlot = acquired;
       const size = (await getStorage().size(image.url)) ?? undefined;
+      releaseSlot();
+      releaseSlot = null;
       if (size === undefined) return fail(new Error("image-not-found"));
       const headHeaders: Record<string, string> = {
         "Content-Type": contentTypeFromKey(image.url) ?? "application/octet-stream",
