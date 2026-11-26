@@ -48,6 +48,12 @@ test("admin console: non-admin hidden, promoted user can adjust credits", async 
     if (d.type() === "prompt") {
       if (d.message().startsWith("Adjust credits")) d.accept("100");
       else if (d.message().startsWith("Reason")) d.accept("e2e compensation");
+    } else if (d.type() === "confirm" && d.message().startsWith("Apply")) {
+      // Pass 71: the adjustment confirms the magnitude and the reason before it
+      // lands, like every other destructive action in this console. A registered
+      // dialog listener owns EVERY dialog, so an unanswered confirm here would
+      // hang this test instead of being auto-dismissed.
+      d.accept();
     }
   });
   await row.locator("button", { hasText: "Adjust" }).click();

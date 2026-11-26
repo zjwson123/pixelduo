@@ -49,6 +49,18 @@ export interface PaymentWebhookEvent {
   // markers: a payload whose refunds are ALL already reversed is stale and
   // applies nothing. Undefined when the payload does not carry the list.
   refundIds?: string[];
+  // For "refunded": the refunds the cumulative total above includes, each with
+  // its OWN amount (Stripe's charge.refunds.data `amount`). Pass 71 — the
+  // `refundIds` guard above recognises only a payload whose refunds were ALL
+  // reversed, so a MIXED snapshot (one refund succeeded, a sibling failed after
+  // the snapshot was built) fell through to the GREATEST() write with the stale
+  // total: every credit and the paid tier revoked for money the merchant kept
+  // (probed through this route with a signed body). With the amounts, the route
+  // subtracts exactly the reversed refunds from the snapshot and keeps the
+  // money that really came back. Undefined when the payload carries no
+  // per-refund amounts (a relay-shaped delivery); the route then ignores a
+  // snapshot naming ANY reversed refund.
+  refundEntries?: Array<{ id: string; amountUsd: number; status?: string }>;
   // For "refunded": the amount of a chargeback/dispute, also cumulative per
   // charge (Stripe's charge.dispute.created). It lives in its own order column
   // because a dispute is not a refund: Stripe reports refunds cumulatively and

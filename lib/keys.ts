@@ -304,7 +304,7 @@ export function getVisionConfig(): VisionConfig | null {
   // api.modelverse.cn. A partial override is a misconfiguration, not a request
   // to mix sources: return null so the worker's boot gate reports it.
   if (envKey || envBase) {
-    if (envKey && envBase) return { baseUrl: envBase, apiKey: envKey, model };
+    if (envKey && envBase) return { baseUrl: trimBase(envBase), apiKey: envKey, model };
     return null;
   }
   const cfg = loadCcProxyConfig();
@@ -314,8 +314,23 @@ export function getVisionConfig(): VisionConfig | null {
   if (!baseUrl || !apiKey) return null;
   const fallbackModel = (cfg?.vision_fallback as { model?: string } | undefined)?.model ?? "gpt-5.6-luna";
   return {
-    baseUrl,
+    baseUrl: trimBase(baseUrl),
     apiKey,
     model: model || fallbackModel,
   };
+}
+
+// One trailing-slash rule for a base a caller appends a PATH to (pass 71).
+//
+// `moderateWithVision` builds `${baseUrl}/chat/completions`, and this value is
+// pasted from a provider's docs where `https://host/v1/` is a normal spelling.
+// Untrimmed, every request went to `…/v1//chat/completions`: a gateway that does
+// not normalize the doubled slash answers 404, `moderateWithVision` reports the
+// audit as unavailable, and the worker refuses delivery AFTER the provider was
+// billed — i.e. every image job in the deployment is paid for, refused and
+// refunded, while the boot gate passes because the config resolves. Every
+// sibling source in this file already normalizes (deepSeekSource's trim,
+// modelverseSource's `/\/+$/` strip); this is the one that did not.
+function trimBase(value: string): string {
+  return value.trim().replace(/\/+$/, "");
 }

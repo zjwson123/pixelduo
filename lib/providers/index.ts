@@ -88,7 +88,26 @@ async function readTextCapped(res: Response, maxBytes = MAX_PROVIDER_RESPONSE_BY
 }
 
 async function readJsonCapped(res: Response, maxBytes = MAX_PROVIDER_RESPONSE_BYTES): Promise<Record<string, unknown>> {
-  return JSON.parse(await readTextCapped(res, maxBytes)) as Record<string, unknown>;
+  const parsed = JSON.parse(await readTextCapped(res, maxBytes)) as unknown;
+  // A JSON PRIMITIVE is not a response body (pass 71). Every caller reads
+  // fields off the result, so a 2xx whose body is `null` — a gateway's empty
+  // 200, a truncated proxy answer, a relay that models a failed job as `null` —
+  // threw a raw TypeError from `data.data`. That message matched no permanent
+  // branch in isPermanentProviderError, so the attempt was classified
+  // TRANSIENT and retried up to maxAttempts (probed: `new Response("null",
+  // {status: 200})` → "Cannot read properties of null (reading 'data')" →
+  // transient), re-POSTing the billed create for output nobody could parse. The
+  // sibling shapes (`[]`, `{}`, `123`, `"ok"`) already fail downstream as
+  // permanent ("returned no b64_json"), so only `null` was actually open — the
+  // refusal here makes all of them one intentional, classified message instead
+  // of a TypeError that depends on the reader's field access.
+  //
+  // Arrays still pass: a future endpoint may legitimately answer a list, and the
+  // call sites' own shape checks produce the specific permanent message.
+  if (parsed === null || typeof parsed !== "object") {
+    throw new Error(`provider returned no usable JSON body (${parsed === null ? "null" : typeof parsed})`);
+  }
+  return parsed as Record<string, unknown>;
 }
 
 // Inline a reference frame as a data URL whose declared type is the BYTES'.

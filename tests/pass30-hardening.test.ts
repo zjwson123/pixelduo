@@ -260,7 +260,12 @@ describe("pass 30 — the expiry mail matches the in-app banner's source list", 
     await sendExpiryReminders({ userId: user.id });
     const rows = await prisma.creditReminder.findMany({ where: { userId: user.id } });
     expect(rows.map((r) => r.daysBefore).sort()).toEqual([3, 3]);
-    expect(subjects.some((s) => s.includes("expire in 3 days"))).toBe(true);
+    // The CLAIM stays the 3-day bucket; the mail now names the MEASURED days
+    // (pass 71 — it used to announce the bucket, so a grant with 4.2 days left
+    // was mailed "in 7 days"). This fixture sits exactly on +2 days with no
+    // margin, so the measured value is 2 or 3 depending on which side of the
+    // clock the database is on; two days is what it says on a matched clock.
+    expect(subjects.some((s) => /expire in [23] days/.test(s))).toBe(true);
     _setMailerForTests(null);
   }, 30_000);
 });

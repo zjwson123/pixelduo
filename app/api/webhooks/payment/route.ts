@@ -457,14 +457,54 @@ export async function POST(req: Request) {
             // `:reversed` markers; when they are ALL reversed, the snapshot
             // describes money that came back and applies nothing. A payload
             // without the list (a relay-shaped delivery) keeps the old write.
+            //
+            // ALL-reversed is not the only stale shape (pass 71). A snapshot can
+            // name a refund that succeeded (R1) AND a sibling that failed after
+            // the snapshot was built (R2): `every()` is false, the stale total
+            // went in through GREATEST, and the promotion block then saw
+            // `returns == fullBasis` and revoked every credit and the paid tier
+            // — for a payment on which only R1 was actually returned (probed end
+            // to end through this route with a signed body). The payload's
+            // per-refund AMOUNTS make the mixed case correctable: subtract
+            // exactly the reversed refunds from the snapshot and keep the money
+            // that really came back, so an order is promoted only when what did
+            // NOT return leaves the total at the full basis or above.
             const reversedRefunds = new Set(
               (order.refundedAdjustments ?? [])
                 .filter((m) => m.endsWith(":reversed"))
                 .map((m) => m.slice(0, -":reversed".length)),
             );
             const payloadRefunds = event.refundIds ?? [];
+            const reversedInPayload = payloadRefunds.filter((id) => reversedRefunds.has(id));
+            // Precise when the payload carries amounts; otherwise the payload
+            // proves THAT a refund was reversed but not by how much, and the
+            // conservative reading is pass 67's — ignore the snapshot — because
+            // over-revoking takes credits from a customer who kept paying, while
+            // under-revoking leaves credits against returned money for the
+            // operator to claw back.
+            const corrected =
+              event.refundEntries !== undefined
+                ? Math.max(
+                    0,
+                    event.refundCumulativeUsd -
+                      event.refundEntries
+                        .filter(
+                          (r) =>
+                            reversedRefunds.has(r.id) &&
+                            // A snapshot that ALREADY lists the refund as
+                            // failed/canceled is describing a total Stripe has
+                            // reduced: subtracting it again would under-count the
+                            // money that really came back.
+                            r.status !== "failed" &&
+                            r.status !== "canceled",
+                        )
+                        .reduce((sum, r) => sum + r.amountUsd, 0),
+                  )
+                : undefined;
             const staleSnapshot =
-              payloadRefunds.length > 0 && payloadRefunds.every((id) => reversedRefunds.has(id));
+              payloadRefunds.length > 0 &&
+              (payloadRefunds.every((id) => reversedRefunds.has(id)) ||
+                (reversedInPayload.length > 0 && corrected === undefined));
             if (staleSnapshot) {
               // The provider's `fullRefund` flag describes the same stale
               // snapshot — drop it with the write. The promotion block below
@@ -472,12 +512,24 @@ export async function POST(req: Request) {
               // so a genuine later full return is not hidden.
               fullRefund = false;
               console.warn(
-                `[webhook] ignoring a stale charge.refunded snapshot for order ${order.id}: every refund it names (${payloadRefunds.join(", ")}) was recorded as reversed`,
+                `[webhook] ignoring a stale charge.refunded snapshot for order ${order.id}: ${reversedInPayload.length} of the ${payloadRefunds.length} refund(s) it names (${payloadRefunds.join(", ")}) were recorded as reversed${
+                  corrected === undefined ? ", and the payload carries no per-refund amounts to correct it" : ""
+                }`,
               );
             } else {
+              const snapshotUsd = corrected ?? event.refundCumulativeUsd;
+              // The provider's `fullRefund` describes the UNCORRECTED total: a
+              // snapshot that read as "full" only because it counted reversed
+              // money must not promote the order on the flag alone.
+              if (corrected !== undefined && corrected < event.refundCumulativeUsd) {
+                fullRefund = false;
+                console.warn(
+                  `[webhook] charge.refunded for order ${order.id} names ${reversedInPayload.length} reversed refund(s); applying ${snapshotUsd.toFixed(2)} instead of the snapshot's ${event.refundCumulativeUsd.toFixed(2)}`,
+                );
+              }
               await tx.$queryRaw(Prisma.sql`
                 UPDATE "Order"
-                SET "refundedAmountUsd" = GREATEST("refundedAmountUsd", ${event.refundCumulativeUsd})
+                SET "refundedAmountUsd" = GREATEST("refundedAmountUsd", ${snapshotUsd})
                 WHERE id = ${order.id}
               `);
             }

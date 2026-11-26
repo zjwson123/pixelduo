@@ -95,7 +95,16 @@ export async function sendExpiryReminders(scope?: { userId?: string }): Promise<
       continue;
     }
     try {
-      await sendCreditExpiryEmail(email, bucket, g.remaining);
+      // The MEASURED days, not the bucket (pass 71). `bucket` is the dedupe
+      // window (1/3/7) and the claim key below must keep using it, but the mail
+      // told the customer the bucket's number: a grant with 4.2 days left
+      // measured as 5, matched bucket 7, and was announced as "expire in 7
+      // days" — wrong by up to three days on the one message whose whole point
+      // is urgency. Reachable whenever the daily maintenance pass is skipped or
+      // fails (a restart, a failed run, a host asleep): the 7-day bucket is then
+      // unclaimed and the next pass announces the 7-bucket label to a grant that
+      // is nearer. tests/reminder.test.ts pins the measured number now.
+      await sendCreditExpiryEmail(email, daysLeft, g.remaining);
       sent += 1;
     } catch (e) {
       await prisma.creditReminder

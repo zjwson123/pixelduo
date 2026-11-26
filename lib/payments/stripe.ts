@@ -192,6 +192,10 @@ export class StripeProvider implements PaymentProvider {
       // subtracted the amount) must not put the money back into the accumulator
       // and revoke the customer's credits.
       let refundIds: string[] | undefined;
+      // The same list with each refund's OWN amount (pass 71 — see the type).
+      // The route subtracts the reversed ones from the snapshot's cumulative
+      // total instead of having to ignore the whole snapshot.
+      let refundEntries: Array<{ id: string; amountUsd: number; status?: string }> | undefined;
       let disputedAmountUsd: number | undefined;
       // The dispute's id travels with the counted amount so the route can check
       // it against the reinstatement markers: Stripe does not guarantee event
@@ -237,14 +241,31 @@ export class StripeProvider implements PaymentProvider {
         // order as an absolute total (not a delta) so a later dispute of the
         // unrefunded remainder can be added to it.
         if (typeof obj.amount_refunded === "number") refundCumulativeUsd = obj.amount_refunded / 100;
-        // The charge carries the refunds it includes; their ids are what let
-        // the route tell a current snapshot from a stale one (pass 67). Absent
-        // on relay-shaped payloads, which keeps the old behaviour.
-        const refundList = (obj as { refunds?: { data?: Array<{ id?: unknown }> } }).refunds?.data;
+        // The charge carries the refunds it includes; their ids (and their own
+        // amounts, pass 71) are what let the route tell a current snapshot from
+        // a stale one. Absent on relay-shaped payloads, which keeps the old
+        // behaviour.
+        const refundList = (
+          obj as { refunds?: { data?: Array<{ id?: unknown; amount?: unknown; status?: unknown }> } }
+        ).refunds?.data;
         if (Array.isArray(refundList)) {
           refundIds = refundList
             .map((r) => (typeof r?.id === "string" ? r.id : null))
             .filter((id): id is string => id !== null);
+          // Kept only when EVERY entry reports one: a partial list of amounts
+          // must not be used to subtract, or the snapshot would be corrected by
+          // less than the reversed money and still over-revoke. The refund's own
+          // `status` travels with it: a snapshot that ALREADY lists a refund as
+          // failed describes a total Stripe has already reduced, so the route
+          // must not subtract it a second time.
+          const entries = refundList.map((r) => ({
+            id: typeof r?.id === "string" ? r.id : "",
+            amountUsd: typeof r?.amount === "number" ? r.amount / 100 : Number.NaN,
+            status: typeof r?.status === "string" ? r.status : undefined,
+          }));
+          if (entries.length > 0 && entries.every((e) => e.id !== "" && Number.isFinite(e.amountUsd))) {
+            refundEntries = entries;
+          }
         }
         fullRefund =
           typeof obj.amount_refunded === "number" && typeof obj.amount === "number"
@@ -372,6 +393,7 @@ export class StripeProvider implements PaymentProvider {
         refundAdjustmentId,
         refundCumulativeUsd,
         refundIds,
+        refundEntries,
         disputedAmountUsd,
         disputeId,
         reinstatedAmountUsd,

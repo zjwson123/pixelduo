@@ -219,7 +219,6 @@ export async function processImageJob(job: {
     }));
 
     // Free-tier outputs from providers without a built-in mark get our badge
-    let bakedAny = false;
     if (isFree) {
       for (const img of images) {
         if (getModel(img.model)?.builtInWatermark) continue;
@@ -252,16 +251,21 @@ export async function processImageJob(job: {
         // moderation detector) reads.
         await getStorage().put(img.key, marked.buf, storeContentType(marked.buf, "image/png"));
         img.baked = true;
-        bakedAny = true;
+        // Persist the flag BEFORE the next image is touched (pass 71). The flags
+        // used to be written once after the loop, so a throw at image k — a
+        // bucket 5xx on the next put, `watermark: image missing from storage`, a
+        // mixed-format batch where bakeWatermark refuses one payload — discarded
+        // the flags of images 1..k-1, whose bytes on disk were ALREADY badged.
+        // The retry then re-composited the badge onto the badge and re-encoded
+        // an already-lossy JPEG/WebP over its only copy: exactly the harm the
+        // flag was added to prevent (see the note above). One extra UPDATE per
+        // badged image is nothing next to that.
+        //
+        // Best-effort, like the batched write this replaces: a refused write
+        // means the job left the queue, and completeJob's CAS decides delivery.
+        await checkpointJobProgress(job.id, images, workerId).catch(() => undefined);
       }
     }
-    // Persist the flags so the next attempt skips what this one badged. The keys
-    // are already in the checkpoint from before the bake (that ordering is what
-    // keeps an abandoned job's objects reclaimable), so a refused write here only
-    // means the job left the queue — completeJob's CAS is what decides delivery,
-    // and re-baking on a later attempt is what this write exists to prevent, not
-    // something it must be allowed to fail the job over.
-    if (bakedAny) await checkpointJobProgress(job.id, images, workerId).catch(() => undefined);
 
     // Sequential, not Promise.all: each in-process audit holds the image
     // buffer plus its base64 encoding plus the JSON body at once.

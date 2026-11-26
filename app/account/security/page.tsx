@@ -24,6 +24,11 @@ export default function SecurityPage() {
   const [password, setPassword] = useState("");
   const [setupPassword, setSetupPassword] = useState("");
   const [signedOut, setSignedOut] = useState(false);
+  // The enrollment was already complete when this page's confirm arrived (a
+  // concurrent tab, or an earlier confirmation whose response was lost) — see
+  // confirm(). The route answers `alreadyEnabled` WITHOUT backup codes, so the
+  // page needs its own state instead of falling through to the enable form.
+  const [alreadyEnabled, setAlreadyEnabled] = useState(false);
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
   const [busy, setBusy] = useState(false);
@@ -96,6 +101,20 @@ export default function SecurityPage() {
       }
       return;
     }
+    // The enrollment CAS was lost: another tab (or an earlier confirmation
+    // whose response never arrived) already enabled it. This answer carries NO
+    // backup codes, and the codes are returned exactly once — so the page used
+    // to set `backupCodes` to undefined, drop `setup`, and fall through to the
+    // "Confirm your password to start" form: the user was told nothing, believed
+    // enrollment had failed, and never learned that their recovery codes had
+    // been issued (and lost). Say what happened instead.
+    if (data.alreadyEnabled) {
+      setSetup(null);
+      setCode("");
+      setAlreadyEnabled(true);
+      setSignedOut(true); // enabling bumped the session version
+      return;
+    }
     setBackupCodes(data.backupCodes);
     setSetup(null);
     setCode("");
@@ -151,6 +170,25 @@ export default function SecurityPage() {
                 Sign in again with your password and a code from your authenticator.
               </p>
             )}
+            <Link className="btn btn-dark btn-block" href="/login" style={{ display: "block", textAlign: "center", padding: "10px 0", marginTop: 10 }}>
+              Go to sign-in
+            </Link>
+          </div>
+        ) : alreadyEnabled ? (
+          <div>
+            <h2 style={{ fontSize: 17, marginTop: 18 }}>Two-factor authentication is already enabled</h2>
+            <p className="sub">
+              It was enabled by another tab, or by an earlier confirmation whose response did not reach this page — the
+              account is protected and your authenticator app works now.
+            </p>
+            <p className="sub" style={{ color: "#e8590c" }}>
+              The ten backup codes are shown only once, when 2FA is enabled, and that response was already spent. If you
+              did not save them, ask the operator to reset 2FA for this account before you lose the authenticator.
+            </p>
+            <p className="sub">
+              Enabling 2FA signed out every session, including this one — sign in again with your password and a code
+              from your authenticator.
+            </p>
             <Link className="btn btn-dark btn-block" href="/login" style={{ display: "block", textAlign: "center", padding: "10px 0", marginTop: 10 }}>
               Go to sign-in
             </Link>

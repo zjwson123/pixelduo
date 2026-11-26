@@ -36,6 +36,36 @@ function spacedWord(word: string): string {
     .join(SEP);
 }
 
+// The two halves of the cross-language minor rule below (pass 71).
+//
+// Subjects are the spellings a request for a minor is written with; the English
+// list needs its own leading/trailing word boundaries (`\b` cannot be applied to
+// the Chinese alternation — CJK characters are non-word to `\w`, so a boundary
+// before 儿 does not exist), and `preteen`/`schoolgirl`/`schoolboy` are here
+// rather than in the global list for the same reason `teen` is: the word alone
+// is an ordinary fashion/age descriptor, and it is the PAIRING with an explicit
+// term that is the violation.
+const MINOR_SUBJECTS_EN =
+  "child(?:ren)?|kids?|minors?|underage(?:d)?|preteens?|schoolgirls?|schoolboys?|" +
+  "teens?|teenagers?|toddlers?|infants?|loli(?:s)?|shota(?:s)?|jailbait";
+const MINOR_SUBJECTS_ZH =
+  "儿童|兒童|幼女|幼童|幼儿|幼兒|未成年|小学生|小學生|中学生|中學生|萝莉|蘿莉|正太|女童|小孩|孩童";
+
+// Explicit terms that are NOT globally blocked. The global adult rule already
+// refuses nude/naked/porn/undress/nudify/nsfw/explicit/rape wherever they appear,
+// so listing those again would only change which reason is reported; these are
+// the words it deliberately allows on their own (a topless car, a lingerie
+// fashion shoot, a "stripped" paint job) and must refuse next to a minor.
+// `stripped` is exact — a "striped shirt" is not this; `bare` needs its object —
+// "bare foot" is ordinary. The Chinese genital nouns are here because the
+// minors rule above enumerates only 色情/性交/…/裸/性 and 私处/下体/生殖器/阴部
+// walked past it (probed).
+const MINOR_TERMS_EN =
+  "topless|unclothed|undressed|stripped|naked|nude|genitals?|genitalia|" +
+  "private[\\s._*-]*parts?|crotch|bare[\\s._*-]*(?:chest|breasts?|bottom|torso)|" +
+  "(?:no|without)[\\s._*-]*(?:any[\\s._*-]*)?clothes|birthday[\\s._*-]*suit";
+const MINOR_TERMS_ZH = "裸(?!妆|色|眼|足|感|粉)|性|私处|私處|下体|下體|生殖器|阴部|陰部";
+
 const BLOCKED: Array<{ re: RegExp; reason: string }> = [
   // Inflections, not just the dictionary spellings (pass 51): the old
   // alternation matched `nude`/`porn` but not `nudes`/`pornos`, and `\b` after
@@ -168,6 +198,59 @@ const BLOCKED: Array<{ re: RegExp; reason: string }> = [
     // not the make-up/colour/eye/barefoot compound: `少女 裸` and `少女 裸体`
     // are blocked, `少女 裸妆` is not.
     re: /(少女|少年)[\s\S]{0,8}(色情|性交|性爱|性愛|做爱|做愛|强奸|強姦|性侵|猥亵|猥褻|裸照|裸体|裸體|裸露|裸(?!妆|色|眼|足))/,
+    reason: "child-safety",
+  },
+  // A minor subject paired with an explicit term the GLOBAL adult rule leaves
+  // alone, in either language and in either word order (pass 71).
+  //
+  // Every subject rule above pairs its subject with terms from its OWN language,
+  // and the adult list is deliberately narrow so ordinary fashion prompts
+  // survive (`topless`, `lingerie`, `bikini` are named there as allowed on their
+  // own). The intersection — a minor AND one of those words — fell in the crack
+  // between the two lists, and the crack was wide. Probed on the pass-70 code,
+  // every one of these returned ok:
+  //
+  //   "topless child" / "a topless child on a beach"          (reverse order)
+  //   "child topless" / "child unclothed" / "child stripped"
+  //   "child without clothes" / "child's private parts" / "child genitals"
+  //   "child bare chest" / "kids topless" / "teen topless" / "minor topless"
+  //   "child 裸" / "kids 裸" / "ch1ld 裸" / "child 性"          (mixed language)
+  //   "儿童 topless" / "儿童 unclothed" / "儿童 stripped"        (mixed language)
+  //   "儿童 私处" / "儿童 下体" / "儿童 生殖器" / "儿童 阴部"
+  //
+  // while `儿童 裸` and `child nude` were blocked — the same asymmetry pass 70
+  // fixed for 萝莉/正太, one level up. On the video lane this list is the ONLY
+  // gate (there is no output audit), so a prompt any reader takes as sexual
+  // content involving a minor reached the provider and was delivered. The
+  // product also encourages mixed prompts (Chinese UI, English prompt target,
+  // the assistant translates), so "child 裸" is a shape a real user writes, not
+  // an exotic evasion.
+  //
+  // Three arms in one rule. The windows differ for the reason the Chinese rules
+  // already use eight: Chinese packs a term into a character or two, while
+  // English needs room for "without any clothes". 裸 keeps the compound
+  // lookahead (`裸妆`/`裸色`/`裸眼`/`裸足`/`裸感`/`裸粉` are ordinary beauty and
+  // colour prompts), and 性 stays subject-AFTER only — 个性/性格/属性 are
+  // ordinary words, which is why no arm matches a term that precedes a Chinese
+  // subject.
+  //
+  // 少女/少年 get their own arm with the ENGLISH terms only (pass 71): the same
+  // gap applied to them — `少女 topless`, `少年 unclothed`, `少女 private parts`
+  // all returned ok — but the bare 裸/性 singles that rule deliberately excludes
+  // (裸妆, 个性) must stay out of it, and they do. 少年 matches inside 青少年,
+  // which is what a request for a teenager is written as.
+  //
+  // The reverse arm's twelve characters are what keep a prompt that merely
+  // mentions both apart: "one topless woman and a child playing" puts thirteen
+  // between them and stays allowed (pinned by a test).
+  {
+    re: new RegExp(
+      `(?:\\b(?:${MINOR_SUBJECTS_EN})\\b[\\s\\S]{0,12}(?:\\b(?:${MINOR_TERMS_EN})\\b|${MINOR_TERMS_ZH})` +
+        `|(?:${MINOR_SUBJECTS_ZH})[\\s\\S]{0,8}(?:\\b(?:${MINOR_TERMS_EN})\\b|${MINOR_TERMS_ZH})` +
+        `|(?:少女|少年)[\\s\\S]{0,8}\\b(?:${MINOR_TERMS_EN})\\b` +
+        `|(?:\\b(?:${MINOR_TERMS_EN})\\b[\\s\\S]{0,12}(?:\\b(?:${MINOR_SUBJECTS_EN})\\b|(?:少女|少年))))`,
+      "i",
+    ),
     reason: "child-safety",
   },
   {

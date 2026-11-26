@@ -180,6 +180,11 @@ export default function AdminPage() {
     const delta = Number(raw);
     if (!Number.isInteger(delta) || delta === 0) return;
     const note = prompt("Reason (shown in the user's ledger):") ?? "admin adjustment";
+    // Confirm the magnitude before it lands (pass 71). Every other destructive
+    // action in this console asks first; this one moves up to 1,000,000 credits
+    // on a mistyped zero, and a lost response leaves the operator unsure
+    // whether to repeat it.
+    if (!confirm(`Apply ${delta > 0 ? "+" : ""}${delta} credits to ${u.email}?\nReason: ${note}`)) return;
     setErr("");
     try {
       const data = await api<{ credits: number }>(`/api/admin/users/${u.id}/credits`, {
@@ -194,6 +199,17 @@ export default function AdminPage() {
   };
 
   const toggleRole = async (u: AdminUser) => {
+    // A single unconfirmed click used to promote a verified account to full
+    // operator — mint credits to any account, delete accounts and images, read
+    // every report — from a button sitting in the same dense row as Adjust and
+    // Delete (pass 71). Demotion is the same click in reverse; ask in both
+    // directions.
+    const next = u.role === "admin" ? "user" : "admin";
+    const question =
+      next === "admin"
+        ? `Promote ${u.email} to operator?\n\nOperators can mint credits to any account, delete accounts and images, and read every report.`
+        : `Demote ${u.email} from operator?`;
+    if (!confirm(question)) return;
     setErr("");
     try {
       await api(`/api/admin/users/${u.id}/role`, {

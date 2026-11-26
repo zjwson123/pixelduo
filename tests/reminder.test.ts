@@ -60,8 +60,11 @@ describe("credit expiry reminders", () => {
 
     await sweep();
     expect(mine()).toHaveLength(1);
-    expect(mine()[0].subject).toContain("expire in 3 days");
-    expect(mine()[0].subject).not.toContain("400"); // body not subject; subject carries bucket only
+    // The MEASURED days, not the bucket (pass 71): the claim key stays 3 (the
+    // reminder row below asserts it), but a grant with 1.96 days left is an
+    // honest "in 2 days", not the bucket's "in 3".
+    expect(mine()[0].subject).toContain("expire in 2 days");
+    expect(mine()[0].subject).not.toContain("400"); // body not subject
 
     // Same run again → no duplicate TO THIS USER, proven by the claim row.
     await sweep();
